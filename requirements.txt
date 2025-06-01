@@ -1,7 +1,6 @@
-streamlit
-pandas
-numpy
-yfinance
-scikit-learn
-tensorflow
-# (이하 앱 코드에서 import 한 나머지 패키지들도 한 줄씩 나열)
+pandas>=1.3.0
+numpy>=1.21.0
+yfinance>=0.2.4
+statsmodels>=0.12.0
+requests>=2.26.0
+streamlit>=1.10.0
