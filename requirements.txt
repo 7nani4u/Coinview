@@ -1,0 +1,7 @@
+streamlit
+pandas
+numpy
+yfinance
+scikit-learn
+tensorflow
+# (이하 앱 코드에서 import 한 나머지 패키지들도 한 줄씩 나열)
