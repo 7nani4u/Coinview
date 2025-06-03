@@ -22,48 +22,48 @@ st.set_page_config(
 # 2) CSS: 단락 제목의 반응형 폰트 크기 정의 및 패턴 설명 간격 조정
 # ────────────────────────────────────────────────────────────────────────
 st.markdown(
-    """
-    <style>
-    /* 모든 단락 제목에 동일하게 적용할 클래스 */
+"""
+<style>
+/* 모든 단락 제목에 동일하게 적용할 클래스 */
+.section-title {
+    font-size: 32px;
+    font-weight: bold;
+    margin-top: 24px;
+    margin-bottom: 12px;
+}
+/* 화면 너비가 600px 이하(모바일)일 때 폰트 크기를 줄임 */
+@media (max-width: 600px) {
     .section-title {
-        font-size: 32px;
-        font-weight: bold;
-        margin-top: 24px;
-        margin-bottom: 12px;
+        font-size: 24px;
     }
-    /* 화면 너비가 600px 이하(모바일)일 때 폰트 크기를 줄임 */
-    @media (max-width: 600px) {
-        .section-title {
-            font-size: 24px;
-        }
+}
+/* 화면 너비가 1200px 이상(데스크톱)일 때 폰트 크기를 더 키울 수 있음 */
+@media (min-width: 1200px) {
+    .section-title {
+        font-size: 36px;
     }
-    /* 화면 너비가 1200px 이상(데스크톱)일 때 폰트 크기를 더 키울 수 있음 */
-    @media (min-width: 1200px) {
-        .section-title {
-            font-size: 36px;
-        }
-    }
-    /* “캔들스틱 패턴 감지 및 해석” 내 텍스트 줄 간격 및 여백 최소화 */
-    .pattern-compact {
-        margin: 0;
-        line-height: 1.4;
-    }
-    /* 외부 링크 스타일: 한 줄에 양쪽 정렬 */
-    .external-links {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-top: 12px;
-        margin-bottom: 24px;
-    }
-    .external-links a {
-        font-weight: bold;
-        text-decoration: none;
-        color: #3498DB;
-        margin: 0 8px; /* 간격 조정 */
-    }
-    </style>
-    """,
+}
+/* "캔들스틱 패턴 감지 및 해석" 내 텍스트 줄 간격 및 여백 최소화 */
+.pattern-compact {
+    margin: 0;
+    line-height: 1.4;
+}
+/* 외부 링크 스타일: 한 줄에 양쪽 정렬 */
+.external-links {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 12px;
+    margin-bottom: 24px;
+}
+.external-links a {
+    font-weight: bold;
+    text-decoration: none;
+    color: #3498DB;
+    margin: 0 8px; /* 간격 조정 */
+}
+</style>
+""",
     unsafe_allow_html=True
 )
 
@@ -545,7 +545,7 @@ if bt:
         if cross_signal == 1:
             card3_bg, card3_icon, card3_text = "#2ECC71", "🔀", "EMA 골든 크로스"
         elif cross_signal == -1:
-            card3_bg, card3_icon, card3_text = "#2ECC71", "🔀", "EMA 데드 크로스"
+            card3_bg, card3_icon, card3_text = "#E74C3C", "🔀", "EMA 데드 크로스"
         else:
             if last_macd < prev_macd:
                 card3_bg, card3_icon, card3_text = "#E74C3C", "📉", "MACD 감소세"
