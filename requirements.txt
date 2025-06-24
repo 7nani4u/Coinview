@@ -1,13 +1,7 @@
- pandas
- numpy
- yfinance
- streamlit
--# (statsmodels와 scipy가 빠져 있었을 경우)
--statsmodels>=0.14.4
--
--sc
--ipy
-- # (틀어쓰기 주의: 아래 두 줄을 정확히 추가)
-+statsmodels>=0.14.4
-+scipy>=1.9.3,<2.0.0      # SciPy 2.0 이상에서는 _lazywhere가 제거되어서 하위 버전으로 고정
- requests
+pandas
+numpy
+yfinance
+streamlit
+requests
+statsmodels>=0.14.4
+scipy>=1.9.3,<2.0.0
