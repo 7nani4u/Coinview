@@ -1,7 +1,13 @@
+# requirements.txt
 pandas
 numpy
 yfinance
 streamlit
 requests
-statsmodels>=0.14.4
-scipy>=1.9.3,<2.0.0
+
+# SciPy를 1.10.4로 완전 고정 (1.x 마지막 안정 릴리스)
+scipy==1.10.4
+
+# statsmodels의 GitHub main 브랜치에서 직접 설치
+# → SciPy 2.x private API 의존성을 제거한 최신 변경사항 포함
+statsmodels @ git+https://github.com/statsmodels/statsmodels.git@main#egg=statsmodels
