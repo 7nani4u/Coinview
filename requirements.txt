@@ -4,6 +4,6 @@ numpy>=1.21.0
 yfinance>=0.2.4
 requests>=2.26.0
 streamlit>=1.10.0
-scipy==1.10.4
+scipy==1.10.1
 statsmodels @ git+https://github.com/statsmodels/statsmodels.git@main#egg=statsmodels
 # force rebuild cache
