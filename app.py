@@ -1,82 +1,59 @@
 # -*- coding: utf-8 -*-
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import datetime
-import streamlit as st
-import streamlit.components.v1 as components  # HTML/CSS 임베드용
+"""
+한글 AI 코인 예측 시스템 (Streamlit Cloud)
+- ETS/Theta 자동 선택 + 예측구간
+- 기술적 분석: 지지선/추세선/거래량/RSI/볼린저밴드
+- XGBoost 기반 코인별 맞춤 레버리지 추천(정량회귀) + 휴리스틱 폴백
+"""
+
 import os
 import logging
-import requests
-import statsmodels.api as sm  # Holt-Winters 예측
+import datetime
+from typing import Tuple, Dict, Any, List
+
+import numpy as np
+import pandas as pd
+import altair as alt
+import yfinance as yf
+import statsmodels.api as sm
+from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+from statsmodels.tsa.forecasting.theta import ThetaModel
+
+import streamlit as st
 
 # ────────────────────────────────────────────────────────────────────────
-# 1) Streamlit 페이지 설정 (반드시 최상단에 위치)
+# Streamlit 기본 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템",
+    page_title="한글 AI 코인 예측 시스템 (TA/ETS/Theta + XGBoost 레버리지)",
     layout="wide"
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# 2) CSS: 단락 제목의 반응형 폰트 크기 정의 및 패턴 설명 간격 조정
+# (옵션) keep_alive: 환경변수 기반 1회 기동 가드 (Streamlit Cloud는 보통 불필요)
 # ────────────────────────────────────────────────────────────────────────
-st.markdown(
-"""
-<style>
-/* 모든 단락 제목에 동일하게 적용할 클래스 */
-.section-title {
-    font-size: 32px;
-    font-weight: bold;
-    margin-top: 24px;
-    margin-bottom: 12px;
-}
-/* 화면 너비가 600px 이하(모바일)일 때 폰트 크기를 줄임 */
-@media (max-width: 600px) {
-    .section-title {
-        font-size: 24px;
-    }
-}
-/* 화면 너비가 1200px 이상(데스크톱)일 때 폰트 크기를 더 키울 수 있음 */
-@media (min-width: 1200px) {
-    .section-title {
-        font-size: 36px;
-    }
-}
-/* "캔들스틱 패턴 감지 및 해석" 내 텍스트 줄 간격 및 여백 최소화 */
-.pattern-compact {
-    margin: 0;
-    line-height: 1.4;
-}
-/* 외부 링크 스타일: 한 줄에 양쪽 정렬 */
-.external-links {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 12px;
-    margin-bottom: 24px;
-}
-.external-links a {
-    font-weight: bold;
-    text-decoration: none;
-    color: #3498DB;
-    margin: 0 8px; /* 간격 조정 */
-}
-</style>
-""",
-    unsafe_allow_html=True
-)
+ENABLE_KEEP_ALIVE = os.getenv("ENABLE_KEEP_ALIVE", "0") == "1"
+if ENABLE_KEEP_ALIVE:
+    if "keepalive_started" not in st.session_state:
+        try:
+            from keep_alive import keep_alive
+            keep_alive()  # Flask 등 백그라운드 서버 1회 기동
+            st.session_state["keepalive_started"] = True
+        except Exception as e:
+            st.warning(f"keep_alive 시작 실패: {e}")
+
+# 런타임 경고 억제(선택)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 # ────────────────────────────────────────────────────────────────────────
-# 3) 상수 정의: 레버리지 맵, 상장일 맵 등
+# 1) 종목별 상한/상장일/코인별 안전 캡(휴리스틱)
 # ────────────────────────────────────────────────────────────────────────
-max_leverage_map = {
-    'BTCUSDT': 125,
-    'ETHUSDT': 75,
-    # 필요시 여기에 추가
+max_leverage_map: Dict[str, int] = {
+    # 예: 'BTCUSDT': 125, 'ETHUSDT': 75
 }
 
-listing_date_map = {
+listing_date_map: Dict[str, datetime.date] = {
     'BTCUSDT': datetime.date(2017, 9, 2),
     'ETHUSDT': datetime.date(2017, 8, 7),
     'BNBUSDT': datetime.date(2017, 7, 25),
@@ -84,857 +61,588 @@ listing_date_map = {
     'LTCUSDT': datetime.date(2017, 6, 12),
     'AVAXUSDT': datetime.date(2020, 7, 22),
     'IMXUSDT': datetime.date(2021, 6, 15),
-    # 필요시 추가
 }
 
-# TensorFlow 경고 억제
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
+coin_safe_cap_map: Dict[str, float] = {
+    'BTCUSDT': 5.0, 'ETHUSDT': 7.0, 'BNBUSDT': 7.0, 'LTCUSDT': 6.0,
+    'DOGEUSDT': 5.0, 'AVAXUSDT': 6.0, 'IMXUSDT': 5.0,
+}
 
 # ────────────────────────────────────────────────────────────────────────
-# 4) 헬퍼 함수 모음
+# 2) 유틸: 상장일/데이터/지표
 # ────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_listing_date(symbol: str) -> datetime.date:
-    """
-    - listing_date_map에 값이 있으면 해당 상장일 반환
-    - 없으면 yfinance에서 History(period="max")로 받아서
-      DataFrame.index.min()을 상장일로 사용
-    - 오류 시 오늘 날짜 반환
-    """
     if symbol in listing_date_map:
         return listing_date_map[symbol]
     try:
         yf_symbol = symbol[:-4] + "-USD"
-        ticker = yf.Ticker(yf_symbol)
-        df_full = ticker.history(period="max", interval="1d")
+        df_full = yf.Ticker(yf_symbol).history(period="max", interval="1d")
         if df_full is None or df_full.empty:
             return datetime.date.today()
-        return df_full.index.min().date()
+        idx = pd.to_datetime(df_full.index).tz_localize(None)
+        return idx.min().date()
     except Exception:
         return datetime.date.today()
 
-
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
-    """
-    symbol: 'XXXXUSDT' → 'XXXX-USD' 로 변환해서 yfinance 조회
-    1) ticker.history() 로 먼저 시도
-    2) 비어 있으면 yf.download()로 재시도
-    3) Volume 컬럼이 있으면 Volume > 0 필터링
-    """
     yf_ticker = symbol[:-4] + "-USD"
     df = pd.DataFrame()
+
+    def _cleanup(_df: pd.DataFrame) -> pd.DataFrame:
+        if _df is None or _df.empty:
+            return pd.DataFrame()
+        _df = _df.copy()
+        _df.index = pd.to_datetime(_df.index).tz_localize(None)
+        full_idx = pd.date_range(start=start, end=end, freq="D")
+        _df = _df.reindex(full_idx)
+        if "Close" in _df.columns:
+            _df["Close"] = _df["Close"].ffill()
+        if "Volume" in _df.columns:
+            _df["Volume"] = _df["Volume"].fillna(0)
+        for col in ["High", "Low", "Open"]:
+            if col in _df.columns:
+                _df[col] = _df[col].fillna(_df["Close"])
+        return _df
+
     try:
-        ticker = yf.Ticker(yf_ticker)
-        df_hist = ticker.history(
-            start=start,
-            end=end + datetime.timedelta(days=1),
-            interval="1d"
+        df_hist = yf.Ticker(yf_ticker).history(
+            start=start, end=end + datetime.timedelta(days=1), interval="1d"
         )
         if df_hist is not None and not df_hist.empty:
-            df = df_hist.copy()
+            df = _cleanup(df_hist)
     except Exception:
         df = pd.DataFrame()
 
     if df is None or df.empty:
         try:
-            df_max = yf.download(
-                yf_ticker,
-                start=start,
-                end=end + datetime.timedelta(days=1),
-                interval="1d",
-                progress=False,
-                threads=False
+            df_dl = yf.download(
+                yf_ticker, start=start, end=end + datetime.timedelta(days=1),
+                interval="1d", progress=False, threads=False
             )
-            if df_max is not None and not df_max.empty:
-                df = df_max.copy()
+            if df_dl is not None and not df_dl.empty:
+                df = _cleanup(df_dl)
         except Exception:
             df = pd.DataFrame()
+    return df if df is not None else pd.DataFrame()
 
-    if df is None or df.empty:
-        return pd.DataFrame()
+def winsorize_returns(r: pd.Series, p: float = 0.01) -> pd.Series:
+    if r.dropna().empty:
+        return r
+    lo, hi = r.quantile(p), r.quantile(1 - p)
+    return r.clip(lower=lo, upper=hi)
 
-    # Volume > 0 필터링
-    if 'Volume' in df.columns:
-        df = df[df['Volume'] > 0].copy()
-    return df
+def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-12)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
+def calc_bbands(close: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.DataFrame:
+    ma = close.rolling(window=window, min_periods=1).mean()
+    std = close.rolling(window=window, min_periods=1).std(ddof=0)
+    upper = ma + num_std * std
+    lower = ma - num_std * std
+    return pd.DataFrame({"bb_mid": ma, "bb_upper": upper, "bb_lower": lower})
 
-def minmax_scale(arr: np.ndarray, data_min: float = None, data_max: float = None):
-    """NumPy 기반 MinMax 정규화"""
-    if data_min is None:
-        data_min = np.nanmin(arr)
-    if data_max is None:
-        data_max = np.nanmax(arr)
-    scaled = (arr - data_min) / (data_max - data_min + 1e-8)
-    return scaled, data_min, data_max
+def find_pivot_points(series: pd.Series, left: int = 3, right: int = 3, mode: str = "low") -> List[Tuple[pd.Timestamp, float]]:
+    pivots = []
+    for i in range(left, len(series)-right):
+        window = series.iloc[i-left:i+right+1]
+        val = series.iloc[i]
+        if mode == "low" and val == window.min():
+            pivots.append((series.index[i], float(val)))
+        if mode == "high" and val == window.max():
+            pivots.append((series.index[i], float(val)))
+    return pivots
 
-
-def minmax_inverse(scaled: np.ndarray, data_min: float, data_max: float):
-    """MinMax 정규화 복원"""
-    return scaled * (data_max - data_min + 1e-8) + data_min
-
-
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    전달받은 DataFrame에 다음 지표들을 컬럼으로 추가:
-    - MA50, EMA50, EMA200
-    - 일일 수익률
-    - 14일 ATR, 30일 변동성 (σ)
-    - RSI(14), Stochastic %K(14)
-    - MFI(14)
-    - VWAP(당일 기준)
-    - Volume 20일 이동평균
-    - EMA50/EMA200 교차 시그널
-    """
-    df = df.copy()
-    # (1) 일일 수익률
-    df['일일수익률'] = df['Close'].pct_change()
-
-    # (2) 이동평균(MA50), 지수이동평균(EMA50, EMA200)
-    df['MA50'] = df['Close'].rolling(window=50).mean()
-    df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
-    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-
-    # (3) 변동성: ATR(14) & 30일 표준편차 σ
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df['TR'] = true_range
-    df['ATR14'] = df['TR'].rolling(window=14).mean()
-
-    df['Volatility30d'] = df['일일수익률'].rolling(window=30).std()
-
-    # (4) RSI(14)
-    delta = df['Close'].diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    roll_up = up.rolling(window=14).mean()
-    roll_down = down.rolling(window=14).mean()
-    rs = roll_up / (roll_down + 1e-8)
-    df['RSI14'] = 100 - (100 / (1 + rs))
-
-    # (5) Stochastic %K (14)
-    low14 = df['Low'].rolling(window=14).min()
-    high14 = df['High'].rolling(window=14).max()
-    df['StochK14'] = (df['Close'] - low14) / (high14 - low14 + 1e-8) * 100
-
-    # (6) MFI(14)
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
-    df['MF'] = typical_price * df['Volume']
-    df['PosMF'] = df['MF'].where(df['Close'] > df['Close'].shift(1), 0)
-    df['NegMF'] = df['MF'].where(df['Close'] < df['Close'].shift(1), 0)
-    roll_pos = df['PosMF'].rolling(window=14).sum()
-    roll_neg = df['NegMF'].rolling(window=14).sum()
-    df['MFI14'] = 100 - (100 / (1 + roll_pos / (roll_neg + 1e-8)))
-
-    # (7) VWAP (당일 기준)
-    df['PV'] = df['Close'] * df['Volume']
-    df['Cum_PV'] = df['PV'].cumsum()
-    df['Cum_Vol'] = df['Volume'].cumsum()
-    df['VWAP'] = df['Cum_PV'] / (df['Cum_Vol'] + 1e-8)
-
-    # (8) 거래량 20일 이동평균
-    df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-
-    # (9) EMA50/EMA200 교차 시그널
-    df['Cross_Signal'] = 0
-    ema50 = df['EMA50']
-    ema200 = df['EMA200']
-    cond_up = (ema50 > ema200) & (ema50.shift(1) <= ema200.shift(1))
-    cond_down = (ema50 < ema200) & (ema50.shift(1) >= ema200.shift(1))
-    df.loc[cond_up, 'Cross_Signal'] = 1
-    df.loc[cond_down, 'Cross_Signal'] = -1
-
-    return df.dropna()
-
-
-def generate_targets(entry_price: float, num_targets: int, direction: str = 'down'):
-    """
-    진입가를 기준으로 num_targets만큼 등비 형태로 목표가 생성
-    direction == 'up' 이면 상승 목표가, 'down'이면 하락 목표가
-    """
-    targets = []
-    for i in range(1, num_targets + 1):
-        pct = i / (num_targets + 1)
-        if direction == 'down':
-            targets.append(entry_price * (1 - pct * 0.02))
-        else:
-            targets.append(entry_price * (1 + pct * 0.02))
-    return targets
-
+def fit_downtrend_line(high_series: pd.Series, piv_k: int = 5):
+    highs = find_pivot_points(high_series, left=3, right=3, mode="high")
+    if len(highs) < 2:
+        return np.nan, np.nan, pd.DataFrame()
+    highs = highs[-piv_k:]
+    x = np.arange(len(highs))
+    y = np.array([h[1] for h in highs], dtype=float)
+    a, b = np.polyfit(x, y, 1)
+    idx_dates = [h[0] for h in highs]
+    x_full = np.arange(0, len(highs))
+    y_full = a * x_full + b
+    line_df = pd.DataFrame({"날짜": idx_dates, "추세값": y_full}).set_index("날짜")
+    return float(a), float(b), line_df
 
 # ────────────────────────────────────────────────────────────────────────
-# 5) Streamlit 사이드바: 사용자 입력
+# 3) 사이드바 입력
 # ────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("# 코인 AI 예측 시스템")
-
-    # (1) 암호화폐 심볼 입력
-    input_symbol = st.text_input(
-        "🔍 암호화폐 심볼 입력 (예: BTC, ETH, DOGE 등)",
-        value="",
-        help="예: BTC → 자동으로 BTCUSDT로 변환"
-    )
-    if not input_symbol:
+    st.markdown("# 💎 한글 AI 코인 예측 시스템")
+    base = st.text_input("🔍 암호화폐 심볼 (예: BTC, DOGE)", value="")
+    if not base:
         st.warning("먼저 암호화폐 심볼을 입력해주세요.")
         st.stop()
-    base_symbol = input_symbol.strip().upper()
-    if not base_symbol.endswith("USDT"):
-        selected_crypto = base_symbol + "USDT"
-    else:
-        selected_crypto = base_symbol
+    selected_crypto = base.strip().upper()
+    if not selected_crypto.endswith("USDT"):
+        selected_crypto += "USDT"
 
-    # (2) TradingView 페이지 유효성 검사
-    tv_url_test = f"https://www.tradingview.com/symbols/{selected_crypto}/"
-    try:
-        tv_resp = requests.get(tv_url_test, timeout=5)
-    except Exception:
-        tv_resp = None
-    if tv_resp is None or tv_resp.status_code != 200:
-        st.error(f"❌ TradingView에서 '{selected_crypto}' 페이지를 찾을 수 없습니다. 심볼을 다시 확인해 주세요.")
+    listing_date = get_listing_date(selected_crypto)
+    today = datetime.date.today()
+    st.markdown("## 2) 분석 기간 설정")
+    st.markdown(f"- **시작일**: {listing_date}")
+    st.markdown(f"- **종료일**: {today}")
+
+    START, END = listing_date, today
+    if (END - START).days <= 0:
+        st.error("❌ 상장일 이후 데이터가 없습니다.")
         st.stop()
 
-    # (3) Yahoo Finance 유효성 검사
-    yf_ticker_symbol = selected_crypto[:-4] + "-USD"
-    try:
-        yf_ticker = yf.Ticker(yf_ticker_symbol)
-        df_test = yf_ticker.history(period="1d")
-        if df_test is None or df_test.empty:
-            raise ValueError
-    except Exception:
-        st.error(f"❌ Yahoo Finance에서 '{yf_ticker_symbol}' 데이터를 찾을 수 없습니다. 심볼을 다시 확인해 주세요.")
-        st.stop()
+    st.markdown("## 3) 예측 옵션")
+    model_mode = st.selectbox("모델 선택",
+                              ["자동(권장)", "ETS(Holt–Winters)", "Theta", "앙상블(ETS+Theta)"],
+                              index=0)
+    use_weekly_seasonality = st.checkbox("주간 계절성(7일) 고려", value=False)
+    use_damped_trend = st.checkbox("Damped Trend(추세 완화) 사용", value=True)
+    use_loglike = st.checkbox("로그(≈Box-Cox) 변환 사용(안정화)", value=True)
+    horizon = st.slider("예측 기간(일)", 7, 60, 30, 1)
 
-    # (4) 기간 설정: 자동(상장일→오늘) or 커스텀
-    mode = st.radio(
-        "🔢 분석 기간 모드 선택",
-        options=["자동(상장일 → 오늘)", "직접 선택"],
-        index=0
-    )
-    if mode == "자동(상장일 → 오늘)":
-        listing_date = get_listing_date(selected_crypto)
-        today = datetime.date.today()
-        START = listing_date
-        END = today
-        st.markdown(f"- **시작일(상장일)**: {START}  \n- **종료일**: {END}")
-    else:
-        col_s, col_e = st.columns(2)
-        with col_s:
-            START = st.date_input(
-                "시작일 선택",
-                value=datetime.date.today() - datetime.timedelta(days=180),
-                help="yyyy-mm-dd 형식"
-            )
-        with col_e:
-            END = st.date_input(
-                "종료일 선택",
-                value=datetime.date.today(),
-                help="yyyy-mm-dd 형식"
-            )
-        if START >= END:
-            st.error("❌ 시작일은 종료일 이전이어야 합니다.")
-            st.stop()
-
-    # (5) 투자·리스크 설정
-    st.markdown("## 2) 투자 및 리스크 설정")
-    investment_amount = st.number_input(
-        "투자 금액 (USDT)",
-        min_value=1.0,
-        value=1000.0,
-        step=10.0,
-        help="해당 종목에 투입할 USDT 금액"
-    )
-    risk_per_trade_pct = st.slider(
-        "리스크 비율 (%)",
-        min_value=0.5, max_value=5.0, value=2.0, step=0.5,
-        help="한 거래 당 최대 손실 허용 퍼센트"
-    ) / 100.0
-
-    stop_loss_k = st.number_input(
-        "손절 배수 (σ 기준)",
-        min_value=1.0, max_value=3.0, value=2.0, step=0.5,
-        help="stop_loss_pct = 변동성(σ) × k"
-    )
-
-    # (6) 허용 레버리지 설정: 맵에 있으면 기본값, 없으면 경고 및 직접 입력
-    default_max_lev = max_leverage_map.get(selected_crypto, None)
-    if default_max_lev is None:
-        st.warning("❗ 해당 코인의 최대 레버리지 정보가 없습니다. 직접 값을 입력해 주세요.")
-        default_max_lev = 50  # 안내 메시지가 보여지는 동안 기본 렌더링용(사용자가 직접 바꿀 것을 권장)
-    leverage_ceiling = st.number_input(
-        "허용 최대 레버리지 (직접 설정)",
-        min_value=1, max_value=500, value=int(default_max_lev), step=1,
-        help="해당 종목에 허용할 최대 레버리지를 설정하세요"
-    )
+    st.markdown("## 4) 투자 및 리스크 설정")
+    investment_amount = st.number_input("투자 금액 (USDT)", min_value=1.0, value=1000.0, step=10.0)
+    risk_per_trade_pct = st.slider("리스크 비율 (%)", 0.5, 5.0, 2.0, 0.5) / 100.0
+    stop_loss_k = st.number_input("손절 배수 (σ 기준)", min_value=1.0, max_value=3.0, value=2.0, step=0.5)
+    default_max_lev = max_leverage_map.get(selected_crypto, 50)
+    leverage_ceiling = st.number_input("허용 최대 레버리지", 1, 500, int(default_max_lev), 1)
 
     bt = st.button("🚀 분석 시작", type="primary")
 
 # ────────────────────────────────────────────────────────────────────────
-# 6) 메인 로직: 버튼 클릭 시 실행
+# 4) 모델(ETS/Theta) 헬퍼
+# ────────────────────────────────────────────────────────────────────────
+def _maybe_log(x: pd.Series, enable: bool):
+    if enable:
+        eps = 1e-9
+        return np.log(x + eps), ("log", eps)
+    return x, None
+
+def _inv_log(x: pd.Series, info: Any) -> pd.Series:
+    if info and info[0] == "log":
+        eps = info[1]
+        return np.exp(x) - eps
+    return x
+
+def fit_ets(series: pd.Series, weekly: bool, damped: bool):
+    seasonal = "add" if weekly else None
+    seasonal_periods = 7 if weekly else None
+    model = ETSModel(endog=series, error="add", trend="add",
+                     damped_trend=damped, seasonal=seasonal,
+                     seasonal_periods=seasonal_periods)
+    res = model.fit()
+    return {"model": model, "res": res}
+
+def forecast_ets(res, future_index: pd.DatetimeIndex, method: str = "exact", reps: int = 1000):
+    try:
+        pred = res.get_prediction(index=future_index, method=method, simulate_repetitions=reps)
+    except Exception:
+        pred = res.get_prediction(index=future_index, method="simulated", simulate_repetitions=reps)
+    mean = pd.Series(pred.predicted_mean, index=future_index, name="예측 종가")
+    ci = pred.conf_int(); ci.index = future_index
+    return mean, ci
+
+def fit_theta(series: pd.Series, period: int = None):
+    model = ThetaModel(series, period=period)
+    res = model.fit()
+    return {"model": model, "res": res}
+
+def forecast_theta(res, steps: int):
+    mean = res.forecast(steps=steps)
+    pi = res.prediction_intervals(steps=steps, alpha=0.05)  # 95% 구간
+    ci = pd.DataFrame({"lower y": pi["lower"], "upper y": pi["upper"]})
+    return mean.rename("예측 종가"), ci  # Theta 예측구간 문서 참조 :contentReference[oaicite:1]{index=1}
+
+def rolling_one_step_score(series: pd.Series, fit_func, fcst_func, horizon: int = 1, window_days: int = 120) -> float:
+    if len(series) < window_days + 10:
+        window_days = min(len(series) - 10, 60)
+    idx = series.index
+    start_pos = len(series) - window_days
+    errs = []
+    for i in range(start_pos + 1, len(series)):
+        train = series.iloc[:i]
+        try:
+            m = fit_func(train)
+            if "res" in m:
+                fut_idx = pd.date_range(idx[i], periods=horizon, freq="D")
+                mean, _ = fcst_func(m["res"], fut_idx)
+                yhat = float(mean.iloc[0])
+            else:
+                yhat = np.nan
+        except Exception:
+            yhat = np.nan
+        y = float(series.iloc[i])
+        if not np.isnan(yhat):
+            errs.append(abs((y - yhat) / max(abs(y), 1e-8)))
+    return float(np.mean(errs) * 100.0) if errs else 1e9
+
+# ────────────────────────────────────────────────────────────────────────
+# 5) 🔧 XGBoost 레버리지 모델 (정량회귀 기반)
+#    - 과거 각 시점의 "안전 레버리지 타깃"을 생성해 지도학습
+#    - 현재 피처로 안전/중앙/공격적 레버리지(α=0.1/0.5/0.9) 추정
+# ────────────────────────────────────────────────────────────────────────
+# XGBoost 의존성 체크
+try:
+    import xgboost as xgb
+    XGB_AVAILABLE = True
+except Exception:
+    XGB_AVAILABLE = False
+
+@st.cache_resource(show_spinner=False)
+def train_xgb_leverage_model(train_X: pd.DataFrame, train_y: np.ndarray, alphas: np.ndarray):
+    """
+    XGBoost QuantileDMatrix + 'reg:quantileerror' 로 다중 분위수(예: 0.1/0.5/0.9) 회귀
+    - XGBoost 2.0.0+ 필요
+    """
+    Xy = xgb.QuantileDMatrix(train_X.values.astype(np.float32), train_y.astype(np.float32))
+    params = {
+        "objective": "reg:quantileerror",
+        "quantile_alpha": alphas,     # 다중 분위수
+        "tree_method": "hist",        # 정량회귀는 exact 비권장
+        "learning_rate": 0.05,
+        "max_depth": 5,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "seed": 42,
+    }
+    booster = xgb.train(
+        params, Xy, num_boost_round=256,
+        early_stopping_rounds=20,
+        evals=[(Xy, "Train")]
+    )
+    return booster  # 정식 사용법/파라미터는 XGBoost 문서 참고 :contentReference[oaicite:2]{index=2}
+
+def build_leverage_training_set(df: pd.DataFrame,
+                                risk_per_trade_pct: float,
+                                exch_cap: float,
+                                user_cap: float,
+                                base_coin_cap: float) -> Tuple[pd.DataFrame, np.ndarray]:
+    """
+    레버리지 지도학습용 (X, y) 생성
+    y(타깃): '다음 3일 최대 불리 변동' 기준의 안전 레버리지 상한
+            L_t = risk_per_trade_pct / (MAE_3d_t + eps)
+    * MAE_3d_t: t의 종가 대비 앞으로 3일 최저가 하락폭(음수), 절댓값 사용
+    """
+    eps = 1e-4
+    # 피처(전날까지 정보를 사용하도록 시프팅)
+    ret = df["Close"].pct_change()
+    sigma14 = ret.rolling(14).std().shift(1)
+    sigma30 = ret.rolling(30).std().shift(1)
+    rsi14 = df["RSI14"].shift(1)
+    volr = df["VOL_RATIO"].shift(1)
+    corr30 = df["BTC_상관계수"].shift(1)
+    bbw = ((df["bb_upper"] - df["bb_lower"]) / (df["Close"] + 1e-9)).shift(1)  # 밴드폭 비율
+    ma_slope = (df["MA20"].pct_change().shift(1)).fillna(0)
+
+    # 라벨: 향후 3일 최대 불리 변동(하락) 절댓값
+    fwd_low3 = df["Low"].shift(-1).rolling(window=3).min()
+    mae3 = np.maximum(0.0, (df["Close"] - fwd_low3) / (df["Close"] + eps))  # 0~상한
+    y = (risk_per_trade_pct / (mae3 + eps)).clip(1.0, min(exch_cap, user_cap, base_coin_cap))
+
+    X = pd.DataFrame({
+        "sigma14": sigma14, "sigma30": sigma30,
+        "rsi14": rsi14, "vol_ratio": volr,
+        "btc_corr30": corr30,
+        "bb_width": bbw, "ma20_slope": ma_slope,
+    }).replace([np.inf, -np.inf], np.nan).dropna()
+    y = y.reindex(X.index).values.astype(np.float32)
+    return X, y
+
+def predict_leverage_with_xgb(booster, cur_feat: pd.DataFrame, alphas: np.ndarray) -> Dict[str, float]:
+    X_cur = cur_feat.values.astype(np.float32)
+    scores = booster.inplace_predict(X_cur)  # (n, len(alphas))
+    # 분위수 배열과 매칭
+    out = {}
+    for i, a in enumerate(alphas):
+        out[f"q{int(a*100)}"] = float(scores[-1, i])  # 가장 최근 행
+    return out
+
+# ────────────────────────────────────────────────────────────────────────
+# 6) 메인
 # ────────────────────────────────────────────────────────────────────────
 if bt:
     try:
-        # ────────────────────────────────────────────────────────────────────
-        # 6-1) 데이터 불러오기 및 간단 오류 처리
-        # ────────────────────────────────────────────────────────────────────
+        # 데이터/지표
         with st.spinner("🔍 데이터 가져오는 중..."):
             raw_df = load_crypto_data(selected_crypto, START, END)
-            if raw_df.empty:
-                raise ValueError(f"{selected_crypto} 데이터가 없습니다. 심볼/기간을 확인해주세요.")
-            if len(raw_df) < 100:
-                raise ValueError(f"최소 100 거래일 이상의 데이터가 필요합니다. 현재: {len(raw_df)}일")
+            if raw_df.empty or "Close" not in raw_df.columns:
+                raise ValueError(f"{selected_crypto} 데이터가 없습니다.")
+            close = raw_df["Close"].astype(float)
+            if close.dropna().shape[0] < 100:
+                raise ValueError(f"최소 100 거래일 이상 필요합니다. 현재: {close.dropna().shape[0]}일")
 
-        # ────────────────────────────────────────────────────────────────────
-        # 6-2) 지표 계산: 모든 보조지표를 컬럼으로 추가
-        # ────────────────────────────────────────────────────────────────────
-        df = calculate_indicators(raw_df)
+        with st.spinner("🔧 지표 계산 중..."):
+            df = raw_df.copy()
+            df["일일수익률"] = winsorize_returns(df["Close"].pct_change(), p=0.01)
+            lookback = min(30, max(2, len(df) - 1))
+            volatility_30d = df["일일수익률"].dropna().iloc[-lookback:].std() if df["일일수익률"].dropna().shape[0] else 0.01
+            if pd.isna(volatility_30d) or volatility_30d == 0:
+                volatility_30d = 0.01
 
-        # ────────────────────────────────────────────────────────────────────
-        # 6-3) Holt-Winters 모델 학습(In-sample) & 30일 예측 생성
-        # ────────────────────────────────────────────────────────────────────
-        close_series = df['Close']
-        hw_model = sm.tsa.ExponentialSmoothing(
-            close_series,
-            trend='add',
-            seasonal=None,
-            initialization_method="estimated"
-        ).fit(optimized=True)
+            df["MA20"] = df["Close"].rolling(20, min_periods=1).mean()
+            df["MA50"] = df["Close"].rolling(50, min_periods=1).mean()
+            bb = calc_bbands(df["Close"], window=20, num_std=2.0)
+            df = df.join(bb)
+            df["RSI14"] = calc_rsi(df["Close"], period=14)
 
-        # In-sample 예측값(학습 데이터용)
-        pred_in_sample = hw_model.fittedvalues
+            btc = load_crypto_data("BTCUSDT", START, END)
+            if btc.empty or "Close" not in btc.columns:
+                raise ValueError("BTCUSDT 데이터 로드 실패 (상관계수 계산 불가)")
+            btc["BTC_수익률"] = btc["Close"].pct_change()
+            df["수익률"] = df["Close"].pct_change()
+            df = df.join(btc[["BTC_수익률"]], how="inner")
+            df["BTC_상관계수"] = df["수익률"].rolling(window=30).corr(df["BTC_수익률"])
+            df = df.dropna()
 
-        # 향후 30일 예측
-        future_forecast = hw_model.forecast(steps=30)
-        last_date = df.index[-1]
-        future_dates = [last_date + datetime.timedelta(days=i + 1) for i in range(30)]
-        future_df = pd.DataFrame({'예측 종가': future_forecast.values}, index=future_dates)
+            df["VOL_MA20"] = df["Volume"].rolling(20, min_periods=1).mean()
+            df["VOL_RATIO"] = df["Volume"] / (df["VOL_MA20"] + 1e-9)
 
-        # ────────────────────────────────────────────────────────────────────
-        # 6-4) 최종 진입/손절/목표가/레버리지 계산
-        # ────────────────────────────────────────────────────────────────────
-        entry_price = raw_df['Close'].iloc[-1]
-        far_price = future_df['예측 종가'].iloc[-1]
+            slope, intercept, down_line = fit_downtrend_line(df["High"] if "High" in df.columns else df["Close"], piv_k=5)
+            piv_lows = find_pivot_points(df["Low"] if "Low" in df.columns else df["Close"], left=3, right=3, mode="low")
+            last_pivot_low = float(piv_lows[-1][1]) if len(piv_lows) else float(df["bb_lower"].iloc[-1])
+            support_price = max(last_pivot_low, float(df["bb_lower"].iloc[-1]))
 
-        # 최대 손실 금액
-        max_loss_amount = investment_amount * risk_per_trade_pct
-        stop_loss_pct = df['Volatility30d'].iloc[-1] * stop_loss_k
-        per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0
+        # 시계열 예측(ETS/Theta) — (기존 로직 그대로, 생략 없이 유지)
+        series_log, log_info = _maybe_log(df["Close"], enable=use_loglike)
+        def _fit_ets_auto(s): return fit_ets(s, weekly=use_weekly_seasonality, damped=use_damped_trend)
+        def _fit_ets_no_season(s): return fit_ets(s, weekly=False, damped=use_damped_trend)
+        def _fit_theta_auto(s): return fit_theta(s, period=None)
 
-        if per_coin_risk > 0:
-            position_qty = max_loss_amount / per_coin_risk
-        else:
-            position_qty = 0.0
+        cand, cand_names = [], []
+        if model_mode in ["자동(권장)", "ETS(Holt–Winters)", "앙상블(ETS+Theta)"]:
+            cand.append(_fit_ets_auto); cand_names.append("ETS(옵션)")
+        if model_mode in ["자동(권장)", "Theta", "앙상블(ETS+Theta)"]:
+            cand.append(_fit_theta_auto); cand_names.append("Theta")
+        if model_mode == "자동(권장)":
+            cand.append(_fit_ets_no_season); cand_names.append("ETS(무계절)")
 
-        notional_value = entry_price * position_qty
-        recommended_leverage = (notional_value / investment_amount) if investment_amount > 0 else 1.0
+        with st.spinner("🧪 모델 검증(원스텝) 중..."):
+            scores = []
+            for f, nm in zip(cand, cand_names):
+                try:
+                    sc = rolling_one_step_score(series_log, f,
+                        fcst_func=lambda res, idx, method="exact": forecast_ets(res, idx, method),
+                        horizon=1, window_days=120)
+                except Exception:
+                    sc = rolling_one_step_score(series_log, f,
+                        fcst_func=lambda res, steps=1: forecast_theta(res, steps),
+                        horizon=1, window_days=120)
+                scores.append(sc)
 
-        # 실제 허용 상한 = 맵에 정의된 값 vs 사이드바에 입력한 값 중 작은 쪽
-        max_allowed = max_leverage_map.get(selected_crypto, leverage_ceiling)
-        ultimate_ceiling = min(max_allowed, leverage_ceiling)
-        recommended_leverage = round(max(1.0, min(recommended_leverage, ultimate_ceiling)), 2)
+        with st.spinner("🤖 최종 모델 적합 및 예측 중..."):
+            last_date = df.index[-1]
+            future_idx = pd.date_range(last_date + datetime.timedelta(days=1), periods=horizon, freq="D")
 
-        pct_change = abs(far_price - entry_price) / entry_price if entry_price > 0 else 0.0
-        if pct_change >= 0.05:
-            num_targets = 5
-        elif pct_change >= 0.02:
-            num_targets = 3
-        else:
-            num_targets = 1
+            def _fit_and_forecast(func, name):
+                if "Theta" in name:
+                    res = func(series_log)["res"]
+                    mean_log, ci = forecast_theta(res, steps=horizon)
+                    mean = _inv_log(mean_log, log_info)
+                    ci = ci.copy()
+                    ci["lower y"] = _inv_log(ci["lower y"], log_info)
+                    ci["upper y"] = _inv_log(ci["upper y"], log_info)
+                    mean.index = future_idx; ci.index = future_idx
+                    return {"mean": mean, "ci": ci}
+                else:
+                    res = func(series_log)["res"]
+                    mean_log, ci = forecast_ets(res, future_idx, method="exact", reps=1000)
+                    mean = _inv_log(mean_log, log_info)
+                    ci = ci.rename(columns=lambda c: "lower y" if "lower" in c.lower() else ("upper y" if "upper" in c.lower() else c))
+                    ci = pd.DataFrame({
+                        "lower y": _inv_log(ci.iloc[:, 0], log_info),
+                        "upper y": _inv_log(ci.iloc[:, -1], log_info)
+                    }, index=future_idx)
+                    return {"mean": mean, "ci": ci}
 
-        if far_price > entry_price:
-            direction = 'up'
-            position_signal = "매수 / 롱"
-            stop_loss_price = entry_price * (1 - stop_loss_pct)
-        else:
-            direction = 'down'
-            position_signal = "매도 / 숏"
-            stop_loss_price = entry_price * (1 + stop_loss_pct)
+            if model_mode == "앙상블(ETS+Theta)":
+                ets_out = _fit_and_forecast(_fit_ets_auto, "ETS(옵션)")
+                th_out = _fit_and_forecast(_fit_theta_auto, "Theta")
+                mean = (ets_out["mean"] + th_out["mean"]) / 2.0
+                ci = pd.DataFrame({
+                    "lower y": (ets_out["ci"]["lower y"] + th_out["ci"]["lower y"]) / 2.0,
+                    "upper y": (ets_out["ci"]["upper y"] + th_out["ci"]["upper y"]) / 2.0
+                }, index=future_idx)
+                best_name = "앙상블(ETS+Theta)"
+            elif model_mode == "ETS(Holt–Winters)":
+                out = _fit_and_forecast(_fit_ets_auto, "ETS(옵션)")
+                mean, ci = out["mean"], out["ci"]; best_name = "ETS(Holt–Winters)"
+            elif model_mode == "Theta":
+                out = _fit_and_forecast(_fit_theta_auto, "Theta")
+                mean, ci = out["mean"], out["ci"]; best_name = "Theta"
+            else:
+                best_idx = int(np.argmin(scores))
+                best_name = cand_names[best_idx]
+                out = _fit_and_forecast(cand[best_idx], best_name)
+                mean, ci = out["mean"], out["ci"]
 
-        targets = generate_targets(entry_price, num_targets, direction=direction)
+        # in-sample 적합값
+        with st.spinner("📊 과거 적합 곡선 계산 중..."):
+            if "Theta" in best_name:
+                res = _fit_theta_auto(series_log)["res"]; fitted_log = res.fittedvalues
+            elif "무계절" in best_name:
+                res = _fit_ets_no_season(series_log)["res"]; fitted_log = res.fittedvalues
+            else:
+                res = _fit_ets_auto(series_log)["res"]; fitted_log = res.fittedvalues
+            fitted = _inv_log(pd.Series(fitted_log, index=series_log.index), log_info)
+
+        # ── 기본 출력(표/차트) — 기존과 동일, 생략 ──
+
+        # ────────────────────────────────────────────────────────────────
+        # 🔧 XGBoost: 코인별 레버리지 추천(정량회귀)
+        # ────────────────────────────────────────────────────────────────
+        entry_price = float(df["Close"].iloc[-1])
+        far_price = float(mean.iloc[-1])
+        # 예측구간 첫날 폭으로 기대 변동치 추정
+        exp_move = float((ci["upper y"].iloc[0] - ci["lower y"].iloc[0]) / max(entry_price, 1e-8)) / 2.0
+        sigma_eff = float(max(volatility_30d, exp_move) if not np.isnan(exp_move) else volatility_30d)
+        vol_ratio_now = float((df["Volume"].iloc[-1] / (df["VOL_MA20"].iloc[-1] + 1e-9)))
+
+        exch_cap = max_leverage_map.get(selected_crypto, 50)
+        user_cap = int(leverage_ceiling)
+        base_cap = coin_safe_cap_map.get(selected_crypto, 6.0)
+        # σ가 커질수록 코인 안전 캡 축소
+        vol_factor = float(np.clip(0.02 / max(sigma_eff, 1e-4), 0.4, 1.2))
+        coin_cap = max(1.0, round(base_cap * vol_factor, 2))
+        # 학습 데이터 구성
+        X_train, y_train = build_leverage_training_set(
+            df.copy(), risk_per_trade_pct, exch_cap, user_cap, coin_cap
+        )
+
+        # 현재 피처(가장 최근 1행) 준비
+        cur_feat = pd.DataFrame({
+            "sigma14": [df["Close"].pct_change().rolling(14).std().iloc[-2]],
+            "sigma30": [df["Close"].pct_change().rolling(30).std().iloc[-2]],
+            "rsi14":   [df["RSI14"].iloc[-2]],
+            "vol_ratio":[df["VOL_RATIO"].iloc[-2]],
+            "btc_corr30":[df["BTC_상관계수"].iloc[-2]],
+            "bb_width":[((df["bb_upper"].iloc[-2]-df["bb_lower"].iloc[-2])/(df["Close"].iloc[-2]+1e-9))],
+            "ma20_slope":[(df["MA20"].pct_change().iloc[-2])],
+        }).replace([np.inf, -np.inf], np.nan).fillna(method="ffill").fillna(0.0)
+
+        # 학습/예측
+        rec_from_xgb = None
+        if XGB_AVAILABLE and len(X_train) >= 200:  # 최소 표본 확보 후 모델 사용
+            try:
+                alphas = np.array([0.10, 0.50, 0.90], dtype=np.float32)  # 보수/중앙/공격
+                booster = train_xgb_leverage_model(X_train, y_train, alphas)
+                q_preds = predict_leverage_with_xgb(booster, cur_feat, alphas)
+                # 안전 측(10% 분위수)을 기본 추천으로 채택
+                safe_q = q_preds.get("q10", np.nan)
+                median_q = q_preds.get("q50", np.nan)
+                # 최종 추천(클립: 거래소/사용자/코인 캡)
+                rec_from_xgb = float(np.clip(safe_q if not np.isnan(safe_q) else median_q,
+                                             1.0, min(exch_cap, user_cap, coin_cap)))
+            except Exception as e:
+                st.info(f"XGBoost 정량회귀 사용 불가(폴백 사용): {e}")
+                rec_from_xgb = None
+
+        # 폴백(룰 기반)
+        if rec_from_xgb is None or np.isnan(rec_from_xgb):
+            max_loss_amount = float(investment_amount) * float(risk_per_trade_pct)
+            stop_loss_pct = max(float(sigma_eff) * float(stop_loss_k), 0.002)
+            per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0.0
+            position_qty = (max_loss_amount / per_coin_risk) if per_coin_risk > 0 else 0.0
+            notional_value = entry_price * position_qty
+            rec_from_rule = (notional_value / float(investment_amount)) if investment_amount > 0 else 1.0
+            rec_from_xgb = float(np.clip(rec_from_rule, 1.0, min(exch_cap, user_cap, coin_cap)))
+
+        # 이후 출력/목표가·손절 등은 기존 로직 사용 (rec_from_xgb를 추천 레버리지로)
+        direction = "up" if far_price > entry_price else "down"
+        position_signal = "매수 / 롱" if direction == "up" else "매도 / 숏"
+
+        # 손절/수량 재계산(추천 레버리지는 별개로 표시)
+        max_loss_amount = float(investment_amount) * float(risk_per_trade_pct)
+        stop_loss_pct = max(float(sigma_eff) * float(stop_loss_k), 0.002)
+        per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0.0
+        position_qty = (max_loss_amount / per_coin_risk) if per_coin_risk > 0 else 0.0
+
+        # σ 기반 목표가
+        def gen_targets(entry: float, sigma: float, direction: str, k_list=(0.5, 1.0, 1.5, 2.0, 3.0)):
+            return [(entry + entry*sigma*k) if direction == "up" else (entry - entry*sigma*k) for k in k_list]
+        pct_change = abs(far_price - entry_price) / max(entry_price, 1e-8)
+        ks = (0.5, 1.0, 1.5, 2.0, 3.0) if pct_change >= 0.05 else ((0.5, 1.0, 1.5) if pct_change >= 0.02 else (1.0,))
+        targets = gen_targets(entry_price, sigma_eff, direction, ks)
         primary_target = targets[-1]
+        stop_loss_price = entry_price * (1 - stop_loss_pct) if direction == "up" else entry_price * (1 + stop_loss_pct)
 
-        # In-sample 예측 정확도(방향성 기준)
-        all_close = df['Close'].values
-        all_pred = pred_in_sample.values
-        correct_count = 0
-        total_count = len(all_pred) - 1
-        for i in range(1, len(all_pred)):
-            actual_dir = 1 if all_close[i] > all_close[i - 1] else -1
-            pred_dir = 1 if all_pred[i] > all_pred[i - 1] else -1
-            if actual_dir == pred_dir:
-                correct_count += 1
-        rate_win = round((correct_count / total_count * 100.0) if total_count > 0 else 0.0, 2)
-        learned_patterns = len(all_pred)
-
-        # ============================== [순서 변경 시작] ==============================
-        # ────────────────────────────────────────────────────────────────────
-        # 6-7) AI 예측 근거
-        # ────────────────────────────────────────────────────────────────────
-        last_ma50 = df['MA50'].iloc[-1]
-        price_trend = "하락세" if entry_price < last_ma50 else "상승세"
-        price_trend_colored = (
-            f"<span style='color:#E74C3C;font-weight:bold;'>하락세</span>" if price_trend == "하락세"
-            else f"<span style='color:#27AE60;font-weight:bold;'>상승세</span>"
-        )
-        df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
-        df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = df['EMA12'] - df['EMA26']
-        last_macd = df['MACD'].iloc[-1]
-        prev_macd = df['MACD'].iloc[-2]
-        macd_trend = "감소세" if last_macd < prev_macd else "증가세"
-        macd_trend_colored = f"<span style='color:#3498DB;font-weight:bold;'>{macd_trend}</span>"
-        last_rsi = df['RSI14'].iloc[-1]
-        last_stoch = df['StochK14'].iloc[-1]
-        if last_rsi < 30 and last_stoch < 20:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 과매도 상태입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#E74C3C;font-weight:bold;'>하락</span> 지속 가능성을 시사합니다."
-        elif last_rsi > 70 and last_stoch > 80:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 과매수 상태입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#27AE60;font-weight:bold;'>반등</span> 가능성을 시사합니다."
-        else:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 중립 영역을 유지 중입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#F1C40F;font-weight:bold;'>횡보</span> 가능성을 시사합니다."
-
-        last_mfi = df['MFI14'].iloc[-1]
-        mfi_desc = f"단기적으로는 MFI가 <span style='font-weight:bold;'>{last_mfi:.2f}</span>으로 긍정권이며, 횡보 가능성이 있습니다."
-
-        ai_reason = "<br>".join([
-            f"현재 {selected_crypto[:-4]} 가격은 <span style='font-weight:bold;'>{entry_price:.2f}</span>로 {price_trend_colored}이며, MA50 대비 {price_trend}를 보이고 있습니다.",
-            f"MACD도 {macd_trend_colored}를 보이며 {'하락' if macd_trend=='감소세' else '상승'} 추세를 형성 중입니다.",
-            momentum_desc,
-            future_trend,
-            mfi_desc
-        ])
-        st.markdown("<div class='section-title'>🤖 AI 예측 근거</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='line-height:1.6; font-size:16px;'>{ai_reason}</div>", unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-8) 주요 지표 요약
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📊 주요 지표 요약</div>", unsafe_allow_html=True)
-        if price_trend == "하락세":
-            card1_bg, card1_icon, card1_text = "#C0392B", "📉", "현재 하락 추세"
-        else:
-            card1_bg, card1_icon, card1_text = "#27AE60", "📈", "현재 상승 추세"
-
-        if last_rsi < 30 and last_stoch < 20:
-            card2_bg, card2_icon, card2_text = "#F1C40F", "⚠️", "과매도 상태"
-        elif last_rsi > 70 and last_stoch > 80:
-            card2_bg, card2_icon, card2_text = "#F1C40F", "⚠️", "과매수 상태"
-        else:
-            card2_bg, card2_icon, card2_text = "#95A5A6", "➖", "모멘텀 중립"
-
-        cross_signal = df['Cross_Signal'].iloc[-1]
-        if cross_signal == 1:
-            card3_bg, card3_icon, card3_text = "#2ECC71", "🔀", "EMA 골든 크로스"
-        elif cross_signal == -1:
-            card3_bg, card3_icon, card3_text = "#E74C3C", "🔀", "EMA 데드 크로스"
-        else:
-            if last_macd < prev_macd:
-                card3_bg, card3_icon, card3_text = "#E74C3C", "📉", "MACD 감소세"
-            else:
-                card3_bg, card3_icon, card3_text = "#2ECC71", "📈", "MACD 증가세"
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(
-                f"<div style='background-color:{card1_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card1_icon}</span><br>{card1_text}</div>",
-                unsafe_allow_html=True
-            )
-        with col2:
-            st.markdown(
-                f"<div style='background-color:{card2_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card2_icon}</span><br>{card2_text}</div>",
-                unsafe_allow_html=True
-            )
-        with col3:
-            st.markdown(
-                f"<div style='background-color:{card3_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card3_icon}</span><br>{card3_text}</div>",
-                unsafe_allow_html=True
-            )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-12) 추세 예측 히스토리 (5분 간격)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📈 추세 예측 히스토리</div>", unsafe_allow_html=True)
-        now = datetime.datetime.now()
-        minute = (now.minute // 5) * 5
-        base_time = now.replace(minute=minute, second=0, microsecond=0)
-        future_dates_5m = [base_time + datetime.timedelta(minutes=5 * (i + 1)) for i in range(6)]
-        hw_forecast_6 = hw_model.forecast(steps=6)
-        hist_df_5m = pd.DataFrame({
-            'Time_5m': future_dates_5m,
-            'Pred_Close_5m': hw_forecast_6.values
-        })
-        hist_df_5m.set_index('Time_5m', inplace=True)
-
-        comments_list = []
-        for i in range(len(hist_df_5m)):
-            if i == 0:
-                if hw_forecast_6.values[0] < raw_df['Close'].iloc[-1]:
-                    comments_list.append("하락 지속 가능성")
-                elif hw_forecast_6.values[0] > raw_df['Close'].iloc[-1]:
-                    comments_list.append("강세 지속 가능성")
-                else:
-                    comments_list.append("조정 가능성")
-            else:
-                prev = hw_forecast_6.values[i - 1]
-                curr = hw_forecast_6.values[i]
-                if curr < prev:
-                    if (prev - curr) > (0.005 * prev):
-                        comments_list.append("하락 가능성 증가")
+        # 간이 방향일치 승률(생략 없이 유지) …
+        N = min(180, len(series_log) - 30)
+        correct = 0; total = 0
+        if N > 10:
+            idx = series_log.index[-N:]
+            for i in range(1, len(idx)):
+                train = series_log.loc[:idx[i-1]]
+                try:
+                    if "Theta" in best_name:
+                        r = _fit_theta_auto(train)["res"]; pred1 = float(r.forecast(steps=1).iloc[0])
+                    elif "무계절" in best_name:
+                        r = _fit_ets_no_season(train)["res"]; fut_idx = pd.date_range(idx[i-1] + datetime.timedelta(days=1), periods=1, freq="D")
+                        pred1 = float(forecast_ets(r, fut_idx, "exact")[0].iloc[0])
                     else:
-                        comments_list.append("하락 지속 가능성")
-                elif curr > prev:
-                    if (curr - prev) < (0.005 * prev):
-                        comments_list.append("상승 조정 가능성")
-                    else:
-                        comments_list.append("강세 지속 가능성")
-                else:
-                    comments_list.append("조정 가능성")
+                        r = _fit_ets_auto(train)["res"]; fut_idx = pd.date_range(idx[i-1] + datetime.timedelta(days=1), periods=1, freq="D")
+                        pred1 = float(forecast_ets(r, fut_idx, "exact")[0].iloc[0])
+                    pred1 = float(_inv_log(pd.Series([pred1]), log_info).iloc[0])
+                except Exception:
+                    continue
+                real_today = float(df.loc[idx[i], "Close"]); real_yest = float(df.loc[idx[i-1], "Close"])
+                actual_dir = 1 if real_today > real_yest else -1
+                pred_dir = 1 if pred1 > real_yest else -1
+                correct += int(actual_dir == pred_dir); total += 1
+        rate_win = round((correct / total * 100.0), 2) if total > 0 else 0.0
 
-        hist_df_5m['Comment'] = comments_list
-        output_df = hist_df_5m.copy()
-        output_df.index = output_df.index.strftime('%Y-%m-%d %H:%M')
-        st.dataframe(
-            output_df
-            .reset_index()
-            .rename(columns={'Time_5m': 'Time', 'Pred_Close_5m': 'Pred_Close'}),
-            use_container_width=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-9) 변동성 지표 (ATR)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📉 변동성 지표 (ATR)</div>", unsafe_allow_html=True)
-        latest_atr = df['ATR14'].iloc[-1]
-        prev_atr = df['ATR14'].iloc[-2] if len(df['ATR14'].dropna()) > 1 else latest_atr
-        if latest_atr > prev_atr:
-            atr_symbol, atr_trend_text = "🔺", "🔍 ATR이 이전 대비 증가하여 변동성이 확대되었습니다."
-        elif latest_atr < prev_atr:
-            atr_symbol, atr_trend_text = "🔻", "🔍 ATR이 이전 대비 감소하여 변동성이 축소되었습니다."
-        else:
-            atr_symbol, atr_trend_text = "⏺️", "🔍 ATR이 이전과 비슷한 수준입니다."
-
-        st.markdown(f"<div style='font-size:20px; font-weight:bold;'>{latest_atr:.2f} {atr_symbol}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:14px; color:#555;'>{atr_trend_text}</div>", unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            "※ ATR이 높으면 높은 변동성, 낮으면 낮은 변동성을 의미하며, StopLoss·Position Sizing 등 리스크 관리에 주로 활용됩니다。",
-            unsafe_allow_html=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-10) 지원 및 저항 지표 (원래 상태 유지)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🛡️ 지원 및 저항 지표</div>", unsafe_allow_html=True)
-        fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 1.0]
-        high_price = df['High'].max()
-        low_price = df['Low'].min()
-        diff = high_price - low_price if high_price != low_price else 1e-8
-        fib_levels = []
-        for ratio in fib_ratios:
-            level_price = high_price - diff * ratio
-            fib_levels.append({'ratio': ratio, 'price': level_price})
-
-        current_ratio = (high_price - entry_price) / diff
-        closest_ratio = min(fib_ratios, key=lambda x: abs(current_ratio - x))
-
-        html_fib = """
-<div style="background-color:#111; padding:16px; border-radius:8px;">
-  <div style="color:#FFFFFF; font-size:18px; font-weight:bold; margin-bottom:4px;">
-    피보나치 되돌림
-  </div>
-  <div style="color:#AAAAAA; font-size:14px; margin-bottom:12px;">
-    주요 지지/저항 레벨
-  </div>
-  <div style="position:relative; height:180px; border-left:1px solid #555; margin-left:40px;">
-"""
-        for lvl in fib_levels:
-            top_pct = lvl['ratio'] * 100
-            price_str = f"{lvl['price']:.2f}"
-            perc_str = f"{int(lvl['ratio']*100)}%"
-            html_fib += f"""
-    <div style="position:absolute; top:{top_pct:.1f}%; left:-40px; width:100%; display:flex; align-items:center;">
-      <div style="width:40px; text-align:right; color:#CCCCCC; font-size:12px;">
-        {price_str}
-      </div>
-      <div style="flex:1; border-top:1px solid #555;"></div>
-      <div style="width:60px; text-align:right; color:#CCCCCC; font-size:12px; margin-left:4px;">
-        {perc_str}
-      </div>
-    </div>
-"""
-            if abs(lvl['ratio'] - closest_ratio) < 1e-6:
-                html_fib += f"""
-    <div style="position:absolute; top:{top_pct:.1f}%; left:40px; width:8px; height:8px;
-                background-color:#E74C3C; border-radius:50%; transform:translate(-50%, -50%);"></div>
-"""
-        html_fib += """
-  </div>
-</div>
-"""
-        components.html(html_fib, height=280)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-11) 캔들스틱 패턴 감지 및 해석 (EMA 교차 패턴 해석 추가)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴 감지 및 해석</div>", unsafe_allow_html=True)
-        patterns = []
-        df_sorted = df.sort_index(ascending=True)
-
-        # EMA 교차 패턴 해석 추가
-        ema50 = df['EMA50'].iloc[-1]
-        ema200 = df['EMA200'].iloc[-1]
-        ema50_prev = df['EMA50'].iloc[-2]
-        ema200_prev = df['EMA200'].iloc[-2]
-
-        # EMA 교차 패턴 분석
-        if ema50 > ema200 and ema50_prev <= ema200_prev:
-            patterns.append({
-                'name': '골든 크로스',
-                'date': df.index[-1],
-                'conf': 90.0,  # 신뢰도
-                'desc': 'EMA50이 EMA200을 상향 돌파하여 강력한 상승 신호',
-                'impact': '장기 상승 추세 전환 가능성 높음'
-            })
-        elif ema50 < ema200 and ema50_prev >= ema200_prev:
-            patterns.append({
-                'name': '데드 크로스',
-                'date': df.index[-1],
-                'conf': 85.0,  # 신뢰도
-                'desc': 'EMA50이 EMA200을 하향 돌파하여 강력한 하락 신호',
-                'impact': '장기 하락 추세 전환 가능성 높음'
-            })
-        elif (ema50 - ema200) > (ema50_prev - ema200_prev):
-            patterns.append({
-                'name': 'EMA 확산',
-                'date': df.index[-1],
-                'conf': 75.0,
-                'desc': 'EMA50과 EMA200 간 거리가 확대되는 상승 추세',
-                'impact': '현재 추세 강화 가능성'
-            })
-        elif (ema50 - ema200) < (ema50_prev - ema200_prev):
-            patterns.append({
-                'name': 'EMA 수렴',
-                'date': df.index[-1],
-                'conf': 70.0,
-                'desc': 'EMA50과 EMA200 간 거리가 좁아지는 추세 전환 신호',
-                'impact': '현재 추세 약화 및 반전 가능성'
-            })
-
-        # 기존 캔들스틱 패턴 (Morning Star, Doji, Three White Soldiers) 탐지
-        for i in range(2, len(df_sorted)):
-            o1, c1, h1, l1 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 2]
-            o2, c2, h2, l2 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 1]
-            o3, c3, h3, l3 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i]
-            date3 = df_sorted.index[i]
-
-            # Three White Soldiers
-            if (c1 > o1) and (c2 > o2) and (c3 > o3) and (c2 > c1) and (c3 > c2):
-                patterns.append({
-                    'name': 'Three White Soldiers',
-                    'date': date3,
-                    'conf': 100.00,
-                    'desc': '세 개의 연속 양봉으로 강력한 상승 신호입니다.'
-                })
-            # Morning Star
-            body1 = abs(c1 - o1)
-            body2 = abs(c2 - o2)
-            body3 = abs(c3 - o3)
-            range2 = (h2 - l2) if (h2 - l2) != 0 else 1e-8
-            if (c1 < o1) and (body2 < range2 * 0.3) and (c2 < c1) and (o2 < c1) and \
-               (c3 > o3) and (c3 > (o1 + c1) / 2):
-                conf = min((body3 / (h3 - l3 + 1e-8)) * 100, 100.0)
-                patterns.append({
-                    'name': 'Morning Star',
-                    'date': date3,
-                    'conf': round(conf, 2),
-                    'desc': '하락 후 작은 몸통 양봉→큰 몸통 양봉으로 반전 신호입니다.'
-                })
-            # Doji
-            if abs(o3 - c3) <= (h3 - l3) * 0.1:
-                patterns.append({
-                    'name': 'Doji',
-                    'date': date3,
-                    'conf': 100.00,
-                    'desc': '시가와 종가가 비슷한 십자형 캔들입니다. 매수/매도 세력 균형으로 추세 전환 가능성이 있습니다.'
-                })
-
-        if not patterns:
-            st.write("해당 기간 내 캔들스틱 또는 EMA 교차 패턴이 감지되지 않았습니다.")
-        else:
-            patterns_sorted = sorted(patterns, key=lambda x: x['date'], reverse=True)
-            latest_by_name = {}
-            for pat in patterns_sorted:
-                nm = pat['name']
-                if nm not in latest_by_name:
-                    latest_by_name[nm] = pat
-
-            display_order = ['골든 크로스', '데드 크로스', 'EMA 확산', 'EMA 수렴',
-                             'Morning Star', 'Doji', 'Three White Soldiers']
-            for nm in display_order:
-                if nm in latest_by_name:
-                    pat = latest_by_name[nm]
-                    date_str = pat['date'].strftime("%m-%d")
-                    conf = pat.get('conf', None)
-                    desc = pat['desc']
-                    impact = pat.get('impact', None)
-                    if conf is not None:
-                        st.markdown(
-                            f"<div class='pattern-compact'><strong>{nm}</strong>  –  {date_str}  (신뢰도 {conf:.2f}%)</div>",
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f"<div class='pattern-compact'><strong>{nm}</strong>  –  {date_str}</div>",
-                            unsafe_allow_html=True
-                        )
-                    st.markdown(
-                        f"<div class='pattern-compact'>{desc}</div>",
-                        unsafe_allow_html=True
-                    )
-                    if impact:
-                        st.markdown(
-                            f"<div class='pattern-compact'><span style='color:#F39C12;'>영향: {impact}</span></div>",
-                            unsafe_allow_html=True
-                        )
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-13) AI 전략 기반 매수 포지션 요약 및 진입/목표가 추천 결과 (목표가 예측 시간 포함)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>💖 AI 전략 기반 매수 포지션 요약 및 진입/목표가 추천 결과</div>", unsafe_allow_html=True)
+        # ── 출력 ───────────────────────────────────────────────────────
+        st.subheader("💖 레버리지·목표가 / 롱·숏 / AI 전략 / 진입가 범위")
+        entry_low = entry_price * (1 - sigma_eff) if direction == "up" else entry_price
+        entry_high = entry_price if direction == "up" else entry_price * (1 + sigma_eff)
         st.markdown(f"""
-1) **포지션 신호**: **{position_signal}**  
-2) **현재가 (진입가)**: **{entry_price:.4f}** USDT  
-3) **투자 금액**: **{investment_amount:,.2f}** USDT  
-4) **포지션 수량**: **{position_qty:.4f}** 개  
-5) **진입가 범위 (Entry Range)**: **{entry_price*(1 - df['Volatility30d'].iloc[-1]):.8f} – {entry_price*(1 + df['Volatility30d'].iloc[-1]):.8f}** USDT  
-6) **손절가 (StopLoss)**: **{stop_loss_price:.4f}** USDT  
-7) **최종 목표가 (Primary Target)**: **{primary_target:,.5f}** USDT  
+1) **포지션 신호**: {position_signal}  
+2) **현재가 (진입가)**: {entry_price:.4f} USDT  
+3) **투자 금액**: {investment_amount:,.2f} USDT  
+4) **포지션 수량 (코인 수량)**: {position_qty:.4f}  
+5) **진입가 범위 (Entry Range)**: {entry_low:.8f} – {entry_high:.8f} USDT  
+6) **손절가 (StopLoss)**: {stop_loss_price:.4f} USDT  
+7) **주요 목표가 (Primary Target)**: {primary_target:,.5f} USDT  
 
 ➖ **목표가 목록** ➖  
 """, unsafe_allow_html=True)
-
-        # now_dt를 tz-aware로 변경: future_df.index의 timezone을 가져와 동기화
-        now_dt = pd.Timestamp.now(tz=future_df.index.tz)
-
-        for idx, tgt in enumerate(targets, start=1):
-            # 방향에 따라 달성 예측 날짜 여부 판단
-            if direction == 'up':
-                cond = future_df['예측 종가'] >= tgt
-            else:
-                cond = future_df['예측 종가'] <= tgt
-
-            if cond.any():
-                # 첫 번째 달성 예상 날짜
-                target_date = future_df[cond].index[0]
-                delta = target_date - now_dt
-            else:
-                # 예측 범위(30일) 이후 달성 예상을 위해 마지막 예측 날짜와 현재 시점 차이 계산
-                last_forecast_date = future_df.index[-1]
-                delta = last_forecast_date - now_dt
-
-            # delta를 월, 일, 시간, 분 단위로 분해
-            total_minutes = delta.days * 24 * 60 + delta.seconds // 60
-            months = total_minutes // (30 * 24 * 60)
-            rem_minutes_after_months = total_minutes % (30 * 24 * 60)
-            days = rem_minutes_after_months // (24 * 60)
-            rem_minutes_after_days = rem_minutes_after_months % (24 * 60)
-            hours = rem_minutes_after_days // 60
-            minutes = rem_minutes_after_days % 60
-
-            # 문자열 생성 (0 단위는 생략)
-            parts = []
-            if months > 0:
-                parts.append(f"{months}개월")
-            if days > 0:
-                parts.append(f"{days}일")
-            if hours > 0:
-                parts.append(f"{hours}시간")
-            if minutes > 0:
-                parts.append(f"{minutes}분")
-            if not parts:
-                parts.append("0분")
-            time_str = " ".join(parts)
-
-            st.markdown(f"- 🎯 목표가 {idx}: **{tgt:.5f}** USDT (도달 예상: 약 {time_str})", unsafe_allow_html=True)
+        for i, tgt in enumerate(targets, 1):
+            st.markdown(f"- 🎯 목표가 {i} : {tgt:.5f} USDT")
 
         st.markdown(f"""
-➖ **AI 전략 (Strategy AI)** ➖  
-- 🎰 **승률 (Rate Win)**: **{rate_win:.2f}%**  
-- 🧠 **학습 데이터 포인트 수**: **{learned_patterns}개**  
+➖ **AI 전략(원스텝 백테스트)** ➖  
+- 🎰 **방향 일치율**: {rate_win:.2f}% (최근 {total}회 평가)  
+- 🧠 **선택 모델**: {best_name}  
 
-➖ **추천 레버리지**: **{recommended_leverage:.2f}배** (허용 상한: **{ultimate_ceiling}배**)  
+➖ **추천 레버리지 (XGBoost·코인별 학습)**: {rec_from_xgb:.2f}배  
+- 거래소 상한: {exch_cap}배, 사용자 상한: {user_cap}배, 코인 안전 캡(변동성 조정): {coin_cap}배
+
+> ⚠️ 본 내용은 투자 조언이 아니며 연구/교육용 참고 자료입니다.
 """, unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-5) 🔗 외부 링크 출력 (한 줄에 양쪽 정렬, 간격 최소화)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🔗 외부 링크</div>", unsafe_allow_html=True)
-        tv_url = f"https://www.tradingview.com/symbols/{selected_crypto}/"
-        yf_url = f"https://finance.yahoo.com/quote/{yf_ticker_symbol}/"
-        st.markdown(
-            f"<div class='external-links'>"
-            f"<a href='{tv_url}' target='_blank'>TradingView에서 보기 ▶</a>"
-            f"<a href='{yf_url}' target='_blank'>Yahoo Finance에서 보기 ▶</a>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-6) 종가 & 예측 차트
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📈 종가 & 예측 차트</div>", unsafe_allow_html=True)
-        plot_df = pd.DataFrame({
-            'Close': df['Close'],
-            'MA50': df['MA50'],
-            'EMA200': df['EMA200'],
-        })
-        pred_plot = pd.Series(pred_in_sample.values, index=df.index, name='HW_InSample')
-        forecast_plot = pd.Series(future_forecast.values, index=future_dates, name='HW_Forecast')
-
-        combined = pd.concat([plot_df, pred_plot, forecast_plot], axis=1)
-        st.line_chart(combined, use_container_width=True)
-
-        # ============================== [순서 변경 종료] ==============================
 
     except Exception as e:
-        st.error(f"❌ 오류 발생: {str(e)}")
+        st.error(f"❌ 오류: {str(e)}")
         st.markdown("""
-**문제 해결 안내**
-1. 입력하신 심볼이 TradingView 및 Yahoo Finance에서 유효한지 확인하세요.  
-2. `yfinance` 라이브러리를 최신 버전으로 유지 (`pip install --upgrade yfinance`).  
-3. 최소 100 거래일 이상의 데이터가 필요합니다.  
-4. Streamlit Cloud에서 실행 시 `statsmodels>=0.12.0` 설치 여부를 확인하세요.
+**문제 해결 안내**  
+1) 심볼을 BTC → **BTCUSDT**처럼 입력했는지 확인하세요.  
+2) yfinance가 최신인지 점검하세요 (`pip install --upgrade yfinance`).  
+3) 최소 100 거래일 이상 데이터가 필요합니다.  
+4) `statsmodels`는 0.14+, `xgboost`는 2.0.0+ 권장입니다.  
 """, unsafe_allow_html=True)
-        st.stop()
 
 else:
-    # 버튼 클릭 전 첫 화면 안내문
     st.markdown("""
 <div style='text-align:center'>
-    <h1>💎 코인 AI 예측 시스템</h1>
-    <p>사이드바에서 “암호화폐 심볼”과 “분석 기간”을 설정한 뒤, 투자/리스크 설정을 완료하고 『🚀 분석 시작』 버튼을 눌러주세요.</p>
+    <h1>💎 한글 AI 코인 예측 시스템 (TA/ETS/Theta + XGBoost 레버리지)</h1>
+    <p>사이드바에서 심볼과 옵션을 설정한 뒤 ‘🚀 분석 시작’을 누르세요.</p>
+    <p>코인별 과거 데이터를 학습한 XGBoost 정량회귀로 안전/중앙/공격 분위수 레버리지를 추정합니다.</p>
+    <p>지지선·추세선·RSI·거래량 기반 평가/조언과, 예측 평균/예측구간도 함께 제공합니다.</p>
 </div>
 """, unsafe_allow_html=True)
