@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 한글 AI 코인 예측 시스템 (Streamlit Cloud)
-- ETS/Theta 자동 선택 + 예측구간(버그픽스: 정수 start/end 사용)
+- ETS/Theta 자동 선택 + 예측구간(호환성 수정: summary_frame 사용)
 - 기술적 분석: 지지선/추세선/거래량/RSI/볼린저밴드
 - XGBoost 기반 코인별 맞춤 레버리지 추천(정량회귀) + 폴백
-- 빠른 검증 모드(기본 ON)로 속도 개선
+- 검증 모드: 끄기/빠름/정밀 (기본: 빠름)
 """
 
 import os
@@ -14,7 +14,6 @@ from typing import Tuple, Dict, Any, List
 
 import numpy as np
 import pandas as pd
-import altair as alt
 import yfinance as yf
 import statsmodels.api as sm
 from statsmodels.tsa.exponential_smoothing.ets import ETSModel
@@ -25,12 +24,12 @@ import streamlit as st
 # Streamlit 기본 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="한글 AI 코인 예측 (ETS/Theta + XGBoost 레버리지, Fast Validation)",
+    page_title="한글 AI 코인 예측 (ETS/Theta + XGBoost 레버리지)",
     layout="wide"
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# (옵션) keep_alive: 환경변수 기반 1회 기동 가드 (Streamlit Cloud는 보통 불필요)
+# keep_alive: 환경변수 ENABLE_KEEP_ALIVE=1일 때만 1회 기동
 # ────────────────────────────────────────────────────────────────────────
 ENABLE_KEEP_ALIVE = os.getenv("ENABLE_KEEP_ALIVE", "0") == "1"
 if ENABLE_KEEP_ALIVE:
@@ -94,7 +93,7 @@ def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date) -> p
         if _df is None or _df.empty:
             return pd.DataFrame()
         _df = _df.copy()
-        # 일 단위 '고정 빈도' 보장 → ETS 예측 안정화(정수 start/end 사용과 궁합) 
+        # 일 단위 고정 빈도 보장 → ETS 예측 안정화(정수 start/end와 궁합)
         _df.index = pd.to_datetime(_df.index).tz_localize(None)
         full_idx = pd.date_range(start=start, end=end, freq="D")
         _df = _df.reindex(full_idx)
@@ -210,7 +209,7 @@ with st.sidebar:
     horizon = st.slider("예측 기간(일)", 7, 60, 30, 1)
 
     st.markdown("## 4) 검증 속도")
-    fast_validation = st.checkbox("빠른 검증 모드 (권장)", value=True)  # 새로 추가
+    val_mode = st.selectbox("검증 모드", ["빠름", "정밀", "끄기"], index=0)
 
     st.markdown("## 5) 투자 및 리스크 설정")
     investment_amount = st.number_input("투자 금액 (USDT)", min_value=1.0, value=1000.0, step=10.0)
@@ -245,18 +244,26 @@ def fit_ets(series: pd.Series, weekly: bool, damped: bool):
     res = model.fit()
     return {"model": model, "res": res}
 
-def forecast_ets(res, steps: int, future_index: pd.DatetimeIndex, method: str = "exact", reps: int = 1000):
+def forecast_ets(res, steps: int, future_index: pd.DatetimeIndex, method: str = "exact", reps: int = 600):
     """
-    🔧 버그픽스: index 배열을 직접 넘기지 않고 정수 start/end 사용
+    호환성 수정:
+    - 정수 start/end로 예측 길이 고정
+    - PredictionResults.summary_frame()에서 mean/CI 추출 (버전간 conf_int 차이 회피)
     """
     nobs = res.model.nobs
     pred = res.get_prediction(start=nobs, end=nobs + steps - 1,
                               method=method, simulate_repetitions=reps)
-    mean = pd.Series(pred.predicted_mean, index=future_index, name="예측 종가")
-    ci_raw = pred.conf_int()
-    # conf_int가 2열(하/상) 구조라는 가정 하에 재인덱싱
-    ci = pd.DataFrame({"lower y": ci_raw.iloc[:, 0].values,
-                       "upper y": ci_raw.iloc[:, -1].values}, index=future_index)
+    try:
+        sf = pred.summary_frame(alpha=0.05)  # columns: mean, mean_se, mean_ci_lower, mean_ci_upper
+        mean = pd.Series(sf["mean"].values, index=future_index, name="예측 종가")
+        ci = pd.DataFrame({"lower y": sf["mean_ci_lower"].values,
+                           "upper y": sf["mean_ci_upper"].values}, index=future_index)
+    except Exception:
+        # 예외 시: 예측 평균만 제공(구간은 NaN)
+        pm = np.asarray(pred.predicted_mean).ravel()
+        mean = pd.Series(pm, index=future_index, name="예측 종가")
+        ci = pd.DataFrame({"lower y": np.full_like(pm, np.nan, dtype=float),
+                           "upper y": np.full_like(pm, np.nan, dtype=float)}, index=future_index)
     return mean, ci
 
 def fit_theta(series: pd.Series, period: int = None):
@@ -268,15 +275,13 @@ def forecast_theta(res, steps: int, future_index: pd.DatetimeIndex):
     mean = res.forecast(steps=steps)
     pi = res.prediction_intervals(steps=steps, alpha=0.05)  # 95% 구간
     ci = pd.DataFrame({"lower y": pi["lower"], "upper y": pi["upper"]}, index=mean.index)
-    # 인덱스 통일
     mean.index = future_index
     ci.index = future_index
     return mean.rename("예측 종가"), ci
 
-def rolling_one_step_score(series: pd.Series, fit_func, horizon: int = 1,
-                           window_days: int = 120, stride: int = 1) -> float:
+def rolling_one_step_score(series: pd.Series, fit_func, window_days: int, stride: int) -> float:
     """
-    🔧 속도 개선: stride로 건너뛰며 평가 + 모든 모델은 forecast(1)만 사용(인덱스 에러 차단)
+    속도 최적화: stride로 건너뛰며 평가, forecast(1)만 사용
     """
     if len(series) < window_days + 10:
         window_days = min(len(series) - 10, 60)
@@ -287,7 +292,6 @@ def rolling_one_step_score(series: pd.Series, fit_func, horizon: int = 1,
         train = series.iloc[:i]
         try:
             m = fit_func(train)
-            # ETS/Theta 공통: 1스텝은 forecast(1)로 단순화
             yhat = float(m["res"].forecast(steps=1)[0])
         except Exception:
             yhat = np.nan
@@ -307,7 +311,7 @@ except Exception:
 
 @st.cache_resource(show_spinner=False)
 def train_xgb_leverage_model(train_X: pd.DataFrame, train_y: np.ndarray, alphas: np.ndarray):
-    # XGBoost 2.0~: QuantileDMatrix + reg:quantileerror
+    # XGBoost 2.0+: QuantileDMatrix + reg:quantileerror (지원 안되면 MSE 폴백)
     try:
         Xy = xgb.QuantileDMatrix(train_X.values.astype(np.float32), train_y.astype(np.float32))
         params = {
@@ -323,7 +327,6 @@ def train_xgb_leverage_model(train_X: pd.DataFrame, train_y: np.ndarray, alphas:
         booster = xgb.train(params, Xy, num_boost_round=160, early_stopping_rounds=20, evals=[(Xy, "Train")])
         return ("quantile", booster)
     except Exception:
-        # 폴백: MSE 회귀 + 개별 α 스케일링은 사후 조정
         dtrain = xgb.DMatrix(train_X.values.astype(np.float32), label=train_y.astype(np.float32))
         params = {
             "objective": "reg:squarederror",
@@ -371,14 +374,13 @@ def predict_leverage(booster_info, cur_feat: pd.DataFrame, alphas: np.ndarray, c
     if mode == "quantile":
         X_cur = xgb.QuantileDMatrix(cur_feat.values.astype(np.float32))
         scores = booster.inplace_predict(X_cur)  # (n, len(alphas))
-        q10 = float(scores[-1, 0])  # 0.10
+        q10 = float(scores[-1, 0])
         q50 = float(scores[-1, 1]) if scores.shape[1] > 1 else q10
         rec = q10 if not np.isnan(q10) else q50
     else:
         dcur = xgb.DMatrix(cur_feat.values.astype(np.float32))
         pred = float(booster.inplace_predict(dcur)[-1])
-        # 보수적 α=0.10 계수를 근사적으로 적용(경험적 0.7배)
-        rec = pred * 0.7
+        rec = pred * 0.7  # 보수적 보정
     return float(np.clip(rec, 1.0, min(exch_cap, user_cap, coin_cap)))
 
 # ────────────────────────────────────────────────────────────────────────
@@ -440,14 +442,14 @@ if bt:
         if model_mode == "자동(권장)":
             cand.append(_fit_ets_no_season); cand_names.append("ETS(무계절)")
 
-        # 🔧 빠른 검증 모드: 60일/stride 5, 정밀: 120일/stride 1
-        win = 60 if fast_validation else 120
-        step = 5 if fast_validation else 1
-        with st.spinner(f"🧪 모델 검증(원스텝, window={win}, stride={step}) 중..."):
-            scores = []
-            for f, nm in zip(cand, cand_names):
-                sc = rolling_one_step_score(series_log, f, horizon=1, window_days=win, stride=step)
-                scores.append(sc)
+        # 검증 모드 설정
+        if val_mode == "끄기":
+            scores = [np.nan] * len(cand_names)
+        else:
+            win = 60 if val_mode == "빠름" else 120
+            step = 5 if val_mode == "빠름" else 1
+            with st.spinner(f"🧪 모델 검증(원스텝, window={win}, stride={step}) 중..."):
+                scores = [rolling_one_step_score(series_log, f, window_days=win, stride=step) for f in cand]
 
         with st.spinner("🤖 최종 모델 적합 및 예측 중..."):
             last_date = df.index[-1]
@@ -488,9 +490,13 @@ if bt:
                 out = _fit_and_forecast(_fit_theta_auto, "Theta")
                 mean, ci = out["mean"], out["ci"]; best_name = "Theta"
             else:
-                best_idx = int(np.argmin(scores))
-                best_name = cand_names[best_idx]
-                out = _fit_and_forecast(cand[best_idx], best_name)
+                if val_mode == "끄기":
+                    best_name = "ETS(옵션)"
+                    out = _fit_and_forecast(_fit_ets_auto, best_name)
+                else:
+                    best_idx = int(np.nanargmin(scores))
+                    best_name = cand_names[best_idx]
+                    out = _fit_and_forecast(cand[best_idx], best_name)
                 mean, ci = out["mean"], out["ci"]
 
         # in-sample 적합값(시각화용)
@@ -505,20 +511,15 @@ if bt:
 
         st.success(
             f"✅ 분석 완료: 선택 모델 = **{best_name}**"
-            + (("  |  검증 MAPE: " + ", ".join([f"{n} {s:.2f}%" for n, s in zip(cand_names, scores)])) if scores else "")
+            + (("" if val_mode == "끄기" else "  |  검증 MAPE: " + ", ".join([f"{n} {s:.2f}%" for n, s in zip(cand_names, scores)])))
         )
 
-        # ── (표/차트/TA 평가는 이전 버전과 동일 — 생략 가능) ──
-        st.subheader("🔮 예측(평균) + 95% 예측구간")
-        show = pd.DataFrame({"예측 평균": mean, "하한(95%)": ci["lower y"], "상한(95%)": ci["upper y"]})
-        st.dataframe(show.style.format(precision=6), use_container_width=True, height=360)
-
         # ────────────────────────────────────────────────────────────────
-        # 🔧 XGBoost: 코인별 레버리지 추천 (정량회귀, 빠른 학습 설정)
+        # 🔧 XGBoost: 코인별 레버리지 추천 (정량회귀)
         # ────────────────────────────────────────────────────────────────
         entry_price = float(df["Close"].iloc[-1])
         far_price = float(mean.iloc[-1])
-        exp_move = float((ci["upper y"].iloc[0] - ci["lower y"].iloc[0]) / max(entry_price, 1e-8)) / 2.0
+        exp_move = float((ci["upper y"].iloc[0] - ci["lower y"].iloc[0]) / max(entry_price, 1e-8)) / 2.0 if not np.isnan(ci["upper y"].iloc[0]) else 0.0
         sigma_eff = float(max(winsorize_returns(df["Close"].pct_change(),0.01).rolling(30).std().iloc[-1] or 0.01, exp_move or 0.0))
         exch_cap = max_leverage_map.get(selected_crypto, 50)
         user_cap = int(leverage_ceiling)
@@ -567,6 +568,7 @@ if bt:
         per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0.0
         position_qty = (max_loss_amount / per_coin_risk) if per_coin_risk > 0 else 0.0
         stop_loss_price = entry_price * (1 - stop_loss_pct) if direction == "up" else entry_price * (1 + stop_loss_pct)
+
         def gen_targets(entry: float, sigma: float, direction: str, k_list=(0.5,1.0,1.5,2.0,3.0)):
             return [(entry + entry*sigma*k) if direction == "up" else (entry - entry*sigma*k) for k in k_list]
         pct_change = abs(far_price - entry_price) / max(entry_price, 1e-8)
@@ -576,10 +578,11 @@ if bt:
         entry_low = entry_price * (1 - sigma_eff) if direction == "up" else entry_price
         entry_high = entry_price if direction == "up" else entry_price * (1 + sigma_eff)
 
-        # 간이 방향일치 승률(빠른 모드: stride 5)
+        # 간이 방향일치 승률(검증 모드 반영)
+        step = 5 if val_mode == "빠름" else (1 if val_mode == "정밀" else 99999)
         N = min(180, len(series_log) - 30)
         correct = 0; total = 0
-        if N > 10:
+        if N > 10 and val_mode != "끄기":
             idx = series_log.index[-N:]
             for i in range(1, len(idx), step):
                 train = series_log.loc[:idx[i-1]]
@@ -615,13 +618,14 @@ if bt:
         for i, tgt in enumerate(targets, 1):
             st.markdown(f"- 🎯 목표가 {i} : {tgt:.5f} USDT")
 
-        st.markdown(f"""
+        if val_mode != "끄기":
+            st.markdown(f"""
 ➖ **AI 전략(원스텝 백테스트)** ➖  
 - 🎰 **방향 일치율**: {rate_win:.2f}% (샘플 {total}회, stride={step})  
 - 🧠 **선택 모델**: {best_name}  
-
-> ⚠️ 본 내용은 투자 조언이 아니며 연구/교육용 참고 자료입니다.
 """, unsafe_allow_html=True)
+
+        st.info("⚠️ 본 내용은 투자 조언이 아니며 연구/교육용 참고 자료입니다.")
 
     except Exception as e:
         st.error(f"❌ 오류: {str(e)}")
@@ -630,14 +634,15 @@ if bt:
 1) 심볼을 BTC → **BTCUSDT**처럼 입력했는지 확인하세요.  
 2) yfinance가 최신인지 점검하세요 (`pip install --upgrade yfinance`).  
 3) 최소 100 거래일 이상 데이터가 필요합니다.  
-4) `statsmodels`는 0.14+ 권장입니다(정수 start/end 예측과 궁합).  
+4) `statsmodels`는 0.14+ 권장입니다(`get_prediction` + `summary_frame` 호환).  
 5) `xgboost`는 2.0.0+ 권장입니다(정량회귀 사용 시).  
 """, unsafe_allow_html=True)
 
 else:
+    # 버튼 클릭 전 첫 화면 안내문
     st.markdown("""
 <div style='text-align:center'>
-    <h1>💎 한글 AI 코인 예측 (ETS/Theta + XGBoost 레버리지)</h1>
-    <p>빠른 검증 모드로 속도를 높였고, ETS 예측은 정수 start/end로 안정화했습니다.</p>
+    <h1>💎 코인 AI 예측 시스템</h1>
+    <p>사이드바에서 “암호화폐 심볼”과 “분석 기간”을 설정한 뒤, 투자/리스크 설정을 완료하고 『🚀 분석 시작』 버튼을 눌러주세요.</p>
 </div>
 """, unsafe_allow_html=True)
