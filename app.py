@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 한글 AI 코인 예측 시스템 (Streamlit Cloud)
-- ETS/Theta 자동 선택 + 예측구간
+- ETS/Theta 자동 선택 + 예측구간(버그픽스: 정수 start/end 사용)
 - 기술적 분석: 지지선/추세선/거래량/RSI/볼린저밴드
-- XGBoost 기반 코인별 맞춤 레버리지 추천(정량회귀) + 휴리스틱 폴백
+- XGBoost 기반 코인별 맞춤 레버리지 추천(정량회귀) + 폴백
+- 빠른 검증 모드(기본 ON)로 속도 개선
 """
 
 import os
@@ -18,14 +19,13 @@ import yfinance as yf
 import statsmodels.api as sm
 from statsmodels.tsa.exponential_smoothing.ets import ETSModel
 from statsmodels.tsa.forecasting.theta import ThetaModel
-
 import streamlit as st
 
 # ────────────────────────────────────────────────────────────────────────
 # Streamlit 기본 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="한글 AI 코인 예측 시스템 (TA/ETS/Theta + XGBoost 레버리지)",
+    page_title="한글 AI 코인 예측 (ETS/Theta + XGBoost 레버리지, Fast Validation)",
     layout="wide"
 )
 
@@ -47,7 +47,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 # ────────────────────────────────────────────────────────────────────────
-# 1) 종목별 상한/상장일/코인별 안전 캡(휴리스틱)
+# 1) 상한/상장일/코인 안전 캡(휴리스틱)
 # ────────────────────────────────────────────────────────────────────────
 max_leverage_map: Dict[str, int] = {
     # 예: 'BTCUSDT': 125, 'ETHUSDT': 75
@@ -69,7 +69,7 @@ coin_safe_cap_map: Dict[str, float] = {
 }
 
 # ────────────────────────────────────────────────────────────────────────
-# 2) 유틸: 상장일/데이터/지표
+# 2) 유틸/데이터/지표
 # ────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_listing_date(symbol: str) -> datetime.date:
@@ -94,6 +94,7 @@ def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date) -> p
         if _df is None or _df.empty:
             return pd.DataFrame()
         _df = _df.copy()
+        # 일 단위 '고정 빈도' 보장 → ETS 예측 안정화(정수 start/end 사용과 궁합) 
         _df.index = pd.to_datetime(_df.index).tz_localize(None)
         full_idx = pd.date_range(start=start, end=end, freq="D")
         _df = _df.reindex(full_idx)
@@ -208,7 +209,10 @@ with st.sidebar:
     use_loglike = st.checkbox("로그(≈Box-Cox) 변환 사용(안정화)", value=True)
     horizon = st.slider("예측 기간(일)", 7, 60, 30, 1)
 
-    st.markdown("## 4) 투자 및 리스크 설정")
+    st.markdown("## 4) 검증 속도")
+    fast_validation = st.checkbox("빠른 검증 모드 (권장)", value=True)  # 새로 추가
+
+    st.markdown("## 5) 투자 및 리스크 설정")
     investment_amount = st.number_input("투자 금액 (USDT)", min_value=1.0, value=1000.0, step=10.0)
     risk_per_trade_pct = st.slider("리스크 비율 (%)", 0.5, 5.0, 2.0, 0.5) / 100.0
     stop_loss_k = st.number_input("손절 배수 (σ 기준)", min_value=1.0, max_value=3.0, value=2.0, step=0.5)
@@ -241,13 +245,18 @@ def fit_ets(series: pd.Series, weekly: bool, damped: bool):
     res = model.fit()
     return {"model": model, "res": res}
 
-def forecast_ets(res, future_index: pd.DatetimeIndex, method: str = "exact", reps: int = 1000):
-    try:
-        pred = res.get_prediction(index=future_index, method=method, simulate_repetitions=reps)
-    except Exception:
-        pred = res.get_prediction(index=future_index, method="simulated", simulate_repetitions=reps)
+def forecast_ets(res, steps: int, future_index: pd.DatetimeIndex, method: str = "exact", reps: int = 1000):
+    """
+    🔧 버그픽스: index 배열을 직접 넘기지 않고 정수 start/end 사용
+    """
+    nobs = res.model.nobs
+    pred = res.get_prediction(start=nobs, end=nobs + steps - 1,
+                              method=method, simulate_repetitions=reps)
     mean = pd.Series(pred.predicted_mean, index=future_index, name="예측 종가")
-    ci = pred.conf_int(); ci.index = future_index
+    ci_raw = pred.conf_int()
+    # conf_int가 2열(하/상) 구조라는 가정 하에 재인덱싱
+    ci = pd.DataFrame({"lower y": ci_raw.iloc[:, 0].values,
+                       "upper y": ci_raw.iloc[:, -1].values}, index=future_index)
     return mean, ci
 
 def fit_theta(series: pd.Series, period: int = None):
@@ -255,28 +264,31 @@ def fit_theta(series: pd.Series, period: int = None):
     res = model.fit()
     return {"model": model, "res": res}
 
-def forecast_theta(res, steps: int):
+def forecast_theta(res, steps: int, future_index: pd.DatetimeIndex):
     mean = res.forecast(steps=steps)
     pi = res.prediction_intervals(steps=steps, alpha=0.05)  # 95% 구간
-    ci = pd.DataFrame({"lower y": pi["lower"], "upper y": pi["upper"]})
-    return mean.rename("예측 종가"), ci  # Theta 예측구간 문서 참조 :contentReference[oaicite:1]{index=1}
+    ci = pd.DataFrame({"lower y": pi["lower"], "upper y": pi["upper"]}, index=mean.index)
+    # 인덱스 통일
+    mean.index = future_index
+    ci.index = future_index
+    return mean.rename("예측 종가"), ci
 
-def rolling_one_step_score(series: pd.Series, fit_func, fcst_func, horizon: int = 1, window_days: int = 120) -> float:
+def rolling_one_step_score(series: pd.Series, fit_func, horizon: int = 1,
+                           window_days: int = 120, stride: int = 1) -> float:
+    """
+    🔧 속도 개선: stride로 건너뛰며 평가 + 모든 모델은 forecast(1)만 사용(인덱스 에러 차단)
+    """
     if len(series) < window_days + 10:
         window_days = min(len(series) - 10, 60)
     idx = series.index
     start_pos = len(series) - window_days
     errs = []
-    for i in range(start_pos + 1, len(series)):
+    for i in range(start_pos + 1, len(series), stride):
         train = series.iloc[:i]
         try:
             m = fit_func(train)
-            if "res" in m:
-                fut_idx = pd.date_range(idx[i], periods=horizon, freq="D")
-                mean, _ = fcst_func(m["res"], fut_idx)
-                yhat = float(mean.iloc[0])
-            else:
-                yhat = np.nan
+            # ETS/Theta 공통: 1스텝은 forecast(1)로 단순화
+            yhat = float(m["res"].forecast(steps=1)[0])
         except Exception:
             yhat = np.nan
         y = float(series.iloc[i])
@@ -285,11 +297,8 @@ def rolling_one_step_score(series: pd.Series, fit_func, fcst_func, horizon: int 
     return float(np.mean(errs) * 100.0) if errs else 1e9
 
 # ────────────────────────────────────────────────────────────────────────
-# 5) 🔧 XGBoost 레버리지 모델 (정량회귀 기반)
-#    - 과거 각 시점의 "안전 레버리지 타깃"을 생성해 지도학습
-#    - 현재 피처로 안전/중앙/공격적 레버리지(α=0.1/0.5/0.9) 추정
+# 5) XGBoost 레버리지(정량회귀) + 폴백
 # ────────────────────────────────────────────────────────────────────────
-# XGBoost 의존성 체크
 try:
     import xgboost as xgb
     XGB_AVAILABLE = True
@@ -298,53 +307,53 @@ except Exception:
 
 @st.cache_resource(show_spinner=False)
 def train_xgb_leverage_model(train_X: pd.DataFrame, train_y: np.ndarray, alphas: np.ndarray):
-    """
-    XGBoost QuantileDMatrix + 'reg:quantileerror' 로 다중 분위수(예: 0.1/0.5/0.9) 회귀
-    - XGBoost 2.0.0+ 필요
-    """
-    Xy = xgb.QuantileDMatrix(train_X.values.astype(np.float32), train_y.astype(np.float32))
-    params = {
-        "objective": "reg:quantileerror",
-        "quantile_alpha": alphas,     # 다중 분위수
-        "tree_method": "hist",        # 정량회귀는 exact 비권장
-        "learning_rate": 0.05,
-        "max_depth": 5,
-        "subsample": 0.9,
-        "colsample_bytree": 0.9,
-        "seed": 42,
-    }
-    booster = xgb.train(
-        params, Xy, num_boost_round=256,
-        early_stopping_rounds=20,
-        evals=[(Xy, "Train")]
-    )
-    return booster  # 정식 사용법/파라미터는 XGBoost 문서 참고 :contentReference[oaicite:2]{index=2}
+    # XGBoost 2.0~: QuantileDMatrix + reg:quantileerror
+    try:
+        Xy = xgb.QuantileDMatrix(train_X.values.astype(np.float32), train_y.astype(np.float32))
+        params = {
+            "objective": "reg:quantileerror",
+            "quantile_alpha": alphas,
+            "tree_method": "hist",
+            "learning_rate": 0.05,
+            "max_depth": 5,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "seed": 42,
+        }
+        booster = xgb.train(params, Xy, num_boost_round=160, early_stopping_rounds=20, evals=[(Xy, "Train")])
+        return ("quantile", booster)
+    except Exception:
+        # 폴백: MSE 회귀 + 개별 α 스케일링은 사후 조정
+        dtrain = xgb.DMatrix(train_X.values.astype(np.float32), label=train_y.astype(np.float32))
+        params = {
+            "objective": "reg:squarederror",
+            "tree_method": "hist",
+            "learning_rate": 0.05,
+            "max_depth": 5,
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "seed": 42,
+        }
+        booster = xgb.train(params, dtrain, num_boost_round=160, early_stopping_rounds=20, evals=[(dtrain, "Train")])
+        return ("mse", booster)
 
 def build_leverage_training_set(df: pd.DataFrame,
                                 risk_per_trade_pct: float,
                                 exch_cap: float,
                                 user_cap: float,
                                 base_coin_cap: float) -> Tuple[pd.DataFrame, np.ndarray]:
-    """
-    레버리지 지도학습용 (X, y) 생성
-    y(타깃): '다음 3일 최대 불리 변동' 기준의 안전 레버리지 상한
-            L_t = risk_per_trade_pct / (MAE_3d_t + eps)
-    * MAE_3d_t: t의 종가 대비 앞으로 3일 최저가 하락폭(음수), 절댓값 사용
-    """
     eps = 1e-4
-    # 피처(전날까지 정보를 사용하도록 시프팅)
     ret = df["Close"].pct_change()
     sigma14 = ret.rolling(14).std().shift(1)
     sigma30 = ret.rolling(30).std().shift(1)
     rsi14 = df["RSI14"].shift(1)
     volr = df["VOL_RATIO"].shift(1)
     corr30 = df["BTC_상관계수"].shift(1)
-    bbw = ((df["bb_upper"] - df["bb_lower"]) / (df["Close"] + 1e-9)).shift(1)  # 밴드폭 비율
+    bbw = ((df["bb_upper"] - df["bb_lower"]) / (df["Close"] + 1e-9)).shift(1)
     ma_slope = (df["MA20"].pct_change().shift(1)).fillna(0)
 
-    # 라벨: 향후 3일 최대 불리 변동(하락) 절댓값
     fwd_low3 = df["Low"].shift(-1).rolling(window=3).min()
-    mae3 = np.maximum(0.0, (df["Close"] - fwd_low3) / (df["Close"] + eps))  # 0~상한
+    mae3 = np.maximum(0.0, (df["Close"] - fwd_low3) / (df["Close"] + eps))
     y = (risk_per_trade_pct / (mae3 + eps)).clip(1.0, min(exch_cap, user_cap, base_coin_cap))
 
     X = pd.DataFrame({
@@ -356,14 +365,21 @@ def build_leverage_training_set(df: pd.DataFrame,
     y = y.reindex(X.index).values.astype(np.float32)
     return X, y
 
-def predict_leverage_with_xgb(booster, cur_feat: pd.DataFrame, alphas: np.ndarray) -> Dict[str, float]:
-    X_cur = cur_feat.values.astype(np.float32)
-    scores = booster.inplace_predict(X_cur)  # (n, len(alphas))
-    # 분위수 배열과 매칭
-    out = {}
-    for i, a in enumerate(alphas):
-        out[f"q{int(a*100)}"] = float(scores[-1, i])  # 가장 최근 행
-    return out
+def predict_leverage(booster_info, cur_feat: pd.DataFrame, alphas: np.ndarray, caps: Tuple[float,float,float]) -> float:
+    mode, booster = booster_info
+    exch_cap, user_cap, coin_cap = caps
+    if mode == "quantile":
+        X_cur = xgb.QuantileDMatrix(cur_feat.values.astype(np.float32))
+        scores = booster.inplace_predict(X_cur)  # (n, len(alphas))
+        q10 = float(scores[-1, 0])  # 0.10
+        q50 = float(scores[-1, 1]) if scores.shape[1] > 1 else q10
+        rec = q10 if not np.isnan(q10) else q50
+    else:
+        dcur = xgb.DMatrix(cur_feat.values.astype(np.float32))
+        pred = float(booster.inplace_predict(dcur)[-1])
+        # 보수적 α=0.10 계수를 근사적으로 적용(경험적 0.7배)
+        rec = pred * 0.7
+    return float(np.clip(rec, 1.0, min(exch_cap, user_cap, coin_cap)))
 
 # ────────────────────────────────────────────────────────────────────────
 # 6) 메인
@@ -410,7 +426,7 @@ if bt:
             last_pivot_low = float(piv_lows[-1][1]) if len(piv_lows) else float(df["bb_lower"].iloc[-1])
             support_price = max(last_pivot_low, float(df["bb_lower"].iloc[-1]))
 
-        # 시계열 예측(ETS/Theta) — (기존 로직 그대로, 생략 없이 유지)
+        # 시계열 예측(ETS/Theta)
         series_log, log_info = _maybe_log(df["Close"], enable=use_loglike)
         def _fit_ets_auto(s): return fit_ets(s, weekly=use_weekly_seasonality, damped=use_damped_trend)
         def _fit_ets_no_season(s): return fit_ets(s, weekly=False, damped=use_damped_trend)
@@ -424,17 +440,13 @@ if bt:
         if model_mode == "자동(권장)":
             cand.append(_fit_ets_no_season); cand_names.append("ETS(무계절)")
 
-        with st.spinner("🧪 모델 검증(원스텝) 중..."):
+        # 🔧 빠른 검증 모드: 60일/stride 5, 정밀: 120일/stride 1
+        win = 60 if fast_validation else 120
+        step = 5 if fast_validation else 1
+        with st.spinner(f"🧪 모델 검증(원스텝, window={win}, stride={step}) 중..."):
             scores = []
             for f, nm in zip(cand, cand_names):
-                try:
-                    sc = rolling_one_step_score(series_log, f,
-                        fcst_func=lambda res, idx, method="exact": forecast_ets(res, idx, method),
-                        horizon=1, window_days=120)
-                except Exception:
-                    sc = rolling_one_step_score(series_log, f,
-                        fcst_func=lambda res, steps=1: forecast_theta(res, steps),
-                        horizon=1, window_days=120)
+                sc = rolling_one_step_score(series_log, f, horizon=1, window_days=win, stride=step)
                 scores.append(sc)
 
         with st.spinner("🤖 최종 모델 적합 및 예측 중..."):
@@ -444,21 +456,19 @@ if bt:
             def _fit_and_forecast(func, name):
                 if "Theta" in name:
                     res = func(series_log)["res"]
-                    mean_log, ci = forecast_theta(res, steps=horizon)
+                    mean_log, ci = forecast_theta(res, steps=horizon, future_index=future_idx)
                     mean = _inv_log(mean_log, log_info)
                     ci = ci.copy()
                     ci["lower y"] = _inv_log(ci["lower y"], log_info)
                     ci["upper y"] = _inv_log(ci["upper y"], log_info)
-                    mean.index = future_idx; ci.index = future_idx
                     return {"mean": mean, "ci": ci}
                 else:
                     res = func(series_log)["res"]
-                    mean_log, ci = forecast_ets(res, future_idx, method="exact", reps=1000)
+                    mean_log, ci = forecast_ets(res, steps=horizon, future_index=future_idx, method="exact", reps=600)
                     mean = _inv_log(mean_log, log_info)
-                    ci = ci.rename(columns=lambda c: "lower y" if "lower" in c.lower() else ("upper y" if "upper" in c.lower() else c))
                     ci = pd.DataFrame({
-                        "lower y": _inv_log(ci.iloc[:, 0], log_info),
-                        "upper y": _inv_log(ci.iloc[:, -1], log_info)
+                        "lower y": _inv_log(ci["lower y"], log_info),
+                        "upper y": _inv_log(ci["upper y"], log_info)
                     }, index=future_idx)
                     return {"mean": mean, "ci": ci}
 
@@ -483,7 +493,7 @@ if bt:
                 out = _fit_and_forecast(cand[best_idx], best_name)
                 mean, ci = out["mean"], out["ci"]
 
-        # in-sample 적합값
+        # in-sample 적합값(시각화용)
         with st.spinner("📊 과거 적합 곡선 계산 중..."):
             if "Theta" in best_name:
                 res = _fit_theta_auto(series_log)["res"]; fitted_log = res.fittedvalues
@@ -493,102 +503,93 @@ if bt:
                 res = _fit_ets_auto(series_log)["res"]; fitted_log = res.fittedvalues
             fitted = _inv_log(pd.Series(fitted_log, index=series_log.index), log_info)
 
-        # ── 기본 출력(표/차트) — 기존과 동일, 생략 ──
+        st.success(
+            f"✅ 분석 완료: 선택 모델 = **{best_name}**"
+            + (("  |  검증 MAPE: " + ", ".join([f"{n} {s:.2f}%" for n, s in zip(cand_names, scores)])) if scores else "")
+        )
+
+        # ── (표/차트/TA 평가는 이전 버전과 동일 — 생략 가능) ──
+        st.subheader("🔮 예측(평균) + 95% 예측구간")
+        show = pd.DataFrame({"예측 평균": mean, "하한(95%)": ci["lower y"], "상한(95%)": ci["upper y"]})
+        st.dataframe(show.style.format(precision=6), use_container_width=True, height=360)
 
         # ────────────────────────────────────────────────────────────────
-        # 🔧 XGBoost: 코인별 레버리지 추천(정량회귀)
+        # 🔧 XGBoost: 코인별 레버리지 추천 (정량회귀, 빠른 학습 설정)
         # ────────────────────────────────────────────────────────────────
         entry_price = float(df["Close"].iloc[-1])
         far_price = float(mean.iloc[-1])
-        # 예측구간 첫날 폭으로 기대 변동치 추정
         exp_move = float((ci["upper y"].iloc[0] - ci["lower y"].iloc[0]) / max(entry_price, 1e-8)) / 2.0
-        sigma_eff = float(max(volatility_30d, exp_move) if not np.isnan(exp_move) else volatility_30d)
-        vol_ratio_now = float((df["Volume"].iloc[-1] / (df["VOL_MA20"].iloc[-1] + 1e-9)))
-
+        sigma_eff = float(max(winsorize_returns(df["Close"].pct_change(),0.01).rolling(30).std().iloc[-1] or 0.01, exp_move or 0.0))
         exch_cap = max_leverage_map.get(selected_crypto, 50)
         user_cap = int(leverage_ceiling)
         base_cap = coin_safe_cap_map.get(selected_crypto, 6.0)
-        # σ가 커질수록 코인 안전 캡 축소
         vol_factor = float(np.clip(0.02 / max(sigma_eff, 1e-4), 0.4, 1.2))
         coin_cap = max(1.0, round(base_cap * vol_factor, 2))
-        # 학습 데이터 구성
-        X_train, y_train = build_leverage_training_set(
-            df.copy(), risk_per_trade_pct, exch_cap, user_cap, coin_cap
-        )
 
-        # 현재 피처(가장 최근 1행) 준비
+        X_train, y_train = build_leverage_training_set(df.copy(), risk_per_trade_pct, exch_cap, user_cap, coin_cap)
         cur_feat = pd.DataFrame({
             "sigma14": [df["Close"].pct_change().rolling(14).std().iloc[-2]],
             "sigma30": [df["Close"].pct_change().rolling(30).std().iloc[-2]],
             "rsi14":   [df["RSI14"].iloc[-2]],
-            "vol_ratio":[df["VOL_RATIO"].iloc[-2]],
+            "vol_ratio":[(df["Volume"].iloc[-2] / (df["VOL_MA20"].iloc[-2] + 1e-9))],
             "btc_corr30":[df["BTC_상관계수"].iloc[-2]],
             "bb_width":[((df["bb_upper"].iloc[-2]-df["bb_lower"].iloc[-2])/(df["Close"].iloc[-2]+1e-9))],
             "ma20_slope":[(df["MA20"].pct_change().iloc[-2])],
         }).replace([np.inf, -np.inf], np.nan).fillna(method="ffill").fillna(0.0)
 
-        # 학습/예측
-        rec_from_xgb = None
-        if XGB_AVAILABLE and len(X_train) >= 200:  # 최소 표본 확보 후 모델 사용
+        if XGB_AVAILABLE and len(X_train) >= 200:
             try:
-                alphas = np.array([0.10, 0.50, 0.90], dtype=np.float32)  # 보수/중앙/공격
-                booster = train_xgb_leverage_model(X_train, y_train, alphas)
-                q_preds = predict_leverage_with_xgb(booster, cur_feat, alphas)
-                # 안전 측(10% 분위수)을 기본 추천으로 채택
-                safe_q = q_preds.get("q10", np.nan)
-                median_q = q_preds.get("q50", np.nan)
-                # 최종 추천(클립: 거래소/사용자/코인 캡)
-                rec_from_xgb = float(np.clip(safe_q if not np.isnan(safe_q) else median_q,
-                                             1.0, min(exch_cap, user_cap, coin_cap)))
+                alphas = np.array([0.10, 0.50, 0.90], dtype=np.float32)
+                booster_info = train_xgb_leverage_model(X_train, y_train, alphas)
+                rec_lev = predict_leverage(booster_info, cur_feat, alphas, (exch_cap, user_cap, coin_cap))
             except Exception as e:
-                st.info(f"XGBoost 정량회귀 사용 불가(폴백 사용): {e}")
-                rec_from_xgb = None
+                st.info(f"XGBoost 정량회귀 사용 불가(룰 기반 폴백): {e}")
+                rec_lev = None
+        else:
+            rec_lev = None
 
-        # 폴백(룰 기반)
-        if rec_from_xgb is None or np.isnan(rec_from_xgb):
+        # 폴백: 룰 기반
+        if rec_lev is None or np.isnan(rec_lev):
             max_loss_amount = float(investment_amount) * float(risk_per_trade_pct)
             stop_loss_pct = max(float(sigma_eff) * float(stop_loss_k), 0.002)
             per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0.0
             position_qty = (max_loss_amount / per_coin_risk) if per_coin_risk > 0 else 0.0
             notional_value = entry_price * position_qty
-            rec_from_rule = (notional_value / float(investment_amount)) if investment_amount > 0 else 1.0
-            rec_from_xgb = float(np.clip(rec_from_rule, 1.0, min(exch_cap, user_cap, coin_cap)))
+            rec_lev = float(np.clip((notional_value / float(investment_amount)) if investment_amount > 0 else 1.0,
+                                    1.0, min(exch_cap, user_cap, coin_cap)))
 
-        # 이후 출력/목표가·손절 등은 기존 로직 사용 (rec_from_xgb를 추천 레버리지로)
         direction = "up" if far_price > entry_price else "down"
         position_signal = "매수 / 롱" if direction == "up" else "매도 / 숏"
 
-        # 손절/수량 재계산(추천 레버리지는 별개로 표시)
+        # 손절/수량/목표가
         max_loss_amount = float(investment_amount) * float(risk_per_trade_pct)
         stop_loss_pct = max(float(sigma_eff) * float(stop_loss_k), 0.002)
         per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0.0
         position_qty = (max_loss_amount / per_coin_risk) if per_coin_risk > 0 else 0.0
-
-        # σ 기반 목표가
-        def gen_targets(entry: float, sigma: float, direction: str, k_list=(0.5, 1.0, 1.5, 2.0, 3.0)):
+        stop_loss_price = entry_price * (1 - stop_loss_pct) if direction == "up" else entry_price * (1 + stop_loss_pct)
+        def gen_targets(entry: float, sigma: float, direction: str, k_list=(0.5,1.0,1.5,2.0,3.0)):
             return [(entry + entry*sigma*k) if direction == "up" else (entry - entry*sigma*k) for k in k_list]
         pct_change = abs(far_price - entry_price) / max(entry_price, 1e-8)
-        ks = (0.5, 1.0, 1.5, 2.0, 3.0) if pct_change >= 0.05 else ((0.5, 1.0, 1.5) if pct_change >= 0.02 else (1.0,))
+        ks = (0.5,1.0,1.5,2.0,3.0) if pct_change >= 0.05 else ((0.5,1.0,1.5) if pct_change >= 0.02 else (1.0,))
         targets = gen_targets(entry_price, sigma_eff, direction, ks)
         primary_target = targets[-1]
-        stop_loss_price = entry_price * (1 - stop_loss_pct) if direction == "up" else entry_price * (1 + stop_loss_pct)
+        entry_low = entry_price * (1 - sigma_eff) if direction == "up" else entry_price
+        entry_high = entry_price if direction == "up" else entry_price * (1 + sigma_eff)
 
-        # 간이 방향일치 승률(생략 없이 유지) …
+        # 간이 방향일치 승률(빠른 모드: stride 5)
         N = min(180, len(series_log) - 30)
         correct = 0; total = 0
         if N > 10:
             idx = series_log.index[-N:]
-            for i in range(1, len(idx)):
+            for i in range(1, len(idx), step):
                 train = series_log.loc[:idx[i-1]]
                 try:
                     if "Theta" in best_name:
                         r = _fit_theta_auto(train)["res"]; pred1 = float(r.forecast(steps=1).iloc[0])
                     elif "무계절" in best_name:
-                        r = _fit_ets_no_season(train)["res"]; fut_idx = pd.date_range(idx[i-1] + datetime.timedelta(days=1), periods=1, freq="D")
-                        pred1 = float(forecast_ets(r, fut_idx, "exact")[0].iloc[0])
+                        r = _fit_ets_no_season(train)["res"]; pred1 = float(r.forecast(steps=1).iloc[0])
                     else:
-                        r = _fit_ets_auto(train)["res"]; fut_idx = pd.date_range(idx[i-1] + datetime.timedelta(days=1), periods=1, freq="D")
-                        pred1 = float(forecast_ets(r, fut_idx, "exact")[0].iloc[0])
+                        r = _fit_ets_auto(train)["res"]; pred1 = float(r.forecast(steps=1).iloc[0])
                     pred1 = float(_inv_log(pd.Series([pred1]), log_info).iloc[0])
                 except Exception:
                     continue
@@ -598,10 +599,8 @@ if bt:
                 correct += int(actual_dir == pred_dir); total += 1
         rate_win = round((correct / total * 100.0), 2) if total > 0 else 0.0
 
-        # ── 출력 ───────────────────────────────────────────────────────
+        # 출력
         st.subheader("💖 레버리지·목표가 / 롱·숏 / AI 전략 / 진입가 범위")
-        entry_low = entry_price * (1 - sigma_eff) if direction == "up" else entry_price
-        entry_high = entry_price if direction == "up" else entry_price * (1 + sigma_eff)
         st.markdown(f"""
 1) **포지션 신호**: {position_signal}  
 2) **현재가 (진입가)**: {entry_price:.4f} USDT  
@@ -611,18 +610,15 @@ if bt:
 6) **손절가 (StopLoss)**: {stop_loss_price:.4f} USDT  
 7) **주요 목표가 (Primary Target)**: {primary_target:,.5f} USDT  
 
-➖ **목표가 목록** ➖  
+➖ **추천 레버리지 (XGBoost·코인별 학습)**: {rec_lev:.2f}배  
 """, unsafe_allow_html=True)
         for i, tgt in enumerate(targets, 1):
             st.markdown(f"- 🎯 목표가 {i} : {tgt:.5f} USDT")
 
         st.markdown(f"""
 ➖ **AI 전략(원스텝 백테스트)** ➖  
-- 🎰 **방향 일치율**: {rate_win:.2f}% (최근 {total}회 평가)  
+- 🎰 **방향 일치율**: {rate_win:.2f}% (샘플 {total}회, stride={step})  
 - 🧠 **선택 모델**: {best_name}  
-
-➖ **추천 레버리지 (XGBoost·코인별 학습)**: {rec_from_xgb:.2f}배  
-- 거래소 상한: {exch_cap}배, 사용자 상한: {user_cap}배, 코인 안전 캡(변동성 조정): {coin_cap}배
 
 > ⚠️ 본 내용은 투자 조언이 아니며 연구/교육용 참고 자료입니다.
 """, unsafe_allow_html=True)
@@ -634,15 +630,14 @@ if bt:
 1) 심볼을 BTC → **BTCUSDT**처럼 입력했는지 확인하세요.  
 2) yfinance가 최신인지 점검하세요 (`pip install --upgrade yfinance`).  
 3) 최소 100 거래일 이상 데이터가 필요합니다.  
-4) `statsmodels`는 0.14+, `xgboost`는 2.0.0+ 권장입니다.  
+4) `statsmodels`는 0.14+ 권장입니다(정수 start/end 예측과 궁합).  
+5) `xgboost`는 2.0.0+ 권장입니다(정량회귀 사용 시).  
 """, unsafe_allow_html=True)
 
 else:
     st.markdown("""
 <div style='text-align:center'>
-    <h1>💎 한글 AI 코인 예측 시스템 (TA/ETS/Theta + XGBoost 레버리지)</h1>
-    <p>사이드바에서 심볼과 옵션을 설정한 뒤 ‘🚀 분석 시작’을 누르세요.</p>
-    <p>코인별 과거 데이터를 학습한 XGBoost 정량회귀로 안전/중앙/공격 분위수 레버리지를 추정합니다.</p>
-    <p>지지선·추세선·RSI·거래량 기반 평가/조언과, 예측 평균/예측구간도 함께 제공합니다.</p>
+    <h1>💎 한글 AI 코인 예측 (ETS/Theta + XGBoost 레버리지)</h1>
+    <p>빠른 검증 모드로 속도를 높였고, ETS 예측은 정수 start/end로 안정화했습니다.</p>
 </div>
 """, unsafe_allow_html=True)
