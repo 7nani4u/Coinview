@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.1.3 (AI 예측 + 포지션 추천)
+코인 AI 예측 시스템 - v2.1.2 (Keep-Alive)
 - TA-Lib 기반 61개 캔들스틱 패턴 지원
 - 매도 시점 예측 기능 (언제 팔아야 하는지)
 - 적응형 지표 계산
@@ -934,258 +934,6 @@ def render_ai_forecast(future_df: pd.DataFrame, hw_confidence: float):
             st.error("⚠️ 강한 하락 예상")
 
 
-
-
-# [추가됨] AI 예측 분석 함수
-def analyze_ai_prediction(df: pd.DataFrame, future_df: pd.DataFrame, hw_confidence: float) -> dict:
-    """
-    데이터를 기반으로 단기 추세를 예측하고 포지션을 추천
-    
-    Args:
-        df: 과거 데이터
-        future_df: 예측 데이터
-        hw_confidence: Holt-Winters 신뢰도
-    
-    Returns:
-        dict: AI 예측 결과
-    """
-    current_price = df['Close'].iloc[-1]
-    
-    # 지표 계산
-    rsi = df['RSI14'].iloc[-1] if 'RSI14' in df.columns else 50
-    ema50 = df['EMA50'].iloc[-1] if 'EMA50' in df.columns else current_price
-    ema200 = df['EMA200'].iloc[-1] if 'EMA200' in df.columns else current_price
-    macd = df['MACD'].iloc[-1] if 'MACD' in df.columns else 0
-    macd_signal = df['MACD_Signal'].iloc[-1] if 'MACD_Signal' in df.columns else 0
-    
-    # 거래량 분석
-    volume_current = df['Volume'].iloc[-1] if 'Volume' in df.columns else 0
-    volume_avg = df['Volume'].iloc[-20:].mean() if 'Volume' in df.columns else 1
-    volume_ratio = volume_current / volume_avg if volume_avg > 0 else 1
-    
-    # 예측 가격 추세
-    if len(future_df) > 0 and '예측 종가' in future_df.columns:
-        future_price = future_df['예측 종가'].iloc[-1]
-        price_change_pct = ((future_price - current_price) / current_price) * 100
-    else:
-        price_change_pct = 0
-    
-    # 점수 시스템 (100점 만점)
-    score = 0
-    reasons = []
-    
-    # 1. 이동평균 분석 (30점)
-    if current_price > ema50 > ema200:
-        score += 30
-        reasons.append("골든크로스 상태 (EMA50 > EMA200)")
-    elif current_price < ema50 < ema200:
-        score -= 30
-        reasons.append("데드크로스 상태 (EMA50 < EMA200)")
-    elif current_price > ema50:
-        score += 15
-        reasons.append("단기 이평선 상승 돌파")
-    elif current_price < ema50:
-        score -= 15
-        reasons.append("단기 이평선 하락 이탈")
-    
-    # 2. RSI 분석 (20점)
-    if rsi > 70:
-        score -= 20
-        reasons.append(f"과매수 구간 (RSI {rsi:.1f})")
-    elif rsi < 30:
-        score += 20
-        reasons.append(f"과매도 구간 (RSI {rsi:.1f})")
-    elif 40 <= rsi <= 60:
-        score += 10
-        reasons.append(f"중립 구간 (RSI {rsi:.1f})")
-    
-    # 3. MACD 분석 (20점)
-    if macd > macd_signal and macd > 0:
-        score += 20
-        reasons.append("MACD 상승 신호")
-    elif macd < macd_signal and macd < 0:
-        score -= 20
-        reasons.append("MACD 하락 신호")
-    elif macd > macd_signal:
-        score += 10
-        reasons.append("MACD 전환 가능성")
-    
-    # 4. 거래량 분석 (15점)
-    if volume_ratio > 1.5:
-        score += 15
-        reasons.append(f"거래량 급증 ({volume_ratio:.1f}배)")
-    elif volume_ratio > 1.2:
-        score += 8
-        reasons.append(f"거래량 증가 ({volume_ratio:.1f}배)")
-    elif volume_ratio < 0.7:
-        score -= 10
-        reasons.append(f"거래량 감소 ({volume_ratio:.1f}배)")
-    
-    # 5. 예측 추세 (15점)
-    if price_change_pct > 2:
-        score += 15
-        reasons.append(f"예측 가격 상승 (+{price_change_pct:.1f}%)")
-    elif price_change_pct < -2:
-        score -= 15
-        reasons.append(f"예측 가격 하락 ({price_change_pct:.1f}%)")
-    
-    # 추세 판단
-    if score > 30:
-        trend = 'bullish'
-        trend_kr = '상승세'
-    elif score < -30:
-        trend = 'bearish'
-        trend_kr = '하락세'
-    else:
-        trend = 'neutral'
-        trend_kr = '보합세'
-    
-    # 신뢰도 계산
-    confidence = min(abs(score) + hw_confidence * 0.3, 100)
-    
-    # 포지션 추천
-    position_reasons = []
-    
-    if score > 40:
-        position_recommendation = 'long'
-        position_kr = '롱 포지션'
-        position_probability = min(50 + score * 0.5, 85)
-        position_reasons = reasons[:3]
-    elif score < -40:
-        position_recommendation = 'short'
-        position_kr = '숏 포지션'
-        position_probability = min(50 + abs(score) * 0.5, 85)
-        position_reasons = reasons[:3]
-    else:
-        position_recommendation = 'hold'
-        position_kr = '관망 (보류)'
-        position_probability = 50 + abs(score) * 0.3
-        position_reasons = ["추세가 불분명하여 관망을 권장", "명확한 신호 대기 필요"]
-    
-    return {
-        'trend': trend,
-        'trend_kr': trend_kr,
-        'confidence': round(confidence, 1),
-        'reasons': reasons,
-        'position_recommendation': position_recommendation,
-        'position_kr': position_kr,
-        'position_probability': round(position_probability, 1),
-        'position_reasons': position_reasons
-    }
-
-
-# [추가됨] AI 예측 결과 렌더링 함수
-def render_ai_prediction(ai_prediction: dict):
-    """AI 예측 결과를 화면에 표시"""
-    st.markdown("<div class='section-title'>🤖 AI 예측 결과</div>", unsafe_allow_html=True)
-    
-    # 추세 아이콘 및 색상
-    if ai_prediction['trend'] == 'bullish':
-        trend_icon = "📈"
-        trend_color = "#4CAF50"
-    elif ai_prediction['trend'] == 'bearish':
-        trend_icon = "📉"
-        trend_color = "#F44336"
-    else:
-        trend_icon = "➡️"
-        trend_color = "#FF9800"
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, {trend_color}22 0%, {trend_color}11 100%);
-            padding: 20px;
-            border-radius: 10px;
-            border-left: 4px solid {trend_color};
-        ">
-            <h3 style="margin: 0; color: {trend_color};">{trend_icon} 단기 추세</h3>
-            <p style="font-size: 24px; font-weight: bold; margin: 10px 0; color: {trend_color};">
-                {ai_prediction['trend_kr']}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        confidence_color = "#2196F3"
-        st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, {confidence_color}22 0%, {confidence_color}11 100%);
-            padding: 20px;
-            border-radius: 10px;
-            border-left: 4px solid {confidence_color};
-        ">
-            <h3 style="margin: 0; color: {confidence_color};">🎯 예측 신뢰도</h3>
-            <p style="font-size: 24px; font-weight: bold; margin: 10px 0; color: {confidence_color};">
-                {ai_prediction['confidence']:.1f}%
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        # 포지션 색상
-        if ai_prediction['position_recommendation'] == 'long':
-            pos_color = "#4CAF50"
-            pos_icon = "🟢"
-        elif ai_prediction['position_recommendation'] == 'short':
-            pos_color = "#F44336"
-            pos_icon = "🔴"
-        else:
-            pos_color = "#FF9800"
-            pos_icon = "🟡"
-        
-        st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, {pos_color}22 0%, {pos_color}11 100%);
-            padding: 20px;
-            border-radius: 10px;
-            border-left: 4px solid {pos_color};
-        ">
-            <h3 style="margin: 0; color: {pos_color};">{pos_icon} 권장 포지션</h3>
-            <p style="font-size: 20px; font-weight: bold; margin: 10px 0; color: {pos_color};">
-                {ai_prediction['position_kr']}
-            </p>
-            <p style="font-size: 14px; margin: 0; color: #666;">
-                확률: {ai_prediction['position_probability']:.1f}%
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # 예측 근거
-    st.markdown("### 📊 예측 근거")
-    
-    if ai_prediction['reasons']:
-        reasons_html = "<ul style='line-height: 1.8;'>"
-        for reason in ai_prediction['reasons']:
-            reasons_html += f"<li>{reason}</li>"
-        reasons_html += "</ul>"
-        st.markdown(reasons_html, unsafe_allow_html=True)
-    else:
-        st.info("충분한 데이터가 없어 근거를 표시할 수 없습니다.")
-    
-    # 포지션 추천 이유
-    st.markdown("### 💡 포지션 추천 이유")
-    
-    if ai_prediction['position_recommendation'] == 'hold':
-        st.warning(f"""
-현재 데이터 기준, **{ai_prediction['position_kr']}**이 권장됩니다.
-
-{' • '.join(ai_prediction['position_reasons'])}
-        """)
-    else:
-        st.info(f"""
-현재 데이터 기준, **{ai_prediction['position_kr']}**이 **우세(약 {ai_prediction['position_probability']:.0f}%)**로 판단됩니다.
-
-주요 이유:
-        """)
-        for reason in ai_prediction['position_reasons']:
-            st.markdown(f"- {reason}")
-    
-    # 면책 조항
-    st.caption("⚠️ 본 예측은 과거 데이터 기반 통계 모델의 결과이며, 투자 조언이 아닙니다. 실제 투자 시 본인의 판단과 책임하에 결정하시기 바랍니다.")
-
-
 def render_patterns(patterns: list):
     """패턴 분석 (개선된 레이아웃)"""
     st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴</div>", unsafe_allow_html=True)
@@ -1351,39 +1099,9 @@ def render_validation_results(cv_results: pd.DataFrame):
 
 def render_trading_strategy(current_price: float, optimized_leverage: float, entry_price: float,
                            stop_loss: float, take_profit: float, position_size: float,
-                           rr_ratio: float, investment_amount: float, ai_prediction: dict = None):  # [추가됨]
+                           rr_ratio: float, investment_amount: float):
     """매매 전략"""
     st.markdown("<div class='section-title'>🎯 매매 전략</div>", unsafe_allow_html=True)
-    
-    # [추가됨] AI 포지션 추천 표시
-    if ai_prediction:
-        if ai_prediction['position_recommendation'] == 'long':
-            pos_color = "#4CAF50"
-            pos_icon = "🟢"
-            pos_text = "롱 포지션"
-        elif ai_prediction['position_recommendation'] == 'short':
-            pos_color = "#F44336"
-            pos_icon = "🔴"
-            pos_text = "숏 포지션"
-        else:
-            pos_color = "#FF9800"
-            pos_icon = "🟡"
-            pos_text = "관망(보류)"
-        
-        st.markdown(f"""
-        <div style="
-            background: linear-gradient(135deg, {pos_color}22 0%, {pos_color}11 100%);
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid {pos_color};
-            margin-bottom: 20px;
-        ">
-            <h4 style="margin: 0; color: {pos_color};">{pos_icon} AI 포지션 추천: {pos_text}</h4>
-            <p style="margin: 10px 0 0 0; color: #666;">
-                현재 데이터 기준, <strong>{pos_text}</strong>이 <strong>우세(약 {ai_prediction['position_probability']:.0f}%)</strong>로 판단됩니다.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     
@@ -1768,17 +1486,12 @@ if bt:
         # 결과 출력
         render_data_summary(df, selected_crypto, interval_name)
         render_ai_forecast(future_df, hw_confidence)
-        
-        # [추가됨] AI 예측 분석 및 표시
-        ai_prediction = analyze_ai_prediction(df, future_df, hw_confidence)
-        render_ai_prediction(ai_prediction)
-        
         render_patterns(patterns)
         render_technical_indicators(df)
         render_validation_results(cv_results)
         render_trading_strategy(current_price, optimized_leverage, entry_price,
                                stop_loss, take_profit, position_size,
-                               rr_ratio, investment_amount, ai_prediction)  # [추가됨]
+                               rr_ratio, investment_amount)
         
         # 매도 전략 (신규)
         render_exit_strategy(exit_strategy, entry_price, investment_amount, optimized_leverage)
