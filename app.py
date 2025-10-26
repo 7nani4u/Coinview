@@ -185,25 +185,34 @@ def get_listing_date(symbol: str) -> datetime.date:
         return datetime.date.today()
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date, interval: str = '1d') -> pd.DataFrame:
-    """암호화폐 데이터 로드 (분해능 지원)"""
+    """암호화폐 데이터 로드 (분해능 지원) - 개선된 버전"""
     yf_ticker = symbol[:-4] + "-USD"
     df = pd.DataFrame()
     
+    # 방법 1: ticker.history() 사용
     try:
         ticker = yf.Ticker(yf_ticker)
         df_hist = ticker.history(
             start=start,
             end=end + datetime.timedelta(days=1),
-            interval=interval
+            interval=interval,
+            auto_adjust=True,
+            actions=False
         )
         if df_hist is not None and not df_hist.empty:
             df = df_hist.copy()
-    except Exception:
-        df = pd.DataFrame()
+            # 성공 시 즉시 반환
+            if 'Volume' in df.columns:
+                df = df[df['Volume'] > 0].copy()
+            if not df.empty:
+                return df
+    except Exception as e:
+        pass
 
-    if df is None or df.empty:
+    # 방법 2: yf.download() 사용 (fallback)
+    if df.empty:
         try:
             df_max = yf.download(
                 yf_ticker,
@@ -211,20 +220,23 @@ def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date, inte
                 end=end + datetime.timedelta(days=1),
                 interval=interval,
                 progress=False,
-                threads=False
+                threads=False,
+                auto_adjust=True,
+                actions=False
             )
             if df_max is not None and not df_max.empty:
                 df = df_max.copy()
-        except Exception:
-            df = pd.DataFrame()
+        except Exception as e:
+            pass
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    if 'Volume' in df.columns:
-        df = df[df['Volume'] > 0].copy()
+    # 최종 검증 및 반환
+    if df is not None and not df.empty:
+        if 'Volume' in df.columns:
+            df = df[df['Volume'] > 0].copy()
+        return df
     
-    return df
+    # 빈 DataFrame 반환 (캐싱되지 않음)
+    return pd.DataFrame()
 
 
 def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
@@ -1084,28 +1096,25 @@ with st.sidebar:
     
     selected_crypto = base_symbol + "USDT" if not base_symbol.endswith("USDT") else base_symbol
     
-    # 유효성 검사
-    tv_url_test = f"https://www.tradingview.com/symbols/{selected_crypto}/"
-    try:
-        tv_resp = requests.get(tv_url_test, timeout=5)
-    except Exception:
-        tv_resp = None
-    
-    if tv_resp is None or tv_resp.status_code != 200:
-        st.error(f"❌ '{selected_crypto}' 페이지를 찾을 수 없습니다.")
-        st.stop()
-    
+    # 빠른 데이터 검증 (yfinance만 확인)
     yf_ticker_symbol = selected_crypto[:-4] + "-USD"
-    try:
-        yf_ticker = yf.Ticker(yf_ticker_symbol)
-        df_test = yf_ticker.history(period="1d")
-        if df_test is None or df_test.empty:
-            raise ValueError
-    except Exception:
-        st.error(f"❌ '{yf_ticker_symbol}' 데이터를 찾을 수 없습니다.")
-        st.stop()
     
-    st.success(f"✅ {selected_crypto} 선택됨")
+    with st.spinner(f"'{yf_ticker_symbol}' 데이터 확인 중..."):
+        try:
+            yf_ticker = yf.Ticker(yf_ticker_symbol)
+            df_test = yf_ticker.history(period="5d")
+            
+            if df_test is None or df_test.empty:
+                st.error(f"❌ '{yf_ticker_symbol}' 데이터를 찾을 수 없습니다. 올바른 코인 심볼인지 확인해주세요.")
+                st.info("💡 지원되는 코인: BTC, ETH, BNB, SOL, XRP, DOGE, ADA, AVAX, LTC 등")
+                st.stop()
+                
+        except Exception as e:
+            st.error(f"❌ 데이터 조회 실패: {str(e)}")
+            st.info("💡 네트워크 연결을 확인하거나 다른 코인을 선택해주세요.")
+            st.stop()
+    
+    st.success(f"✅ {selected_crypto} ({yf_ticker_symbol}) 선택됨")
     
     st.markdown("---")
     st.markdown("## 3️⃣ 분석 기간")
@@ -1194,7 +1203,25 @@ if bt:
         raw_df = load_crypto_data(selected_crypto, START, END, interval)
         
         if raw_df.empty:
-            st.error(f"❌ {selected_crypto} 데이터가 없습니다.")
+            yf_ticker = selected_crypto[:-4] + "-USD"
+            st.error(f"❌ {yf_ticker} 데이터를 불러올 수 없습니다.")
+            st.warning(f""" 
+            **가능한 원인**:
+            - 선택한 기간({START} ~ {END})에 데이터가 없습니다
+            - 분해능({interval_name})이 해당 기간을 지원하지 않습니다
+            - yfinance API 일시적 오류
+            
+            **해결 방법**:
+            1. 더 최근 기간 선택 (최근 30일 권장)
+            2. 분해능을 1일봉으로 변경
+            3. 다른 코인 선택
+            4. 잠시 후 다시 시도
+            """)
+            
+            # 캐시 초기화 버튼 추가
+            if st.button("🔄 캐시 초기화 후 재시도"):
+                st.cache_data.clear()
+                st.rerun()
             st.stop()
         
         min_required = 100 if interval == '1d' else 50
