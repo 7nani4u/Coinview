@@ -1904,7 +1904,7 @@ if bt:
         rr_ratio = calculate_rr_ratio(entry_price, take_profit, stop_loss)
         
         # 매도 전략 계산
-        exit_strategy = calculate_exit_strategy(df, entry_price, atr, investment_amount, optimized_leverage)
+        exit_strategy = calculate_exit_strategy(df, entry_price, atr, investment_amount, leverage_info['recommended'])
         
         progress_placeholder.empty()
         status_text.empty()
@@ -1955,7 +1955,7 @@ if bt:
         render_position_recommendation(position_recommendation)
         
         # 매도 전략 (신규)
-        render_exit_strategy(exit_strategy, entry_price, investment_amount, optimized_leverage)
+        render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
         
         # 가격 차트
         st.markdown("<div class='section-title'>📈 가격 차트</div>", unsafe_allow_html=True)
