@@ -1504,6 +1504,190 @@ def render_validation_results(cv_results: pd.DataFrame):
             pass
 
 
+
+# ────────────────────────────────────────────────────────────────────────
+# [추가됨] v2.3.1: 개별 차트 생성 함수
+# ────────────────────────────────────────────────────────────────────────
+
+def create_candlestick_chart(df: pd.DataFrame, symbol: str):
+    """캔들스틱 차트 생성"""
+    fig = go.Figure()
+    
+    # 캔들스틱
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name='가격',
+            increasing_line_color='#26a69a',
+            decreasing_line_color='#ef5350'
+        )
+    )
+    
+    # EMA50
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df['EMA50'],
+            name='EMA50',
+            line=dict(color='orange', width=2)
+        )
+    )
+    
+    # EMA200
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df['EMA200'],
+            name='EMA200',
+            line=dict(color='purple', width=2)
+        )
+    )
+    
+    fig.update_layout(
+        title=f'{symbol} 가격 차트',
+        xaxis_title='날짜',
+        yaxis_title='가격 (USD)',
+        template='plotly_white',
+        height=600,
+        hovermode='x unified',
+        xaxis_rangeslider_visible=False
+    )
+    
+    return fig
+
+
+def create_volume_chart(df: pd.DataFrame):
+    """거래량 차트 생성"""
+    fig = go.Figure()
+    
+    # 거래량 막대 (상승/하락에 따라 색상 구분)
+    colors = ['#26a69a' if close >= open_ else '#ef5350' 
+              for close, open_ in zip(df['Close'], df['Open'])]
+    
+    fig.add_trace(
+        go.Bar(
+            x=df.index,
+            y=df['Volume'],
+            name='거래량',
+            marker_color=colors
+        )
+    )
+    
+    # 거래량 이동평균 (20일)
+    volume_ma20 = df['Volume'].rolling(window=20).mean()
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=volume_ma20,
+            name='거래량 MA20',
+            line=dict(color='blue', width=2)
+        )
+    )
+    
+    fig.update_layout(
+        title='거래량 차트',
+        xaxis_title='날짜',
+        yaxis_title='거래량',
+        template='plotly_white',
+        height=600,
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
+def create_rsi_chart(df: pd.DataFrame):
+    """RSI 차트 생성"""
+    fig = go.Figure()
+    
+    # RSI 라인
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df['RSI14'],
+            name='RSI (14)',
+            line=dict(color='blue', width=2)
+        )
+    )
+    
+    # 과매수/과매도 라인
+    fig.add_hline(y=70, line_dash="dash", line_color="red", 
+                  annotation_text="과매수 (70)")
+    fig.add_hline(y=50, line_dash="dot", line_color="gray")
+    fig.add_hline(y=30, line_dash="dash", line_color="green", 
+                  annotation_text="과매도 (30)")
+    
+    # 배경 색상 영역
+    fig.add_hrect(y0=70, y1=100, fillcolor="red", opacity=0.1, line_width=0)
+    fig.add_hrect(y0=0, y1=30, fillcolor="green", opacity=0.1, line_width=0)
+    
+    fig.update_layout(
+        title='RSI (Relative Strength Index)',
+        xaxis_title='날짜',
+        yaxis_title='RSI',
+        template='plotly_white',
+        height=600,
+        hovermode='x unified',
+        yaxis=dict(range=[0, 100])
+    )
+    
+    return fig
+
+
+def create_macd_chart(df: pd.DataFrame):
+    """MACD 차트 생성"""
+    fig = go.Figure()
+    
+    # MACD 라인
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df['MACD'],
+            name='MACD',
+            line=dict(color='blue', width=2)
+        )
+    )
+    
+    # Signal 라인
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df['MACD_Signal'],
+            name='Signal',
+            line=dict(color='red', width=2)
+        )
+    )
+    
+    # Histogram
+    colors = ['#26a69a' if val >= 0 else '#ef5350' for val in df['MACD_Hist']]
+    fig.add_trace(
+        go.Bar(
+            x=df.index,
+            y=df['MACD_Hist'],
+            name='Histogram',
+            marker_color=colors
+        )
+    )
+    
+    # 0선
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    
+    fig.update_layout(
+        title='MACD (Moving Average Convergence Divergence)',
+        xaxis_title='날짜',
+        yaxis_title='MACD',
+        template='plotly_white',
+        height=600,
+        hovermode='x unified'
+    )
+    
+    return fig
+
+
 def render_trading_strategy(current_price: float, leverage_info: dict, entry_price: float,
                            stop_loss: float, take_profit: float, position_size: float,
                            rr_ratio: float, investment_amount: float):
@@ -1958,104 +2142,26 @@ if bt:
         render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
         
         # 가격 차트
-        st.markdown("<div class='section-title'>📈 가격 차트</div>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("### 📈 차트")
         
-        fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=('가격', 'RSI', 'MACD'),
-            row_heights=[0.5, 0.25, 0.25]
-        )
+        tab1, tab2, tab3, tab4 = st.tabs(["💹 캔들스틱", "📊 거래량", "🔵 RSI", "📉 MACD"])
         
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df['Open'],
-                high=df['High'],
-                low=df['Low'],
-                close=df['Close'],
-                name='가격'
-            ),
-            row=1, col=1
-        )
+        with tab1:
+            fig = create_candlestick_chart(df, selected_crypto)
+            st.plotly_chart(fig, use_container_width=True)
         
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df['EMA50'],
-                name='EMA50',
-                line=dict(color='orange', width=2)
-            ),
-            row=1, col=1
-        )
+        with tab2:
+            fig = create_volume_chart(df)
+            st.plotly_chart(fig, use_container_width=True)
         
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df['EMA200'],
-                name='EMA200',
-                line=dict(color='purple', width=2)
-            ),
-            row=1, col=1
-        )
+        with tab3:
+            fig = create_rsi_chart(df)
+            st.plotly_chart(fig, use_container_width=True)
         
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df['RSI14'],
-                name='RSI',
-                line=dict(color='blue', width=2)
-            ),
-            row=2, col=1
-        )
-        
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-        
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df['MACD'],
-                name='MACD',
-                line=dict(color='blue', width=2)
-            ),
-            row=3, col=1
-        )
-        
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df['MACD_Signal'],
-                name='Signal',
-                line=dict(color='red', width=2)
-            ),
-            row=3, col=1
-        )
-        
-        fig.add_trace(
-            go.Bar(
-                x=df.index,
-                y=df['MACD_Hist'],
-                name='Histogram',
-                marker_color='gray'
-            ),
-            row=3, col=1
-        )
-        
-        fig.update_layout(
-            height=900,
-            template="plotly_white",
-            showlegend=True,
-            hovermode='x unified'
-        )
-        
-        fig.update_xaxes(title_text="날짜", row=3, col=1)
-        fig.update_yaxes(title_text="가격 (USD)", row=1, col=1)
-        fig.update_yaxes(title_text="RSI", row=2, col=1)
-        fig.update_yaxes(title_text="MACD", row=3, col=1)
-        
-        st.plotly_chart(fig, use_container_width=True)
+        with tab4:
+            fig = create_macd_chart(df)
+            st.plotly_chart(fig, use_container_width=True)
         
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
