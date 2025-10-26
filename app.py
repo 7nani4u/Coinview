@@ -187,37 +187,89 @@ def get_listing_date(symbol: str) -> datetime.date:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date, interval: str = '1d') -> pd.DataFrame:
-    """암호화폐 데이터 로드 (분해능 지원) - 개선된 버전"""
+    """암호화폐 데이터 로드 (분해능 지원) - 개선된 버전 v2"""
     yf_ticker = symbol[:-4] + "-USD"
     df = pd.DataFrame()
     
-    # 방법 1: ticker.history() 사용
+    # ✅ 기간 검증 및 자동 조정
+    days_diff = (end - start).days
+    
+    # yfinance API 제한 확인
+    interval_limits = {
+        '1m': 7,
+        '5m': 60,
+        '1h': 730,
+        '1d': 99999
+    }
+    
+    max_days = interval_limits.get(interval, 99999)
+    
+    # 기간이 제한을 초과하면 자동으로 조정
+    if days_diff > max_days:
+        start = end - datetime.timedelta(days=max_days)
+    
+    # 방법 1: period 파라미터 사용 (더 안정적)
     try:
         ticker = yf.Ticker(yf_ticker)
-        df_hist = ticker.history(
-            start=start,
-            end=end + datetime.timedelta(days=1),
-            interval=interval,
-            auto_adjust=True,
-            actions=False
-        )
+        
+        # 기간 계산
+        if days_diff <= 7:
+            period = '7d'
+        elif days_diff <= 30:
+            period = '1mo'
+        elif days_diff <= 90:
+            period = '3mo'
+        elif days_diff <= 180:
+            period = '6mo'
+        elif days_diff <= 365:
+            period = '1y'
+        elif days_diff <= 730:
+            period = '2y'
+        else:
+            period = 'max'
+        
+        # ✅ period 방식으로 먼저 시도 (더 안정적)
+        df_hist = ticker.history(period=period, interval=interval, auto_adjust=True, actions=False)
+        
         if df_hist is not None and not df_hist.empty:
-            df = df_hist.copy()
-            # 성공 시 즉시 반환
-            if 'Volume' in df.columns:
-                df = df[df['Volume'] > 0].copy()
-            if not df.empty:
-                return df
+            # start/end 범위로 필터링
+            df_hist = df_hist[(df_hist.index.date >= start) & (df_hist.index.date <= end)]
+            
+            if not df_hist.empty:
+                df = df_hist.copy()
+                if 'Volume' in df.columns:
+                    df = df[df['Volume'] > 0].copy()
+                if not df.empty:
+                    return df
     except Exception as e:
         pass
+    
+    # 방법 2: start/end 파라미터 사용 (fallback)
+    if df.empty:
+        try:
+            ticker = yf.Ticker(yf_ticker)
+            df_hist = ticker.history(
+                start=start,
+                end=end + datetime.timedelta(days=1),
+                interval=interval,
+                auto_adjust=True,
+                actions=False
+            )
+            if df_hist is not None and not df_hist.empty:
+                df = df_hist.copy()
+                if 'Volume' in df.columns:
+                    df = df[df['Volume'] > 0].copy()
+                if not df.empty:
+                    return df
+        except Exception as e:
+            pass
 
-    # 방법 2: yf.download() 사용 (fallback)
+    # 방법 3: yf.download() 사용 (최종 fallback)
     if df.empty:
         try:
             df_max = yf.download(
                 yf_ticker,
-                start=start,
-                end=end + datetime.timedelta(days=1),
+                period=period if days_diff <= 730 else '2y',
                 interval=interval,
                 progress=False,
                 threads=False,
@@ -226,13 +278,13 @@ def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date, inte
             )
             if df_max is not None and not df_max.empty:
                 df = df_max.copy()
+                if 'Volume' in df.columns:
+                    df = df[df['Volume'] > 0].copy()
         except Exception as e:
             pass
 
     # 최종 검증 및 반환
     if df is not None and not df.empty:
-        if 'Volume' in df.columns:
-            df = df[df['Volume'] > 0].copy()
         return df
     
     # 빈 DataFrame 반환 (캐싱되지 않음)
@@ -1129,9 +1181,25 @@ with st.sidebar:
     if mode == "자동(상장일→오늘)":
         listing_date = get_listing_date(selected_crypto)
         today = datetime.date.today()
-        START = listing_date
+        
+        # ✅ 분해능별 최대 기간 제한 적용
+        if interval == '1m':
+            max_days = 7
+            START = max(listing_date, today - datetime.timedelta(days=max_days))
+            st.warning(f"⚠️ 1분봉은 최근 {max_days}일 데이터만 제공됩니다 (yfinance API 제한)")
+        elif interval == '5m':
+            max_days = 60
+            START = max(listing_date, today - datetime.timedelta(days=max_days))
+            st.warning(f"⚠️ 5분봉은 최근 {max_days}일 데이터만 제공됩니다 (yfinance API 제한)")
+        elif interval == '1h':
+            max_days = 730
+            START = max(listing_date, today - datetime.timedelta(days=max_days))
+            st.info(f"ℹ️ 1시간봉은 최근 {max_days}일(2년) 데이터만 제공됩니다")
+        else:  # 1d
+            START = listing_date
+        
         END = today
-        st.info(f"📅 {START} ~ {END}")
+        st.info(f"📅 분석 기간: {START} ~ {END} ({(END - START).days}일)")
     else:
         col_s, col_e = st.columns(2)
         with col_s:
