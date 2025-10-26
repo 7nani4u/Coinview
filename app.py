@@ -869,7 +869,7 @@ def render_forecast_history(hw_model, df: pd.DataFrame):
         'Time': [d.strftime('%H:%M') for d in future_dates_5m],
         '예측가': [f"${v:.2f}" for v in hw_forecast_6.values],
         '변동률': [''] * 6,
-        '코멘트': []
+        '코멘트': [''] * 6
     })
     
     last_close = df['Close'].iloc[-1]
