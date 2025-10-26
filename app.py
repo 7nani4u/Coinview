@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Streamlit Crypto Forecast App — Revised
+Streamlit Crypto Forecast App — Revised (No hard sklearn dependency)
 - 데이터 소스 토글: yfinance(일봉) / ccxt(거래소 OHLCV)
 - 지표 정의 교정: RSI(Wilder), MFI(Typical Price), ATR(Wilder)
 - 예측: Holt‑Winters(ETS) ExponentialSmoothing + 계절성(m=7 기본)
-- 검증: TimeSeriesSplit 롤링‑오리진 외부표본 평가 (방향성 정확도, MASE)
-  * 주의: FPP3 권고에 따라 sMAPE는 참고용/비권장 → 옵션으로 제공 가능
+- 검증: TimeSeriesSplit(가능 시) 또는 경량 롤링‑오리진 분할(내장 구현)
+  * 지표: 방향성 정확도(%) + MASE
 - 리스크: ATR 기반 손절/목표가, 위험기반 포지션 크기 계산
-- 시각화: Plotly Candlestick + 예측선 + 손절/목표가 라인
+- 시각화: Plotly 캔들 + 예측선 + 손절/목표가 라인
 - 캐시/예외: st.cache_data, 네트워크/데이터 폴백 처리
 
-필요 패키지(예):
-streamlit, pandas, numpy, yfinance, plotly, statsmodels, scikit-learn, requests, pytz
-옵션: ccxt (설치 시 거래소 데이터 사용 가능)
-
-면책: 교육/연구용. 실거래 적용 금지. 체결·슬리피지·수수료·호가단위·최소주문금액·레버리지 상한 미반영.
+면책: 교육/연구용. 실거래 금지. 체결·슬리피지·수수료·호가단위·최소주문금액·레버리지 상한 미반영.
 """
 
 from __future__ import annotations
 import os
-import time
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -29,16 +24,22 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from sklearn.model_selection import TimeSeriesSplit
 
-import requests
+# ---- 선택 의존성(없어도 동작) ----
+try:  # scikit-learn이 없을 수 있으므로 옵션 처리
+    from sklearn.model_selection import TimeSeriesSplit  # type: ignore
+    _HAS_SKLEARN = True
+except Exception:
+    TimeSeriesSplit = None  # type: ignore
+    _HAS_SKLEARN = False
 
-# ccxt는 선택적 의존성
 try:
     import ccxt  # type: ignore
     _HAS_CCXT = True
 except Exception:
     _HAS_CCXT = False
+
+import requests
 
 # -------------------------------
 # 유틸: 시간대 처리
@@ -95,7 +96,7 @@ def fetch_ccxt(exchange_name: str, market: str, timeframe: str, lookback_days: i
     if not ex.has.get('fetchOHLCV', False):
         return pd.DataFrame()
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=lookback_days)).timestamp() * 1000)
-    limit = None  # ccxt가 timeframe별 기본 제한 사용
+    limit = None
     try:
         ohlcv = ex.fetch_ohlcv(market, timeframe=timeframe, since=since_ms, limit=limit)
     except Exception:
@@ -156,15 +157,46 @@ def macd(close: pd.Series, fast:int=12, slow:int=26, signal:int=9):
 
 
 # -------------------------------
+# 경량 TimeSeriesSplit 대체 구현
+# -------------------------------
+class SimpleTimeSeriesSplit:
+    """학습 구간이 확장되는(expanding window) 시계열 분할.
+    sklearn.model_selection.TimeSeriesSplit과 비슷한 인덱스 쌍을 생성.
+    test_size를 지정하지 않으면 roughly N//(n_splits+1).
+    """
+    def __init__(self, n_splits: int = 5, test_size: int | None = None, gap: int = 0):
+        self.n_splits = int(max(1, n_splits))
+        self.test_size = None if test_size is None else int(max(1, test_size))
+        self.gap = int(max(0, gap))
+
+    def split(self, X):
+        n_samples = len(X)
+        ts = self.test_size or max(1, n_samples // (self.n_splits + 1))
+        n_folds = self.n_splits
+        train_end = n_samples - ts * n_folds
+        if train_end <= 0:
+            train_end = ts
+        for i in range(n_folds):
+            start_test = train_end + i * ts
+            end_test = start_test + ts
+            if end_test > n_samples:
+                break
+            train_end_idx = max(0, start_test - self.gap)
+            train_idx = np.arange(0, train_end_idx)
+            test_idx = np.arange(start_test, end_test)
+            if len(train_idx) == 0 or len(test_idx) == 0:
+                continue
+            yield train_idx, test_idx
+
+
+# -------------------------------
 # 예측/검증 지표
 # -------------------------------
 
 def mase(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean Absolute Scaled Error vs naive seasonal difference(1-step naive)."""
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     mae = np.mean(np.abs(y_true - y_pred))
-    # naive: 1-step naive
     if len(y_true) < 2:
         return np.nan
     mae_naive = np.mean(np.abs(y_true[1:] - y_true[:-1]))
@@ -188,11 +220,22 @@ def rolling_backtest(series: pd.Series, n_splits:int=5, seasonal_periods:int=7) 
     series = series.dropna()
     if len(series) < max(30, seasonal_periods*3):
         return {"mase": np.nan, "dir_acc": np.nan}
-    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    # sklearn이 있으면 사용, 없으면 경량 분할기로 대체
+    if _HAS_SKLEARN and TimeSeriesSplit is not None:
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        splits = tscv.split(series)
+    else:
+        test_size = max(14, seasonal_periods)
+        tscv = SimpleTimeSeriesSplit(n_splits=n_splits, test_size=test_size)
+        splits = tscv.split(series)
+
     mase_list, acc_list = [], []
-    for tr_idx, te_idx in tscv.split(series):
+    for tr_idx, te_idx in splits:
         train = series.iloc[tr_idx]
         test = series.iloc[te_idx]
+        if len(train) < seasonal_periods*2 or len(test) < max(5, seasonal_periods//2):
+            continue
         try:
             model = ExponentialSmoothing(
                 train, trend='add', seasonal='add', seasonal_periods=seasonal_periods
@@ -237,7 +280,14 @@ def risk_position(entry: float, stop: float, account: float, risk_pct: float) ->
 st.set_page_config(page_title="Crypto Forecast (Revised)", layout="wide")
 
 st.title("코인 가격 예측 · 검증 · 리스크 (개정판)")
-st.caption("교육/연구용. 실거래 금지. 데이터/모형/검증 가정과 한계를 UI에 표시")
+with st.expander("가정/한계 및 의존성"):
+    st.markdown("""
+    - RSI(14, Wilder), MFI(14, Typical Price), ATR(14, Wilder) 사용
+    - Holt‑Winters(추세/계절 add-add, m=선택). 구조적 레짐변화/이상치/거래소별 가격편차 미반영
+    - 거래비용/슬리피지/체결/호가단위/최소주문금액/레버리지 상한/펀딩비용 미반영
+    - yfinance 데이터는 지연·조정 가능성, ccxt는 거래소별 제한/간헐적 실패 가능
+    - scikit‑learn 미설치 환경에서도 동작하도록 경량 TimeSeriesSplit 내장
+    """)
 
 with st.sidebar:
     st.header("데이터 & 기간")
@@ -273,7 +323,7 @@ with st.sidebar:
     run_btn = st.button("분석 실행", type='primary', use_container_width=True)
 
 
-# 데이터 로드
+# 데이터 로드 & 처리
 if run_btn:
     if data_source == 'yfinance':
         df = fetch_yf(symbol, datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.min.time()))
@@ -353,24 +403,12 @@ if run_btn:
     st.caption("* TSCV는 미래 데이터 누수를 방지하기 위한 시계열 전용 교차검증. * MASE는 나이브 모델 대비 오차비율.")
 
     # 결과 다운로드
-    out = pd.DataFrame({
-        'forecast': fcst
-    })
+    out = pd.DataFrame({'forecast': fcst})
     st.download_button(
         label="예측결과 CSV 다운로드",
         data=out.to_csv(index=True).encode('utf-8'),
         file_name=f"forecast_{data_label.replace(':','_')}.csv",
         mime='text/csv'
     )
-
-    # 가정/한계
-    with st.expander("가정 및 한계"):
-        st.markdown("""
-        - RSI(14, Wilder), MFI(14, Typical Price), ATR(14, Wilder) 정의 사용
-        - Holt‑Winters(추세/계절 add-add, m=선택) 가정. 구조적 레짐변화/이상치/거래소별 가격편차 미반영
-        - 거래비용/슬리피지/체결/호가단위/최소주문금액/레버리지 상한/펀딩비용 미반영
-        - yfinance 데이터는 지연·조정 가능성 있음. ccxt는 거래소별 제한/간헐적 실패 가능
-        - VWAP은 일중 지표이므로 본 앱에서는 다중일 누적 VWAP을 사용하지 않음
-        """)
 else:
     st.info("좌측 설정을 입력한 뒤 '분석 실행'을 클릭하십시오.")
