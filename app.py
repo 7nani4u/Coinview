@@ -680,14 +680,17 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
     """레버리지 최적화"""
     base_leverage = 10
     
+    # 투자 금액에 따른 팩터 (v2.1.1 수정: 리스크 관리 원칙에 맞게 반전)
+    # 대량 투자자 → 리스크 감수 능력 높음 → 레버리지 여유
+    # 소액 투자자 → 손실 회복 어려움 → 보수적 레버리지
     if investment_amount >= 10000:
-        investment_factor = 0.6
+        investment_factor = 1.2  # 대량 투자 → 레버리지 여유
     elif investment_amount >= 5000:
-        investment_factor = 0.8
+        investment_factor = 1.0  # 기준
     elif investment_amount >= 1000:
-        investment_factor = 1.0
+        investment_factor = 0.8  # 신중
     else:
-        investment_factor = 1.2
+        investment_factor = 0.6  # 소액 투자 → 보수적
     
     if volatility < 0.02:
         volatility_factor = 1.5
