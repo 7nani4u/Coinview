@@ -444,6 +444,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> list:
     - Three White Soldiers
     - Morning Star
     - Doji
+    ✅ 같은 패턴은 최근 날짜 1개만 반환
     """
     patterns = []
     
@@ -501,7 +502,18 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> list:
                 'direction': '중립'
             })
 
-    return patterns[-5:] if patterns else []
+    # ✅ 같은 패턴명은 최근 날짜 1개만 유지
+    unique_patterns = {}
+    for pattern in reversed(patterns):  # 최신 데이터부터 역순으로
+        pattern_name = pattern['name']
+        if pattern_name not in unique_patterns:
+            unique_patterns[pattern_name] = pattern
+    
+    # 최신순으로 정렬하여 반환
+    result = list(unique_patterns.values())
+    result.sort(key=lambda x: x['date'], reverse=True)
+    
+    return result[:5]  # 최대 5개 (서로 다른 패턴)
 
 
 def calculate_optimized_leverage(
@@ -790,7 +802,7 @@ def render_ai_forecast(future_df: pd.DataFrame, hw_confidence: float):
 
 
 def render_patterns(patterns: list):
-    """패턴 분석 섹션"""
+    """패턴 분석 섹션 (개선된 레이아웃)"""
     st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴</div>", unsafe_allow_html=True)
     
     if not patterns:
@@ -799,14 +811,22 @@ def render_patterns(patterns: list):
     
     for pattern in patterns:
         with st.container():
+            # ✅ 개선된 2열 레이아웃
+            date_str = pattern['date'].strftime('%Y-%m-%d %H:%M') if hasattr(pattern['date'], 'strftime') else str(pattern['date'])
+            
             st.markdown(f"""
                 <div class='pattern-card'>
                     <div class='pattern-title'>{pattern['name']}</div>
-                    <div class='pattern-detail'>📅 발생일: {pattern['date'].strftime('%Y-%m-%d %H:%M') if hasattr(pattern['date'], 'strftime') else pattern['date']}</div>
-                    <div class='pattern-detail'>🎯 신뢰도: {pattern['conf']}%</div>
-                    <div class='pattern-detail'>📝 설명: {pattern['desc']}</div>
-                    <div class='pattern-detail'>💡 영향: {pattern['impact']}</div>
-                    <div class='pattern-detail'>🔄 방향: {pattern['direction']}</div>
+                    <table style='width: 100%; color: white; border-collapse: collapse;'>
+                        <tr>
+                            <td style='width: 50%; padding: 8px 0;'>📅 발생일: {date_str}</td>
+                            <td style='width: 50%; padding: 8px 0;'>📝 설명: {pattern['desc']}</td>
+                        </tr>
+                        <tr>
+                            <td style='padding: 8px 0;'>🎯 신뢰도: {pattern['conf']}%</td>
+                            <td style='padding: 8px 0;'>💡 영향: {pattern['impact']}</td>
+                        </tr>
+                    </table>
                 </div>
             """, unsafe_allow_html=True)
 
@@ -959,11 +979,34 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("## 2️⃣ 코인 선택")
     
-    crypto_choice = st.selectbox(
-        "💎 암호화폐",
-        list(CRYPTO_MAP.keys())
+    # ✅ 선택 방식 선택
+    coin_input_method = st.radio(
+        "🔧 입력 방식",
+        ["목록에서 선택", "직접 입력"],
+        horizontal=True
     )
-    selected_crypto = CRYPTO_MAP[crypto_choice]
+    
+    if coin_input_method == "목록에서 선택":
+        crypto_choice = st.selectbox(
+            "💎 암호화폐",
+            list(CRYPTO_MAP.keys())
+        )
+        selected_crypto = CRYPTO_MAP[crypto_choice]
+    else:
+        # ✅ 직접 입력 모드
+        custom_symbol = st.text_input(
+            "💎 코인 심볼 입력",
+            value="BTCUSDT",
+            help="예: BTCUSDT, ETHUSDT, BNBUSDT 등 (USDT 페어만 지원)"
+        ).upper().strip()
+        
+        # 입력 검증
+        if not custom_symbol.endswith("USDT"):
+            st.warning("⚠️ USDT 페어만 지원됩니다. 심볼 끝에 'USDT'를 추가해주세요.")
+            custom_symbol = custom_symbol + "USDT" if custom_symbol else "BTCUSDT"
+        
+        selected_crypto = custom_symbol
+        st.info(f"선택된 코인: **{selected_crypto}** ({selected_crypto[:-4]}-USD)")
     
     st.markdown("---")
     st.markdown("## 3️⃣ 분석 기간")
