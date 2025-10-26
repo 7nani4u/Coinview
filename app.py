@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.1.0
+코인 AI 예측 시스템 - v2.1.2 (Keep-Alive)
 - TA-Lib 기반 61개 캔들스틱 패턴 지원
 - 매도 시점 예측 기능 (언제 팔아야 하는지)
 - 적응형 지표 계산
@@ -19,6 +19,19 @@ import statsmodels.api as sm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.model_selection import TimeSeriesSplit
+
+
+# Keep-Alive 모듈 (선택적)
+try:
+    from keep_alive import keep_alive
+    # Keep-alive 서버 시작 (백그라운드)
+    keep_alive()
+except ImportError:
+    # keep_alive.py 파일이 없으면 무시
+    pass
+except Exception as e:
+    # Keep-alive 실패 시에도 앱은 정상 실행
+    print(f"ℹ️  Keep-alive 비활성화: {e}")
 
 # TA-Lib 선택적 임포트
 try:
