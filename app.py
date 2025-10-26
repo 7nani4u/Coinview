@@ -952,7 +952,7 @@ def analyze_ai_prediction(df: pd.DataFrame, future_df: pd.DataFrame, hw_confiden
     current_price = df['Close'].iloc[-1]
     
     # 지표 계산
-    rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
+    rsi = df['RSI14'].iloc[-1] if 'RSI14' in df.columns else 50
     ema50 = df['EMA50'].iloc[-1] if 'EMA50' in df.columns else current_price
     ema200 = df['EMA200'].iloc[-1] if 'EMA200' in df.columns else current_price
     macd = df['MACD'].iloc[-1] if 'MACD' in df.columns else 0
@@ -964,8 +964,8 @@ def analyze_ai_prediction(df: pd.DataFrame, future_df: pd.DataFrame, hw_confiden
     volume_ratio = volume_current / volume_avg if volume_avg > 0 else 1
     
     # 예측 가격 추세
-    if len(future_df) > 0:
-        future_price = future_df['Close'].iloc[-1]
+    if len(future_df) > 0 and '예측 종가' in future_df.columns:
+        future_price = future_df['예측 종가'].iloc[-1]
         price_change_pct = ((future_price - current_price) / current_price) * 100
     else:
         price_change_pct = 0
