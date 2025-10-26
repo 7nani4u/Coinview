@@ -1,4 +1,4 @@
-# 코인 예측 Streamlit 앱 — 의존성 (개정)
+# 코인 예측 Streamlit 앱 — 의존성 (개정 v2.1.0)
 # Python: 3.9 또는 3.10+ (Cloud 권장: 3.10/3.11)
 
 # ── 필수 런타임 ───────────────────────────────────────────
@@ -25,6 +25,41 @@ scikit-learn~=1.6.0 ; python_version == "3.9"
 # Py 3.10 이상 환경
 scikit-learn==1.7.2 ; python_version >= "3.10"
 
+# ── 선택: TA-Lib 캔들스틱 패턴 분석(v2.1.0+) ───────────────
+# 설치 시 61개 고급 캔들스틱 패턴 사용 가능 (미설치 시 기본 3개만 사용)
+# ⚠️ 주의: TA-Lib은 사전에 시스템 라이브러리 설치 필요
+#
+# ┌─ 로컬 환경 설치 방법 ────────────────────────────────────┐
+# │ Windows:                                                  │
+# │   1. https://github.com/cgohlke/talib-build/releases 에서│
+# │      본인 Python 버전에 맞는 .whl 다운로드               │
+# │      예: TA_Lib-0.4.28-cp310-cp310-win_amd64.whl         │
+# │   2. pip install 다운로드한파일.whl                       │
+# │   3. pip install TA-Lib (또는 아래 명시된 버전)          │
+# │                                                           │
+# │ macOS:                                                    │
+# │   brew install ta-lib                                     │
+# │   pip install TA-Lib                                      │
+# │                                                           │
+# │ Linux (Ubuntu/Debian):                                    │
+# │   sudo apt-get update                                     │
+# │   sudo apt-get install -y ta-lib libta-lib-dev           │
+# │   pip install TA-Lib                                      │
+# └───────────────────────────────────────────────────────────┘
+#
+# ┌─ Streamlit Cloud 배포 시 ─────────────────────────────────┐
+# │ 1. 프로젝트 루트에 packages.txt 파일 생성:                │
+# │    ta-lib                                                 │
+# │                                                           │
+# │ 2. requirements.txt에 아래 TA-Lib 라인 포함              │
+# │                                                           │
+# │ 3. Streamlit Cloud가 자동으로 apt-get으로 설치 후        │
+# │    pip install 실행                                       │
+# └───────────────────────────────────────────────────────────┘
+TA-Lib>=0.4.28  ; python_version >= "3.8"
+
 # ── 참고 ─────────────────────────────────────────────────
 # - xgboost: 본 앱 기능상 미사용이므로 제외 (필요 시 개별 추가)
 # - patsy: statsmodels 종속으로 자동 설치됨 (명시 불필요)
+# - TA-Lib 미설치 시 앱은 정상 작동하며 기본 3개 패턴만 사용
+#   (Three White Soldiers, Morning Star, Doji)
