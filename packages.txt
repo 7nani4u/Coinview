@@ -1,6 +1,0 @@
-# Streamlit Cloud 배포용 시스템 패키지 목록
-# 이 파일은 apt-get으로 설치할 시스템 레벨 패키지를 지정합니다.
-
-# TA-Lib 캔들스틱 패턴 분석 라이브러리
-# Python TA-Lib 패키지 설치 전 필요한 C 라이브러리
-ta-lib
