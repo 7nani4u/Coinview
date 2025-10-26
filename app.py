@@ -1,82 +1,202 @@
 # -*- coding: utf-8 -*-
+"""
+코인 AI 예측 시스템 - 개선 버전
+- 반응형 디자인 강화
+- Plotly 인터랙티브 차트
+- 모듈화된 구조
+- 개선된 UI/UX 흐름
+"""
+
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import datetime
 import streamlit as st
-import streamlit.components.v1 as components  # HTML/CSS 임베드용
 import os
 import logging
 import requests
-import statsmodels.api as sm  # Holt-Winters 예측
+import statsmodels.api as sm
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ────────────────────────────────────────────────────────────────────────
-# 1) Streamlit 페이지 설정 (반드시 최상단에 위치)
+# 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="코인 AI 예측 시스템",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# 2) CSS: 단락 제목의 반응형 폰트 크기 정의 및 패턴 설명 간격 조정
+# 2) 개선된 반응형 CSS
 # ────────────────────────────────────────────────────────────────────────
-st.markdown(
-    """
+st.markdown("""
     <style>
-    /* 모든 단락 제목에 동일하게 적용할 클래스 */
+    /* 전역 설정 */
+    .main {
+        padding: 1rem;
+    }
+    
+    /* 섹션 제목 - 반응형 */
     .section-title {
         font-size: 32px;
         font-weight: bold;
-        margin-top: 24px;
-        margin-bottom: 12px;
+        margin-top: 32px;
+        margin-bottom: 16px;
+        padding-bottom: 8px;
+        border-bottom: 3px solid #3498DB;
+        color: #2C3E50;
     }
-    /* 화면 너비가 600px 이하(모바일)일 때 폰트 크기를 줄임 */
+    
+    /* 모바일 최적화 (600px 이하) */
     @media (max-width: 600px) {
         .section-title {
-            font-size: 24px;
+            font-size: 22px;
+            margin-top: 24px;
+        }
+        
+        /* 테이블 스크롤 개선 */
+        .dataframe {
+            font-size: 11px;
+            overflow-x: auto;
+            display: block;
+        }
+        
+        /* 컬럼 스택 */
+        .stColumn {
+            width: 100% !important;
+            margin-bottom: 1rem;
+        }
+        
+        /* 메트릭 크기 조정 */
+        [data-testid="stMetricValue"] {
+            font-size: 20px;
         }
     }
-    /* 화면 너비가 1200px 이상(데스크톱)일 때 폰트 크기를 더 키울 수 있음 */
+    
+    /* 태블릿 최적화 (601px ~ 1024px) */
+    @media (min-width: 601px) and (max-width: 1024px) {
+        .section-title {
+            font-size: 28px;
+        }
+    }
+    
+    /* 데스크톱 최적화 (1200px 이상) */
     @media (min-width: 1200px) {
         .section-title {
             font-size: 36px;
         }
     }
-    /* “캔들스틱 패턴 감지 및 해석” 내 텍스트 줄 간격 및 여백 최소화 */
-    .pattern-compact {
-        margin: 0;
-        line-height: 1.4;
+    
+    /* 카드 스타일 */
+    .info-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        color: white;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: transform 0.2s;
     }
-    /* 외부 링크 스타일: 한 줄에 양쪽 정렬 */
+    
+    .info-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+    }
+    
+    /* 외부 링크 */
     .external-links {
         display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-top: 12px;
-        margin-bottom: 24px;
+        justify-content: center;
+        gap: 20px;
+        margin: 20px 0;
+        flex-wrap: wrap;
     }
+    
     .external-links a {
-        font-weight: bold;
+        padding: 10px 20px;
+        background-color: #3498DB;
+        color: white !important;
         text-decoration: none;
-        color: #3498DB;
-        margin: 0 8px; /* 간격 조정 */
+        border-radius: 5px;
+        font-weight: bold;
+        transition: background-color 0.3s;
+    }
+    
+    .external-links a:hover {
+        background-color: #2980B9;
+    }
+    
+    /* 패턴 카드 */
+    .pattern-card {
+        background-color: #F8F9FA;
+        border-left: 4px solid #3498DB;
+        padding: 12px;
+        margin: 8px 0;
+        border-radius: 4px;
+    }
+    
+    /* 알림 박스 */
+    .alert-box {
+        padding: 15px;
+        border-radius: 8px;
+        margin: 10px 0;
+    }
+    
+    .alert-success {
+        background-color: #D4EDDA;
+        border-left: 4px solid #28A745;
+        color: #155724;
+    }
+    
+    .alert-warning {
+        background-color: #FFF3CD;
+        border-left: 4px solid #FFC107;
+        color: #856404;
+    }
+    
+    .alert-danger {
+        background-color: #F8D7DA;
+        border-left: 4px solid #DC3545;
+        color: #721C24;
+    }
+    
+    /* 진행률 표시 */
+    .progress-step {
+        display: inline-block;
+        padding: 5px 15px;
+        margin: 5px;
+        background-color: #E8F4F8;
+        border-radius: 20px;
+        font-size: 14px;
+    }
+    
+    .progress-step.active {
+        background-color: #3498DB;
+        color: white;
+        font-weight: bold;
     }
     </style>
-    """,
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────────────────────────────
-# 3) 상수 정의: 레버리지 맵, 상장일 맵 등
+# 3) 상수 정의
 # ────────────────────────────────────────────────────────────────────────
-max_leverage_map = {
+MAX_LEVERAGE_MAP = {
     'BTCUSDT': 125,
     'ETHUSDT': 75,
-    # 필요시 여기에 추가
+    'BNBUSDT': 50,
+    'DOGEUSDT': 50,
+    'LTCUSDT': 50,
+    'AVAXUSDT': 50,
+    'IMXUSDT': 25,
+    'SOLUSDT': 50,
+    'XRPUSDT': 50,
+    'ADAUSDT': 50,
 }
 
-listing_date_map = {
+LISTING_DATE_MAP = {
     'BTCUSDT': datetime.date(2017, 9, 2),
     'ETHUSDT': datetime.date(2017, 8, 7),
     'BNBUSDT': datetime.date(2017, 7, 25),
@@ -84,7 +204,22 @@ listing_date_map = {
     'LTCUSDT': datetime.date(2017, 6, 12),
     'AVAXUSDT': datetime.date(2020, 7, 22),
     'IMXUSDT': datetime.date(2021, 6, 15),
-    # 필요시 추가
+    'SOLUSDT': datetime.date(2020, 4, 10),
+    'XRPUSDT': datetime.date(2018, 5, 14),
+    'ADAUSDT': datetime.date(2018, 4, 17),
+}
+
+# 인기 코인 리스트
+POPULAR_CRYPTOS = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LTC', 'IMX']
+
+# 색상 팔레트 (고대비)
+COLORS = {
+    'bullish': '#00C853',
+    'bearish': '#FF1744',
+    'neutral': '#FFC107',
+    'primary': '#2196F3',
+    'secondary': '#9C27B0',
+    'background': '#F5F5F5',
 }
 
 # TensorFlow 경고 억제
@@ -97,14 +232,9 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 @st.cache_data(ttl=86400)
 def get_listing_date(symbol: str) -> datetime.date:
-    """
-    - listing_date_map에 값이 있으면 해당 상장일 반환
-    - 없으면 yfinance에서 History(period="max")로 받아서
-      DataFrame.index.min()을 상장일로 사용
-    - 오류 시 오늘 날짜 반환
-    """
-    if symbol in listing_date_map:
-        return listing_date_map[symbol]
+    """코인 상장일 조회"""
+    if symbol in LISTING_DATE_MAP:
+        return LISTING_DATE_MAP[symbol]
     try:
         yf_symbol = symbol[:-4] + "-USD"
         ticker = yf.Ticker(yf_symbol)
@@ -118,14 +248,10 @@ def get_listing_date(symbol: str) -> datetime.date:
 
 @st.cache_data(ttl=86400)
 def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
-    """
-    symbol: 'XXXXUSDT' → 'XXXX-USD' 로 변환해서 yfinance 조회
-    1) ticker.history() 로 먼저 시도
-    2) 비어 있으면 yf.download()로 재시도
-    3) Volume 컬럼이 있으면 Volume > 0 필터링
-    """
+    """암호화폐 데이터 로드"""
     yf_ticker = symbol[:-4] + "-USD"
     df = pd.DataFrame()
+    
     try:
         ticker = yf.Ticker(yf_ticker)
         df_hist = ticker.history(
@@ -159,46 +285,25 @@ def load_crypto_data(symbol: str, start: datetime.date, end: datetime.date) -> p
     # Volume > 0 필터링
     if 'Volume' in df.columns:
         df = df[df['Volume'] > 0].copy()
+    
     return df
 
 
-def minmax_scale(arr: np.ndarray, data_min: float = None, data_max: float = None):
-    """NumPy 기반 MinMax 정규화"""
-    if data_min is None:
-        data_min = np.nanmin(arr)
-    if data_max is None:
-        data_max = np.nanmax(arr)
-    scaled = (arr - data_min) / (data_max - data_min + 1e-8)
-    return scaled, data_min, data_max
-
-
-def minmax_inverse(scaled: np.ndarray, data_min: float, data_max: float):
-    """MinMax 정규화 복원"""
-    return scaled * (data_max - data_min + 1e-8) + data_min
-
-
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    전달받은 DataFrame에 다음 지표들을 컬럼으로 추가:
-    - MA50, EMA50, EMA200
-    - 일일 수익률
-    - 14일 ATR, 30일 변동성 (σ)
-    - RSI(14), Stochastic %K(14)
-    - MFI(14)
-    - VWAP(당일 기준)
-    - Volume 20일 이동평균
-    - EMA50/EMA200 교차 시그널
-    """
+    """기술적 지표 계산"""
     df = df.copy()
-    # (1) 일일 수익률
+    
+    # 일일 수익률
     df['일일수익률'] = df['Close'].pct_change()
 
-    # (2) 이동평균(MA50), 지수이동평균(EMA50, EMA200)
+    # 이동평균
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
     df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
+    df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
 
-    # (3) 변동성: ATR(14) & 30일 표준편차 σ
+    # 변동성
     high = df['High']
     low = df['Low']
     close = df['Close']
@@ -209,10 +314,9 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['TR'] = true_range
     df['ATR14'] = df['TR'].rolling(window=14).mean()
-
     df['Volatility30d'] = df['일일수익률'].rolling(window=30).std()
 
-    # (4) RSI(14)
+    # RSI
     delta = df['Close'].diff()
     up = delta.clip(lower=0)
     down = -delta.clip(upper=0)
@@ -221,12 +325,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = roll_up / (roll_down + 1e-8)
     df['RSI14'] = 100 - (100 / (1 + rs))
 
-    # (5) Stochastic %K (14)
+    # Stochastic
     low14 = df['Low'].rolling(window=14).min()
     high14 = df['High'].rolling(window=14).max()
     df['StochK14'] = (df['Close'] - low14) / (high14 - low14 + 1e-8) * 100
 
-    # (6) MFI(14)
+    # MFI
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     df['MF'] = typical_price * df['Volume']
     df['PosMF'] = df['MF'].where(df['Close'] > df['Close'].shift(1), 0)
@@ -235,16 +339,21 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     roll_neg = df['NegMF'].rolling(window=14).sum()
     df['MFI14'] = 100 - (100 / (1 + roll_pos / (roll_neg + 1e-8)))
 
-    # (7) VWAP (당일 기준)
+    # VWAP
     df['PV'] = df['Close'] * df['Volume']
     df['Cum_PV'] = df['PV'].cumsum()
     df['Cum_Vol'] = df['Volume'].cumsum()
     df['VWAP'] = df['Cum_PV'] / (df['Cum_Vol'] + 1e-8)
 
-    # (8) 거래량 20일 이동평균
+    # 거래량 이동평균
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
 
-    # (9) EMA50/EMA200 교차 시그널
+    # MACD
+    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+    # EMA 교차 시그널
     df['Cross_Signal'] = 0
     ema50 = df['EMA50']
     ema200 = df['EMA200']
@@ -257,10 +366,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_targets(entry_price: float, num_targets: int, direction: str = 'down'):
-    """
-    진입가를 기준으로 num_targets만큼 등비 형태로 목표가 생성
-    direction == 'up' 이면 상승 목표가, 'down'이면 하락 목표가
-    """
+    """목표가 생성"""
     targets = []
     for i in range(1, num_targets + 1):
         pct = i / (num_targets + 1)
@@ -271,38 +377,661 @@ def generate_targets(entry_price: float, num_targets: int, direction: str = 'dow
     return targets
 
 
+def detect_candlestick_patterns(df: pd.DataFrame) -> list:
+    """캔들스틱 패턴 감지"""
+    patterns = []
+    df_sorted = df.sort_index(ascending=True)
+
+    # EMA 교차 패턴
+    ema50 = df['EMA50'].iloc[-1]
+    ema200 = df['EMA200'].iloc[-1]
+    ema50_prev = df['EMA50'].iloc[-2]
+    ema200_prev = df['EMA200'].iloc[-2]
+
+    if ema50 > ema200 and ema50_prev <= ema200_prev:
+        patterns.append({
+            'name': '🌟 골든 크로스',
+            'date': df.index[-1],
+            'conf': 90.0,
+            'desc': 'EMA50이 EMA200을 상향 돌파',
+            'impact': '장기 상승 추세 전환 가능성'
+        })
+    elif ema50 < ema200 and ema50_prev >= ema200_prev:
+        patterns.append({
+            'name': '💀 데드 크로스',
+            'date': df.index[-1],
+            'conf': 85.0,
+            'desc': 'EMA50이 EMA200을 하향 돌파',
+            'impact': '장기 하락 추세 전환 가능성'
+        })
+
+    # 캔들스틱 패턴 감지
+    for i in range(2, min(len(df_sorted), 100)):  # 최근 100개만 검사
+        o1, c1, h1, l1 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 2]
+        o2, c2, h2, l2 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 1]
+        o3, c3, h3, l3 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i]
+        date3 = df_sorted.index[i]
+
+        # Three White Soldiers
+        if (c1 > o1) and (c2 > o2) and (c3 > o3) and (c2 > c1) and (c3 > c2):
+            patterns.append({
+                'name': '⚪ Three White Soldiers',
+                'date': date3,
+                'conf': 100.0,
+                'desc': '세 개의 연속 양봉',
+                'impact': '강력한 상승 신호'
+            })
+
+        # Morning Star
+        body1 = abs(c1 - o1)
+        body2 = abs(c2 - o2)
+        body3 = abs(c3 - o3)
+        range2 = (h2 - l2) if (h2 - l2) != 0 else 1e-8
+        if (c1 < o1) and (body2 < range2 * 0.3) and (c2 < c1) and (o2 < c1) and \
+           (c3 > o3) and (c3 > (o1 + c1) / 2):
+            conf = min((body3 / (h3 - l3 + 1e-8)) * 100, 100.0)
+            patterns.append({
+                'name': '🌅 Morning Star',
+                'date': date3,
+                'conf': round(conf, 2),
+                'desc': '하락 후 반전 신호',
+                'impact': '상승 전환 가능성'
+            })
+
+        # Doji
+        if abs(o3 - c3) <= (h3 - l3) * 0.1:
+            patterns.append({
+                'name': '✖️ Doji',
+                'date': date3,
+                'conf': 100.0,
+                'desc': '매수/매도 균형',
+                'impact': '추세 전환 가능성'
+            })
+
+    # 최근 5개만 반환
+    return patterns[-5:] if patterns else []
+
+
 # ────────────────────────────────────────────────────────────────────────
-# 5) Streamlit 사이드바: 사용자 입력
+# 5) 렌더링 함수 (모듈화)
+# ────────────────────────────────────────────────────────────────────────
+
+def render_progress_bar(step: int, total: int = 5):
+    """진행 상태 표시"""
+    steps = ['데이터 로드', '지표 계산', 'AI 학습', '패턴 분석', '결과 생성']
+    progress_html = '<div style="margin: 20px 0;">'
+    for i, step_name in enumerate(steps[:total], 1):
+        if i <= step:
+            progress_html += f'<span class="progress-step active">{i}. {step_name}</span>'
+        else:
+            progress_html += f'<span class="progress-step">{i}. {step_name}</span>'
+    progress_html += '</div>'
+    return progress_html
+
+
+def render_data_summary(df: pd.DataFrame, selected_crypto: str):
+    """데이터 요약 섹션"""
+    st.markdown("<div class='section-title'>📊 데이터 개요</div>", unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    current_price = df['Close'].iloc[-1]
+    daily_change = df['일일수익률'].iloc[-1] * 100
+    avg_volume = df['Volume'].mean()
+    total_days = len(df)
+    
+    with col1:
+        st.metric(
+            label="현재가 (USD)",
+            value=f"${current_price:,.2f}",
+            delta=f"{daily_change:+.2f}%"
+        )
+    
+    with col2:
+        high_52w = df['High'].tail(252).max()
+        low_52w = df['Low'].tail(252).min()
+        st.metric(
+            label="52주 최고/최저",
+            value=f"${high_52w:,.2f}",
+            delta=f"최저: ${low_52w:,.2f}"
+        )
+    
+    with col3:
+        st.metric(
+            label="평균 거래량",
+            value=f"{avg_volume/1e6:.1f}M"
+        )
+    
+    with col4:
+        st.metric(
+            label="분석 기간",
+            value=f"{total_days}일"
+        )
+
+
+def render_price_chart(df: pd.DataFrame, future_df: pd.DataFrame, pred_in_sample: pd.Series, selected_crypto: str):
+    """가격 차트 섹션 (Plotly 인터랙티브)"""
+    st.markdown("<div class='section-title'>📈 가격 차트 및 예측</div>", unsafe_allow_html=True)
+    
+    # 서브플롯 생성: 가격, RSI, 거래량
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=('가격 및 이동평균', 'RSI (14일)', '거래량'),
+        row_heights=[0.5, 0.25, 0.25],
+        specs=[[{"secondary_y": False}],
+               [{"secondary_y": False}],
+               [{"secondary_y": False}]]
+    )
+
+    # 1. 가격 차트
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df['Close'],
+            name='실제 가격',
+            line=dict(color=COLORS['primary'], width=2),
+            hovertemplate='%{y:,.2f}<extra></extra>'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df['MA50'],
+            name='MA50',
+            line=dict(color='orange', width=1, dash='dash')
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df['EMA200'],
+            name='EMA200',
+            line=dict(color='red', width=1, dash='dot')
+        ),
+        row=1, col=1
+    )
+
+    # In-sample 예측
+    fig.add_trace(
+        go.Scatter(
+            x=pred_in_sample.index, y=pred_in_sample.values,
+            name='AI 학습 예측',
+            line=dict(color='purple', width=1, dash='dash'),
+            opacity=0.7
+        ),
+        row=1, col=1
+    )
+
+    # 미래 예측
+    fig.add_trace(
+        go.Scatter(
+            x=future_df.index, y=future_df['예측 종가'],
+            name='30일 예측',
+            line=dict(color=COLORS['bullish'], width=2),
+            mode='lines+markers'
+        ),
+        row=1, col=1
+    )
+
+    # 2. RSI
+    fig.add_trace(
+        go.Scatter(
+            x=df.index, y=df['RSI14'],
+            name='RSI',
+            line=dict(color=COLORS['secondary'], width=2),
+            fill='tozeroy',
+            fillcolor='rgba(156, 39, 176, 0.1)'
+        ),
+        row=2, col=1
+    )
+
+    # RSI 기준선
+    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
+
+    # 3. 거래량
+    colors_volume = [COLORS['bullish'] if df['Close'].iloc[i] >= df['Open'].iloc[i] 
+                     else COLORS['bearish'] for i in range(len(df))]
+    
+    fig.add_trace(
+        go.Bar(
+            x=df.index, y=df['Volume'],
+            name='거래량',
+            marker_color=colors_volume,
+            opacity=0.7
+        ),
+        row=3, col=1
+    )
+
+    # 레이아웃 업데이트
+    fig.update_layout(
+        height=900,
+        hovermode='x unified',
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        margin=dict(l=10, r=10, t=60, b=10),
+        xaxis3=dict(rangeslider=dict(visible=True, thickness=0.05)),
+        template='plotly_white'
+    )
+
+    # Y축 레이블
+    fig.update_yaxes(title_text="가격 (USD)", row=1, col=1)
+    fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100])
+    fig.update_yaxes(title_text="거래량", row=3, col=1)
+
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+
+
+def render_indicators_tabs(df: pd.DataFrame):
+    """기술적 지표 탭"""
+    st.markdown("<div class='section-title'>📊 기술적 지표 분석</div>", unsafe_allow_html=True)
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["📉 변동성", "📊 모멘텀", "💹 거래량", "🔄 MACD"])
+    
+    with tab1:
+        # ATR
+        col1, col2 = st.columns(2)
+        with col1:
+            latest_atr = df['ATR14'].iloc[-1]
+            prev_atr = df['ATR14'].iloc[-2]
+            delta_atr = latest_atr - prev_atr
+            
+            st.metric(
+                label="ATR (14일)",
+                value=f"{latest_atr:.2f}",
+                delta=f"{delta_atr:+.2f}"
+            )
+            
+            if latest_atr > prev_atr:
+                st.markdown("🔺 변동성이 증가하고 있습니다. 위험도가 높아졌습니다.")
+            else:
+                st.markdown("🔻 변동성이 감소하고 있습니다. 안정화 단계입니다.")
+        
+        with col2:
+            volatility = df['Volatility30d'].iloc[-1] * 100
+            st.metric(
+                label="30일 변동성 (σ)",
+                value=f"{volatility:.2f}%"
+            )
+            st.markdown("※ 높을수록 가격 변동이 큽니다.")
+    
+    with tab2:
+        # RSI & Stochastic
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            last_rsi = df['RSI14'].iloc[-1]
+            st.metric("RSI (14)", f"{last_rsi:.2f}")
+            
+            if last_rsi < 30:
+                st.markdown("<div class='alert-box alert-success'>과매도 구간 - 반등 가능성</div>", unsafe_allow_html=True)
+            elif last_rsi > 70:
+                st.markdown("<div class='alert-box alert-danger'>과매수 구간 - 조정 가능성</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='alert-box alert-warning'>중립 구간</div>", unsafe_allow_html=True)
+        
+        with col2:
+            last_stoch = df['StochK14'].iloc[-1]
+            st.metric("Stochastic %K", f"{last_stoch:.2f}")
+            
+            if last_stoch < 20:
+                st.markdown("🔽 과매도")
+            elif last_stoch > 80:
+                st.markdown("🔼 과매수")
+            else:
+                st.markdown("➖ 중립")
+    
+    with tab3:
+        # 거래량 분석
+        current_vol = df['Volume'].iloc[-1]
+        avg_vol = df['Vol_MA20'].iloc[-1]
+        vol_ratio = (current_vol / avg_vol - 1) * 100
+        
+        st.metric(
+            label="현재 거래량",
+            value=f"{current_vol/1e6:.2f}M",
+            delta=f"{vol_ratio:+.1f}% vs 20일 평균"
+        )
+        
+        if vol_ratio > 50:
+            st.markdown("📈 **비정상적으로 높은 거래량** - 강한 추세 변화 가능성")
+        elif vol_ratio < -30:
+            st.markdown("📉 **낮은 거래량** - 횡보 가능성")
+        else:
+            st.markdown("📊 정상 거래량 범위")
+    
+    with tab4:
+        # MACD
+        last_macd = df['MACD'].iloc[-1]
+        last_signal = df['MACD_Signal'].iloc[-1]
+        last_hist = df['MACD_Hist'].iloc[-1]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("MACD", f"{last_macd:.2f}")
+            st.metric("Signal", f"{last_signal:.2f}")
+        
+        with col2:
+            st.metric("Histogram", f"{last_hist:.2f}")
+            
+            if last_hist > 0 and df['MACD_Hist'].iloc[-2] <= 0:
+                st.markdown("🟢 **강세 크로스오버** - 매수 신호")
+            elif last_hist < 0 and df['MACD_Hist'].iloc[-2] >= 0:
+                st.markdown("🔴 **약세 크로스오버** - 매도 신호")
+            else:
+                st.markdown("현재 추세 유지 중")
+
+
+def render_support_resistance(df: pd.DataFrame, entry_price: float):
+    """지지/저항 섹션 (Plotly)"""
+    st.markdown("<div class='section-title'>🛡️ 지지 및 저항 레벨</div>", unsafe_allow_html=True)
+    
+    fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    high_price = df['High'].max()
+    low_price = df['Low'].min()
+    diff = high_price - low_price if high_price != low_price else 1e-8
+    
+    fib_levels = []
+    for ratio in fib_ratios:
+        level_price = high_price - diff * ratio
+        fib_levels.append({'ratio': ratio, 'price': level_price})
+    
+    # Plotly 차트
+    fig = go.Figure()
+    
+    # 현재가 표시
+    fig.add_trace(go.Scatter(
+        x=[0, 1],
+        y=[entry_price, entry_price],
+        mode='lines+text',
+        name='현재가',
+        line=dict(color='blue', width=3),
+        text=['', f'현재가: ${entry_price:.2f}'],
+        textposition='middle right'
+    ))
+    
+    # 피보나치 레벨
+    colors_fib = ['#C62828', '#E53935', '#F57C00', '#FBC02D', '#7CB342', '#388E3C', '#1976D2']
+    for lvl, color in zip(fib_levels, colors_fib):
+        fig.add_hline(
+            y=lvl['price'],
+            line_dash="dash",
+            line_color=color,
+            annotation_text=f"Fib {lvl['ratio']*100:.1f}%: ${lvl['price']:.2f}",
+            annotation_position="right",
+            opacity=0.7
+        )
+    
+    fig.update_layout(
+        height=400,
+        yaxis_title="가격 (USD)",
+        xaxis=dict(visible=False),
+        showlegend=False,
+        margin=dict(l=10, r=150, t=30, b=10),
+        template='plotly_white'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # 레벨 테이블
+    fib_df = pd.DataFrame(fib_levels)
+    fib_df['ratio'] = fib_df['ratio'].apply(lambda x: f"{x*100:.1f}%")
+    fib_df['price'] = fib_df['price'].apply(lambda x: f"${x:.2f}")
+    fib_df.columns = ['비율', '가격']
+    
+    st.dataframe(fib_df, use_container_width=True, hide_index=True)
+
+
+def render_pattern_analysis(patterns: list):
+    """패턴 분석 섹션"""
+    st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴 감지</div>", unsafe_allow_html=True)
+    
+    if not patterns:
+        st.info("최근 감지된 패턴이 없습니다.")
+        return
+    
+    for pattern in patterns:
+        pattern_html = f"""
+        <div class='pattern-card'>
+            <h4>{pattern['name']}</h4>
+            <p><strong>날짜:</strong> {pattern['date'].strftime('%Y-%m-%d')}</p>
+            <p><strong>신뢰도:</strong> {pattern['conf']:.1f}%</p>
+            <p><strong>설명:</strong> {pattern['desc']}</p>
+            <p><strong>영향:</strong> {pattern['impact']}</p>
+        </div>
+        """
+        st.markdown(pattern_html, unsafe_allow_html=True)
+
+
+def render_ai_prediction_basis(df: pd.DataFrame, selected_crypto: str, entry_price: float, far_price: float):
+    """AI 예측 근거"""
+    st.markdown("<div class='section-title'>🤖 AI 예측 근거</div>", unsafe_allow_html=True)
+    
+    last_ma50 = df['MA50'].iloc[-1]
+    last_rsi = df['RSI14'].iloc[-1]
+    last_stoch = df['StochK14'].iloc[-1]
+    last_macd = df['MACD'].iloc[-1]
+    prev_macd = df['MACD'].iloc[-2]
+    last_mfi = df['MFI14'].iloc[-1]
+    
+    price_trend = "하락세" if entry_price < last_ma50 else "상승세"
+    price_trend_colored = (
+        f"<span style='color:{COLORS['bearish']};font-weight:bold;'>하락세</span>" if price_trend == "하락세"
+        else f"<span style='color:{COLORS['bullish']};font-weight:bold;'>상승세</span>"
+    )
+    
+    macd_trend = "감소세" if last_macd < prev_macd else "증가세"
+    macd_trend_colored = f"<span style='color:{COLORS['primary']};font-weight:bold;'>{macd_trend}</span>"
+    
+    # 모멘텀 분석
+    if last_rsi < 30 and last_stoch < 20:
+        momentum_desc = f"모멘텀 지표 RSI({last_rsi:.1f})와 스토캐스틱({last_stoch:.1f})이 과매도 상태입니다."
+        future_trend = f"<span style='color:{COLORS['bullish']};font-weight:bold;'>반등</span> 가능성이 있습니다."
+    elif last_rsi > 70 and last_stoch > 80:
+        momentum_desc = f"모멘텀 지표 RSI({last_rsi:.1f})와 스토캐스틱({last_stoch:.1f})이 과매수 상태입니다."
+        future_trend = f"<span style='color:{COLORS['bearish']};font-weight:bold;'>조정</span> 가능성이 있습니다."
+    else:
+        momentum_desc = f"모멘텀 지표 RSI({last_rsi:.1f})와 스토캐스틱({last_stoch:.1f})이 중립 영역입니다."
+        future_trend = f"<span style='color:{COLORS['neutral']};font-weight:bold;'>횡보</span> 가능성이 있습니다."
+    
+    ai_reason = "<br>".join([
+        f"📊 현재 {selected_crypto[:-4]} 가격은 <strong>${entry_price:.2f}</strong>로 {price_trend_colored}이며, MA50 대비 {price_trend}를 보입니다.",
+        f"📈 MACD는 {macd_trend_colored}를 보이며 {'하락' if macd_trend=='감소세' else '상승'} 추세를 형성 중입니다.",
+        f"💹 {momentum_desc}",
+        f"🔮 따라서 향후 {future_trend}",
+        f"💰 MFI는 {last_mfi:.1f}로 {'자금 유입이 활발' if last_mfi > 50 else '자금 유출 중'}합니다."
+    ])
+    
+    st.markdown(f"<div style='line-height:1.8; font-size:16px; padding:15px; background-color:#F8F9FA; border-radius:8px;'>{ai_reason}</div>", unsafe_allow_html=True)
+
+
+def render_forecast_history(hw_model, df: pd.DataFrame):
+    """추세 예측 히스토리 (5분 간격)"""
+    st.markdown("<div class='section-title'>📈 단기 추세 예측</div>", unsafe_allow_html=True)
+    
+    now = datetime.datetime.now()
+    minute = (now.minute // 5) * 5
+    base_time = now.replace(minute=minute, second=0, microsecond=0)
+    future_dates_5m = [base_time + datetime.timedelta(minutes=5 * (i + 1)) for i in range(6)]
+    
+    hw_forecast_6 = hw_model.forecast(steps=6)
+    hist_df_5m = pd.DataFrame({
+        'Time': [d.strftime('%H:%M') for d in future_dates_5m],
+        '예측가': [f"${v:.2f}" for v in hw_forecast_6.values],
+        '변동률': [''] * 6,
+        '코멘트': []
+    })
+    
+    last_close = df['Close'].iloc[-1]
+    comments_list = []
+    
+    for i in range(len(hw_forecast_6)):
+        if i == 0:
+            prev_val = last_close
+        else:
+            prev_val = hw_forecast_6.values[i - 1]
+        
+        curr_val = hw_forecast_6.values[i]
+        change_pct = ((curr_val - prev_val) / prev_val) * 100
+        hist_df_5m.loc[i, '변동률'] = f"{change_pct:+.2f}%"
+        
+        if curr_val < prev_val:
+            if abs(change_pct) > 0.5:
+                comments_list.append("🔻 하락 가능성 증가")
+            else:
+                comments_list.append("📉 완만한 하락")
+        elif curr_val > prev_val:
+            if abs(change_pct) > 0.5:
+                comments_list.append("🔺 상승 가능성 증가")
+            else:
+                comments_list.append("📈 완만한 상승")
+        else:
+            comments_list.append("➖ 횡보 예상")
+    
+    hist_df_5m['코멘트'] = comments_list
+    
+    st.dataframe(hist_df_5m, use_container_width=True, hide_index=True)
+
+
+def render_position_summary(
+    position_signal: str,
+    entry_price: float,
+    stop_loss_price: float,
+    targets: list,
+    recommended_leverage: float,
+    position_qty: float,
+    investment_amount: float,
+    rate_win: float,
+    learned_patterns: int
+):
+    """포지션 요약"""
+    st.markdown("<div class='section-title'>💖 AI 매매 전략 요약</div>", unsafe_allow_html=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📍 포지션 정보")
+        st.markdown(f"""
+        - **포지션**: {position_signal}
+        - **진입가**: ${entry_price:.2f}
+        - **손절가**: ${stop_loss_price:.2f}
+        - **수량**: {position_qty:.4f}
+        - **투자액**: ${investment_amount:.2f}
+        - **레버리지**: {recommended_leverage}x
+        """)
+    
+    with col2:
+        st.markdown("### 🎯 목표가")
+        for i, target in enumerate(targets, 1):
+            pct_profit = abs((target - entry_price) / entry_price * 100)
+            st.markdown(f"- **목표가 {i}**: ${target:.2f} ({pct_profit:.2f}%)")
+    
+    st.markdown("---")
+    
+    col3, col4, col5 = st.columns(3)
+    
+    with col3:
+        st.metric("AI 승률", f"{rate_win}%")
+    
+    with col4:
+        st.metric("학습 패턴 수", f"{learned_patterns:,}개")
+    
+    with col5:
+        risk_reward = abs((targets[-1] - entry_price) / (entry_price - stop_loss_price))
+        st.metric("리스크/보상 비율", f"1:{risk_reward:.2f}")
+
+
+def render_external_links(selected_crypto: str):
+    """외부 링크"""
+    st.markdown("<div class='section-title'>🔗 외부 차트 링크</div>", unsafe_allow_html=True)
+    
+    tv_url = f"https://www.tradingview.com/symbols/{selected_crypto}/"
+    yf_url = f"https://finance.yahoo.com/quote/{selected_crypto[:-4]}-USD"
+    
+    links_html = f"""
+    <div class='external-links'>
+        <a href="{tv_url}" target="_blank">📊 TradingView에서 보기</a>
+        <a href="{yf_url}" target="_blank">📈 Yahoo Finance에서 보기</a>
+    </div>
+    """
+    st.markdown(links_html, unsafe_allow_html=True)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 6) 사이드바 (입력)
 # ────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("# 코인 AI 예측 시스템")
-
-    # (1) 암호화폐 심볼 입력
-    input_symbol = st.text_input(
-        "🔍 암호화폐 심볼 입력 (예: BTC, ETH, DOGE 등)",
-        value="",
-        help="예: BTC → 자동으로 BTCUSDT로 변환"
+    st.markdown("# 🪙 코인 AI 예측")
+    st.markdown("---")
+    
+    # 사용 가이드
+    with st.expander("❓ 사용 방법", expanded=False):
+        st.markdown("""
+        ### 📖 이용 가이드
+        
+        1. **코인 선택**: 인기 코인 또는 직접 입력
+        2. **기간 설정**: 자동(상장일부터) 또는 직접 선택
+        3. **리스크 설정**:
+           - 투자 금액
+           - 리스크 비율 (1-2% 권장)
+           - 손절 배수
+        4. **분석 시작** 버튼 클릭
+        
+        #### 💡 초보자 팁
+        - 리스크: 1%, 손절: 2배 권장
+        - 변동성 높은 코인: 레버리지 낮게
+        - 항상 손절가를 준수하세요
+        """)
+    
+    st.markdown("## 1️⃣ 코인 선택")
+    
+    # 인기 코인 또는 직접 입력
+    selection_mode = st.radio(
+        "선택 방식",
+        options=["인기 코인", "직접 입력"],
+        horizontal=True
     )
-    if not input_symbol:
-        st.warning("먼저 암호화폐 심볼을 입력해주세요.")
-        st.stop()
-    base_symbol = input_symbol.strip().upper()
-    if not base_symbol.endswith("USDT"):
-        selected_crypto = base_symbol + "USDT"
+    
+    if selection_mode == "인기 코인":
+        base_symbol = st.selectbox(
+            "인기 코인 선택",
+            options=POPULAR_CRYPTOS,
+            index=0
+        )
     else:
-        selected_crypto = base_symbol
-
-    # (2) TradingView 페이지 유효성 검사
+        base_symbol = st.text_input(
+            "코인 심볼 입력",
+            value="BTC",
+            help="예: BTC, ETH, DOGE"
+        ).strip().upper()
+    
+    if not base_symbol:
+        st.warning("코인 심볼을 입력해주세요.")
+        st.stop()
+    
+    selected_crypto = base_symbol + "USDT" if not base_symbol.endswith("USDT") else base_symbol
+    
+    # 유효성 검사
     tv_url_test = f"https://www.tradingview.com/symbols/{selected_crypto}/"
     try:
         tv_resp = requests.get(tv_url_test, timeout=5)
     except Exception:
         tv_resp = None
+    
     if tv_resp is None or tv_resp.status_code != 200:
-        st.error(f"❌ TradingView에서 '{selected_crypto}' 페이지를 찾을 수 없습니다. 심볼을 다시 확인해 주세요.")
+        st.error(f"❌ '{selected_crypto}' 페이지를 찾을 수 없습니다.")
         st.stop()
-
-    # (3) Yahoo Finance 유효성 검사
+    
     yf_ticker_symbol = selected_crypto[:-4] + "-USD"
     try:
         yf_ticker = yf.Ticker(yf_ticker_symbol)
@@ -310,96 +1039,116 @@ with st.sidebar:
         if df_test is None or df_test.empty:
             raise ValueError
     except Exception:
-        st.error(f"❌ Yahoo Finance에서 '{yf_ticker_symbol}' 데이터를 찾을 수 없습니다. 심볼을 다시 확인해 주세요.")
+        st.error(f"❌ '{yf_ticker_symbol}' 데이터를 찾을 수 없습니다.")
         st.stop()
-
-    # (4) 기간 설정: 자동(상장일→오늘) or 커스텀
+    
+    st.success(f"✅ {selected_crypto} 선택됨")
+    
+    st.markdown("---")
+    st.markdown("## 2️⃣ 분석 기간")
+    
     mode = st.radio(
-        "🔢 분석 기간 모드 선택",
-        options=["자동(상장일 → 오늘)", "직접 선택"],
-        index=0
+        "기간 선택 방식",
+        options=["자동(상장일→오늘)", "직접 선택"],
+        index=0,
+        horizontal=True
     )
-    if mode == "자동(상장일 → 오늘)":
+    
+    if mode == "자동(상장일→오늘)":
         listing_date = get_listing_date(selected_crypto)
         today = datetime.date.today()
         START = listing_date
         END = today
-        st.markdown(f"- **시작일(상장일)**: {START}  \n- **종료일**: {END}")
+        st.info(f"📅 {START} ~ {END}")
     else:
         col_s, col_e = st.columns(2)
         with col_s:
             START = st.date_input(
-                "시작일 선택",
-                value=datetime.date.today() - datetime.timedelta(days=180),
-                help="yyyy-mm-dd 형식"
+                "시작일",
+                value=datetime.date.today() - datetime.timedelta(days=180)
             )
         with col_e:
             END = st.date_input(
-                "종료일 선택",
-                value=datetime.date.today(),
-                help="yyyy-mm-dd 형식"
+                "종료일",
+                value=datetime.date.today()
             )
+        
         if START >= END:
-            st.error("❌ 시작일은 종료일 이전이어야 합니다.")
+            st.error("시작일은 종료일 이전이어야 합니다.")
             st.stop()
-
-    # (5) 투자·리스크 설정
-    st.markdown("## 2) 투자 및 리스크 설정")
+    
+    st.markdown("---")
+    st.markdown("## 3️⃣ 투자 설정")
+    
     investment_amount = st.number_input(
-        "투자 금액 (USDT)",
+        "💰 투자 금액 (USDT)",
         min_value=1.0,
         value=1000.0,
-        step=10.0,
-        help="해당 종목에 투입할 USDT 금액"
+        step=50.0
     )
+    
     risk_per_trade_pct = st.slider(
-        "리스크 비율 (%)",
-        min_value=0.5, max_value=5.0, value=2.0, step=0.5,
-        help="한 거래 당 최대 손실 허용 퍼센트"
+        "⚠️ 리스크 비율 (%)",
+        min_value=0.5,
+        max_value=5.0,
+        value=2.0,
+        step=0.5,
+        help="한 거래당 최대 손실 허용 퍼센트"
     ) / 100.0
-
+    
     stop_loss_k = st.number_input(
-        "손절 배수 (σ 기준)",
-        min_value=1.0, max_value=3.0, value=2.0, step=0.5,
-        help="stop_loss_pct = 변동성(σ) × k"
+        "🛑 손절 배수 (σ 기준)",
+        min_value=1.0,
+        max_value=3.0,
+        value=2.0,
+        step=0.5
     )
-
-    # (6) 허용 레버리지 설정: 맵에 있으면 기본값, 없으면 경고 및 직접 입력
-    default_max_lev = max_leverage_map.get(selected_crypto, None)
-    if default_max_lev is None:
-        st.warning("❗ 해당 코인의 최대 레버리지 정보가 없습니다. 직접 값을 입력해 주세요.")
-        default_max_lev = 50  # 안내 메시지가 보여지는 동안 기본 렌더링용(사용자가 직접 바꿀 것을 권장)
+    
+    default_max_lev = MAX_LEVERAGE_MAP.get(selected_crypto, 50)
     leverage_ceiling = st.number_input(
-        "허용 최대 레버리지 (직접 설정)",
-        min_value=1, max_value=500, value=int(default_max_lev), step=1,
-        help="해당 종목에 허용할 최대 레버리지를 설정하세요"
+        "📊 최대 레버리지",
+        min_value=1,
+        max_value=500,
+        value=int(default_max_lev),
+        step=1
     )
-
-    bt = st.button("🚀 분석 시작", type="primary")
+    
+    st.markdown("---")
+    bt = st.button("🚀 분석 시작", type="primary", use_container_width=True)
 
 # ────────────────────────────────────────────────────────────────────────
-# 6) 메인 로직: 버튼 클릭 시 실행
+# 7) 메인 로직
 # ────────────────────────────────────────────────────────────────────────
 if bt:
     try:
-        # ────────────────────────────────────────────────────────────────────
-        # 6-1) 데이터 불러오기 및 간단 오류 처리
-        # ────────────────────────────────────────────────────────────────────
-        with st.spinner("🔍 데이터 가져오는 중..."):
-            raw_df = load_crypto_data(selected_crypto, START, END)
-            if raw_df.empty:
-                raise ValueError(f"{selected_crypto} 데이터가 없습니다. 심볼/기간을 확인해주세요.")
-            if len(raw_df) < 100:
-                raise ValueError(f"최소 100 거래일 이상의 데이터가 필요합니다. 현재: {len(raw_df)}일")
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-2) 지표 계산: 모든 보조지표를 컬럼으로 추가
-        # ────────────────────────────────────────────────────────────────────
+        # 진행 상태 표시
+        progress_placeholder = st.empty()
+        status_text = st.empty()
+        
+        # Step 1: 데이터 로드
+        progress_placeholder.markdown(render_progress_bar(1), unsafe_allow_html=True)
+        status_text.info("🔍 데이터를 가져오는 중...")
+        
+        raw_df = load_crypto_data(selected_crypto, START, END)
+        
+        if raw_df.empty:
+            st.error(f"❌ {selected_crypto} 데이터가 없습니다.")
+            st.stop()
+        
+        if len(raw_df) < 100:
+            st.error(f"❌ 최소 100일 이상의 데이터가 필요합니다. (현재: {len(raw_df)}일)")
+            st.stop()
+        
+        # Step 2: 지표 계산
+        progress_placeholder.markdown(render_progress_bar(2), unsafe_allow_html=True)
+        status_text.info("📊 기술적 지표를 계산하는 중...")
+        
         df = calculate_indicators(raw_df)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-3) Holt-Winters 모델 학습(In-sample) & 30일 예측 생성
-        # ────────────────────────────────────────────────────────────────────
+        
+        # Step 3: AI 모델 학습
+        progress_placeholder.markdown(render_progress_bar(3), unsafe_allow_html=True)
+        status_text.info("🤖 AI 모델을 학습하는 중...")
+        
         close_series = df['Close']
         hw_model = sm.tsa.ExponentialSmoothing(
             close_series,
@@ -407,534 +1156,150 @@ if bt:
             seasonal=None,
             initialization_method="estimated"
         ).fit(optimized=True)
-
-        # In-sample 예측값(학습 데이터용)
+        
         pred_in_sample = hw_model.fittedvalues
-
-        # 향후 30일 예측
         future_forecast = hw_model.forecast(steps=30)
+        
         last_date = df.index[-1]
         future_dates = [last_date + datetime.timedelta(days=i + 1) for i in range(30)]
         future_df = pd.DataFrame({'예측 종가': future_forecast.values}, index=future_dates)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-4) 최종 진입/손절/목표가/레버리지 계산
-        # ────────────────────────────────────────────────────────────────────
+        
+        # Step 4: 패턴 분석
+        progress_placeholder.markdown(render_progress_bar(4), unsafe_allow_html=True)
+        status_text.info("🕯️ 패턴을 분석하는 중...")
+        
+        patterns = detect_candlestick_patterns(df)
+        
+        # Step 5: 결과 계산
+        progress_placeholder.markdown(render_progress_bar(5), unsafe_allow_html=True)
+        status_text.info("📈 최종 결과를 생성하는 중...")
+        
         entry_price = raw_df['Close'].iloc[-1]
         far_price = future_df['예측 종가'].iloc[-1]
-
-        # 최대 손실 금액
+        
         max_loss_amount = investment_amount * risk_per_trade_pct
         stop_loss_pct = df['Volatility30d'].iloc[-1] * stop_loss_k
         per_coin_risk = entry_price * stop_loss_pct if entry_price > 0 else 0
-
+        
         if per_coin_risk > 0:
             position_qty = max_loss_amount / per_coin_risk
         else:
             position_qty = 0.0
-
+        
         notional_value = entry_price * position_qty
         recommended_leverage = (notional_value / investment_amount) if investment_amount > 0 else 1.0
-
-        # 실제 허용 상한 = 맵에 정의된 값 vs 사이드바에 입력한 값 중 작은 쪽
-        max_allowed = max_leverage_map.get(selected_crypto, leverage_ceiling)
+        
+        max_allowed = MAX_LEVERAGE_MAP.get(selected_crypto, leverage_ceiling)
         ultimate_ceiling = min(max_allowed, leverage_ceiling)
         recommended_leverage = round(max(1.0, min(recommended_leverage, ultimate_ceiling)), 2)
-
+        
         pct_change = abs(far_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        
         if pct_change >= 0.05:
             num_targets = 5
         elif pct_change >= 0.02:
             num_targets = 3
         else:
             num_targets = 1
-
+        
         if far_price > entry_price:
             direction = 'up'
-            position_signal = "매수 / 롱"
+            position_signal = "📈 매수 / 롱"
             stop_loss_price = entry_price * (1 - stop_loss_pct)
         else:
             direction = 'down'
-            position_signal = "매도 / 숏"
+            position_signal = "📉 매도 / 숏"
             stop_loss_price = entry_price * (1 + stop_loss_pct)
-
+        
         targets = generate_targets(entry_price, num_targets, direction=direction)
-        primary_target = targets[-1]
-
-        # In-sample 예측 정확도(방향성 기준)
+        
+        # AI 승률 계산
         all_close = df['Close'].values
         all_pred = pred_in_sample.values
         correct_count = 0
         total_count = len(all_pred) - 1
+        
         for i in range(1, len(all_pred)):
             actual_dir = 1 if all_close[i] > all_close[i - 1] else -1
             pred_dir = 1 if all_pred[i] > all_pred[i - 1] else -1
             if actual_dir == pred_dir:
                 correct_count += 1
+        
         rate_win = round((correct_count / total_count * 100.0) if total_count > 0 else 0.0, 2)
         learned_patterns = len(all_pred)
-
-        # ============================== [순서 변경 시작] ==============================
-        # ────────────────────────────────────────────────────────────────────
-        # 6-7) AI 예측 근거
-        # ────────────────────────────────────────────────────────────────────
-        last_ma50 = df['MA50'].iloc[-1]
-        price_trend = "하락세" if entry_price < last_ma50 else "상승세"
-        price_trend_colored = (
-            f"<span style='color:#E74C3C;font-weight:bold;'>하락세</span>" if price_trend == "하락세"
-            else f"<span style='color:#27AE60;font-weight:bold;'>상승세</span>"
+        
+        # 진행 상태 제거
+        progress_placeholder.empty()
+        status_text.empty()
+        
+        # ════════════════════════════════════════════════════════════════
+        # 결과 렌더링 (개선된 순서)
+        # ════════════════════════════════════════════════════════════════
+        
+        st.balloons()
+        st.success("✅ 분석이 완료되었습니다!")
+        
+        # 1. 데이터 요약
+        render_data_summary(df, selected_crypto)
+        
+        # 2. 가격 차트 (가장 먼저!)
+        render_price_chart(df, future_df, pred_in_sample, selected_crypto)
+        
+        # 3. 기술적 지표 탭
+        render_indicators_tabs(df)
+        
+        # 4. 지지/저항
+        render_support_resistance(df, entry_price)
+        
+        # 5. 패턴 분석
+        render_pattern_analysis(patterns)
+        
+        # 6. AI 예측 근거
+        render_ai_prediction_basis(df, selected_crypto, entry_price, far_price)
+        
+        # 7. 단기 예측 히스토리
+        render_forecast_history(hw_model, df)
+        
+        # 8. 포지션 요약 (최종 결론)
+        render_position_summary(
+            position_signal,
+            entry_price,
+            stop_loss_price,
+            targets,
+            recommended_leverage,
+            position_qty,
+            investment_amount,
+            rate_win,
+            learned_patterns
         )
-        df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
-        df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = df['EMA12'] - df['EMA26']
-        last_macd = df['MACD'].iloc[-1]
-        prev_macd = df['MACD'].iloc[-2]
-        macd_trend = "감소세" if last_macd < prev_macd else "증가세"
-        macd_trend_colored = f"<span style='color:#3498DB;font-weight:bold;'>{macd_trend}</span>"
-        last_rsi = df['RSI14'].iloc[-1]
-        last_stoch = df['StochK14'].iloc[-1]
-        if last_rsi < 30 and last_stoch < 20:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 과매도 상태입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#E74C3C;font-weight:bold;'>하락</span> 지속 가능성을 시사합니다."
-        elif last_rsi > 70 and last_stoch > 80:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 과매수 상태입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#27AE60;font-weight:bold;'>반등</span> 가능성을 시사합니다."
-        else:
-            momentum_desc = (
-                f"모멘텀 지표인 <span style='color:#F1C40F;font-weight:bold;'>RSI({last_rsi:.2f})</span>와 "
-                f"<span style='color:#F1C40F;font-weight:bold;'>스토캐스틱({last_stoch:.2f})</span>가 중립 영역을 유지 중입니다."
-            )
-            future_trend = "이는 향후 <span style='color:#F1C40F;font-weight:bold;'>횡보</span> 가능성을 시사합니다."
-
-        last_mfi = df['MFI14'].iloc[-1]
-        mfi_desc = f"단기적으로는 MFI가 <span style='font-weight:bold;'>{last_mfi:.2f}</span>으로 긍정권이며, 횡보 가능성이 있습니다."
-
-        ai_reason = "<br>".join([
-            f"현재 {selected_crypto[:-4]} 가격은 <span style='font-weight:bold;'>{entry_price:.2f}</span>로 {price_trend_colored}이며, MA50 대비 {price_trend}를 보이고 있습니다.",
-            f"MACD도 {macd_trend_colored}를 보이며 {'하락' if macd_trend=='감소세' else '상승'} 추세를 형성 중입니다.",
-            momentum_desc,
-            future_trend,
-            mfi_desc
-        ])
-        st.markdown("<div class='section-title'>🤖 AI 예측 근거</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='line-height:1.6; font-size:16px;'>{ai_reason}</div>", unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-8) 주요 지표 요약
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📊 주요 지표 요약</div>", unsafe_allow_html=True)
-        if price_trend == "하락세":
-            card1_bg, card1_icon, card1_text = "#C0392B", "📉", "현재 하락 추세"
-        else:
-            card1_bg, card1_icon, card1_text = "#27AE60", "📈", "현재 상승 추세"
-
-        if last_rsi < 30 and last_stoch < 20:
-            card2_bg, card2_icon, card2_text = "#F1C40F", "⚠️", "과매도 상태"
-        elif last_rsi > 70 and last_stoch > 80:
-            card2_bg, card2_icon, card2_text = "#F1C40F", "⚠️", "과매수 상태"
-        else:
-            card2_bg, card2_icon, card2_text = "#95A5A6", "➖", "모멘텀 중립"
-
-        cross_signal = df['Cross_Signal'].iloc[-1]
-        if cross_signal == 1:
-            card3_bg, card3_icon, card3_text = "#2ECC71", "🔀", "EMA 골든 크로스"
-        elif cross_signal == -1:
-            card3_bg, card3_icon, card3_text = "#2ECC71", "🔀", "EMA 데드 크로스"
-        else:
-            if last_macd < prev_macd:
-                card3_bg, card3_icon, card3_text = "#E74C3C", "📉", "MACD 감소세"
-            else:
-                card3_bg, card3_icon, card3_text = "#2ECC71", "📈", "MACD 증가세"
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(
-                f"<div style='background-color:{card1_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card1_icon}</span><br>{card1_text}</div>",
-                unsafe_allow_html=True
-            )
-        with col2:
-            st.markdown(
-                f"<div style='background-color:{card2_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card2_icon}</span><br>{card2_text}</div>",
-                unsafe_allow_html=True
-            )
-        with col3:
-            st.markdown(
-                f"<div style='background-color:{card3_bg};padding:12px;border-radius:5px;text-align:center;'>"
-                f"<span style='font-size:24px;'>{card3_icon}</span><br>{card3_text}</div>",
-                unsafe_allow_html=True
-            )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-12) 추세 예측 히스토리 (5분 간격)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📈 추세 예측 히스토리</div>", unsafe_allow_html=True)
-        now = datetime.datetime.now()
-        minute = (now.minute // 5) * 5
-        base_time = now.replace(minute=minute, second=0, microsecond=0)
-        future_dates_5m = [base_time + datetime.timedelta(minutes=5 * (i + 1)) for i in range(6)]
-        hw_forecast_6 = hw_model.forecast(steps=6)
-        hist_df_5m = pd.DataFrame({
-            'Time_5m': future_dates_5m,
-            'Pred_Close_5m': hw_forecast_6.values
-        })
-        hist_df_5m.set_index('Time_5m', inplace=True)
-
-        comments_list = []
-        for i in range(len(hist_df_5m)):
-            if i == 0:
-                if hw_forecast_6.values[0] < raw_df['Close'].iloc[-1]:
-                    comments_list.append("하락 지속 가능성")
-                elif hw_forecast_6.values[0] > raw_df['Close'].iloc[-1]:
-                    comments_list.append("강세 지속 가능성")
-                else:
-                    comments_list.append("조정 가능성")
-            else:
-                prev = hw_forecast_6.values[i - 1]
-                curr = hw_forecast_6.values[i]
-                if curr < prev:
-                    if (prev - curr) > (0.005 * prev):
-                        comments_list.append("하락 가능성 증가")
-                    else:
-                        comments_list.append("하락 지속 가능성")
-                elif curr > prev:
-                    if (curr - prev) < (0.005 * prev):
-                        comments_list.append("상승 조정 가능성")
-                    else:
-                        comments_list.append("강세 지속 가능성")
-                else:
-                    comments_list.append("조정 가능성")
-
-        hist_df_5m['Comment'] = comments_list
-        output_df = hist_df_5m.copy()
-        output_df.index = output_df.index.strftime('%y-%m-%d %H:%M')
-        st.dataframe(
-            output_df
-            .reset_index()
-            .rename(columns={'Time_5m': 'Time', 'Pred_Close_5m': 'Pred_Close'}),
-            use_container_width=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-9) 변동성 지표 (ATR)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📉 변동성 지표 (ATR)</div>", unsafe_allow_html=True)
-        latest_atr = df['ATR14'].iloc[-1]
-        prev_atr = df['ATR14'].iloc[-2] if len(df['ATR14'].dropna()) > 1 else latest_atr
-        if latest_atr > prev_atr:
-            atr_symbol, atr_trend_text = "🔺", "🔍 ATR이 이전 대비 증가하여 변동성이 확대되었습니다."
-        elif latest_atr < prev_atr:
-            atr_symbol, atr_trend_text = "🔻", "🔍 ATR이 이전 대비 감소하여 변동성이 축소되었습니다."
-        else:
-            atr_symbol, atr_trend_text = "⏺️", "🔍 ATR이 이전과 비슷한 수준입니다."
-
-        st.markdown(f"<div style='font-size:20px; font-weight:bold;'>{latest_atr:.2f} {atr_symbol}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='font-size:14px; color:#555;'>{atr_trend_text}</div>", unsafe_allow_html=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            "※ ATR이 높으면 높은 변동성, 낮으면 낮은 변동성을 의미하며, StopLoss·Position Sizing 등 리스크 관리에 주로 활용됩니다。",
-            unsafe_allow_html=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-10) 지원 및 저항 지표 (원래 상태 유지)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🛡️ 지원 및 저항 지표</div>", unsafe_allow_html=True)
-        fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 1.0]
-        high_price = df['High'].max()
-        low_price = df['Low'].min()
-        diff = high_price - low_price if high_price != low_price else 1e-8
-        fib_levels = []
-        for ratio in fib_ratios:
-            level_price = high_price - diff * ratio
-            fib_levels.append({'ratio': ratio, 'price': level_price})
-
-        current_ratio = (high_price - entry_price) / diff
-        closest_ratio = min(fib_ratios, key=lambda x: abs(current_ratio - x))
-
-        html_fib = """
-<div style="background-color:#111; padding:16px; border-radius:8px;">
-  <div style="color:#FFFFFF; font-size:18px; font-weight:bold; margin-bottom:4px;">
-    피보나치 되돌림
-  </div>
-  <div style="color:#AAAAAA; font-size:14px; margin-bottom:12px;">
-    주요 지지/저항 레벨
-  </div>
-  <div style="position:relative; height:180px; border-left:1px solid #555; margin-left:40px;">
-"""
-        for lvl in fib_levels:
-            top_pct = lvl['ratio'] * 100
-            price_str = f"{lvl['price']:.2f}"
-            perc_str = f"{int(lvl['ratio']*100)}%"
-            html_fib += f"""
-    <div style="position:absolute; top:{top_pct:.1f}%; left:-40px; width:100%; display:flex; align-items:center;">
-      <div style="width:40px; text-align:right; color:#CCCCCC; font-size:12px;">
-        {price_str}
-      </div>
-      <div style="flex:1; border-top:1px solid #555;"></div>
-      <div style="width:60px; text-align:right; color:#CCCCCC; font-size:12px; margin-left:4px;">
-        {perc_str}
-      </div>
-    </div>
-"""
-            if abs(lvl['ratio'] - closest_ratio) < 1e-6:
-                html_fib += f"""
-    <div style="position:absolute; top:{top_pct:.1f}%; left:40px; width:8px; height:8px;
-                background-color:#E74C3C; border-radius:50%; transform:translate(-50%, -50%);"></div>
-"""
-        html_fib += """
-  </div>
-</div>
-"""
-        components.html(html_fib, height=280)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-11) 캔들스틱 패턴 감지 및 해석 (EMA 교차 패턴 해석 추가)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴 감지 및 해석</div>", unsafe_allow_html=True)
-        patterns = []
-        df_sorted = df.sort_index(ascending=True)
-
-        # EMA 교차 패턴 해석 추가
-        ema50 = df['EMA50'].iloc[-1]
-        ema200 = df['EMA200'].iloc[-1]
-        ema50_prev = df['EMA50'].iloc[-2]
-        ema200_prev = df['EMA200'].iloc[-2]
-
-        # EMA 교차 패턴 분석
-        if ema50 > ema200 and ema50_prev <= ema200_prev:
-            patterns.append({
-                'name': '골든 크로스',
-                'date': df.index[-1],
-                'conf': 90.0,  # 신뢰도
-                'desc': 'EMA50이 EMA200을 상향 돌파하여 강력한 상승 신호',
-                'impact': '장기 상승 추세 전환 가능성 높음'
-            })
-        elif ema50 < ema200 and ema50_prev >= ema200_prev:
-            patterns.append({
-                'name': '데드 크로스',
-                'date': df.index[-1],
-                'conf': 85.0,  # 신뢰도
-                'desc': 'EMA50이 EMA200을 하향 돌파하여 강력한 하락 신호',
-                'impact': '장기 하락 추세 전환 가능성 높음'
-            })
-        elif (ema50 - ema200) > (ema50_prev - ema200_prev):
-            patterns.append({
-                'name': 'EMA 확산',
-                'date': df.index[-1],
-                'conf': 75.0,
-                'desc': 'EMA50과 EMA200 간 거리가 확대되는 상승 추세',
-                'impact': '현재 추세 강화 가능성'
-            })
-        elif (ema50 - ema200) < (ema50_prev - ema200_prev):
-            patterns.append({
-                'name': 'EMA 수렴',
-                'date': df.index[-1],
-                'conf': 70.0,
-                'desc': 'EMA50과 EMA200 간 거리가 좁아지는 추세 전환 신호',
-                'impact': '현재 추세 약화 및 반전 가능성'
-            })
-
-        # 기존 캔들스틱 패턴 (Morning Star, Doji, Three White Soldiers) 탐지
-        for i in range(2, len(df_sorted)):
-            o1, c1, h1, l1 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 2]
-            o2, c2, h2, l2 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i - 1]
-            o3, c3, h3, l3 = df_sorted[['Open', 'Close', 'High', 'Low']].iloc[i]
-            date3 = df_sorted.index[i]
-
-            # Three White Soldiers
-            if (c1 > o1) and (c2 > o2) and (c3 > o3) and (c2 > c1) and (c3 > c2):
-                patterns.append({
-                    'name': 'Three White Soldiers',
-                    'date': date3,
-                    'conf': 100.00,
-                    'desc': '세 개의 연속 양봉으로 강력한 상승 신호입니다.'
-                })
-            # Morning Star
-            body1 = abs(c1 - o1)
-            body2 = abs(c2 - o2)
-            body3 = abs(c3 - o3)
-            range2 = (h2 - l2) if (h2 - l2) != 0 else 1e-8
-            if (c1 < o1) and (body2 < range2 * 0.3) and (c2 < c1) and (o2 < c1) and \
-               (c3 > o3) and (c3 > (o1 + c1) / 2):
-                conf = min((body3 / (h3 - l3 + 1e-8)) * 100, 100.0)
-                patterns.append({
-                    'name': 'Morning Star',
-                    'date': date3,
-                    'conf': round(conf, 2),
-                    'desc': '하락 후 작은 몸통 양봉→큰 몸통 양봉으로 반전 신호입니다.'
-                })
-            # Doji
-            if abs(o3 - c3) <= (h3 - l3) * 0.1:
-                patterns.append({
-                    'name': 'Doji',
-                    'date': date3,
-                    'conf': 100.00,
-                    'desc': '시가와 종가가 비슷한 십자형 캔들입니다. 매수/매도 세력 균형으로 추세 전환 가능성이 있습니다.'
-                })
-
-        if not patterns:
-            st.write("해당 기간 내 캔들스틱 또는 EMA 교차 패턴이 감지되지 않았습니다.")
-        else:
-            patterns_sorted = sorted(patterns, key=lambda x: x['date'], reverse=True)
-            latest_by_name = {}
-            for pat in patterns_sorted:
-                nm = pat['name']
-                if nm not in latest_by_name:
-                    latest_by_name[nm] = pat
-
-            display_order = ['골든 크로스', '데드 크로스', 'EMA 확산', 'EMA 수렴',
-                             'Morning Star', 'Doji', 'Three White Soldiers']
-            for nm in display_order:
-                if nm in latest_by_name:
-                    pat = latest_by_name[nm]
-                    date_str = pat['date'].strftime("%m-%d")
-                    conf = pat.get('conf', None)
-                    desc = pat['desc']
-                    impact = pat.get('impact', None)
-                    if conf is not None:
-                        st.markdown(
-                            f"<div class='pattern-compact'><strong>{nm}</strong>  –  {date_str}  (신뢰도 {conf:.2f}%)</div>",
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        st.markdown(
-                            f"<div class='pattern-compact'><strong>{nm}</strong>  –  {date_str}</div>",
-                            unsafe_allow_html=True
-                        )
-                    st.markdown(
-                        f"<div class='pattern-compact'>{desc}</div>",
-                        unsafe_allow_html=True
-                    )
-                    if impact:
-                        st.markdown(
-                            f"<div class='pattern-compact'><span style='color:#F39C12;'>영향: {impact}</span></div>",
-                            unsafe_allow_html=True
-                        )
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-13) AI 전략 기반 매수 포지션 요약 및 진입/목표가 추천 결과 (목표가 예측 시간 포함)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>💖 AI 전략 기반 매수 포지션 요약 및 진입/목표가 추천 결과</div>", unsafe_allow_html=True)
-        st.markdown(f"""
-1) **포지션 신호**: **{position_signal}**  
-2) **현재가 (진입가)**: **{entry_price:.4f}** USDT  
-3) **투자 금액**: **{investment_amount:,.2f}** USDT  
-4) **포지션 수량**: **{position_qty:.4f}** 개  
-5) **진입가 범위 (Entry Range)**: **{entry_price*(1 - df['Volatility30d'].iloc[-1]):.8f} – {entry_price*(1 + df['Volatility30d'].iloc[-1]):.8f}** USDT  
-6) **손절가 (StopLoss)**: **{stop_loss_price:.4f}** USDT  
-7) **최종 목표가 (Primary Target)**: **{primary_target:,.5f}** USDT  
-
-➖ **목표가 목록** ➖  
-""", unsafe_allow_html=True)
-
-        # now_dt를 tz-aware로 변경: future_df.index의 timezone을 가져와 동기화
-        now_dt = pd.Timestamp.now(tz=future_df.index.tz)
-
-        for idx, tgt in enumerate(targets, start=1):
-            # 방향에 따라 달성 예측 날짜 여부 판단
-            if direction == 'up':
-                cond = future_df['예측 종가'] >= tgt
-            else:
-                cond = future_df['예측 종가'] <= tgt
-
-            if cond.any():
-                # 첫 번째 달성 예상 날짜
-                target_date = future_df[cond].index[0]
-                delta = target_date - now_dt
-            else:
-                # 예측 범위(30일) 이후 달성 예상을 위해 마지막 예측 날짜와 현재 시점 차이 계산
-                last_forecast_date = future_df.index[-1]
-                delta = last_forecast_date - now_dt
-
-            # delta를 월, 일, 시간, 분 단위로 분해
-            total_minutes = delta.days * 24 * 60 + delta.seconds // 60
-            months = total_minutes // (30 * 24 * 60)
-            rem_minutes_after_months = total_minutes % (30 * 24 * 60)
-            days = rem_minutes_after_months // (24 * 60)
-            rem_minutes_after_days = rem_minutes_after_months % (24 * 60)
-            hours = rem_minutes_after_days // 60
-            minutes = rem_minutes_after_days % 60
-
-            # 문자열 생성 (0 단위는 생략)
-            parts = []
-            if months > 0:
-                parts.append(f"{months}개월")
-            if days > 0:
-                parts.append(f"{days}일")
-            if hours > 0:
-                parts.append(f"{hours}시간")
-            if minutes > 0:
-                parts.append(f"{minutes}분")
-            if not parts:
-                parts.append("0분")
-            time_str = " ".join(parts)
-
-            st.markdown(f"- 🎯 목표가 {idx}: **{tgt:.5f}** USDT (도달 예상: 약 {time_str})", unsafe_allow_html=True)
-
-        st.markdown(f"""
-➖ **AI 전략 (Strategy AI)** ➖  
-- 🎰 **승률 (Rate Win)**: **{rate_win:.2f}%**  
-- 🧠 **학습 데이터 포인트 수**: **{learned_patterns}개**  
-
-➖ **추천 레버리지**: **{recommended_leverage:.2f}배** (허용 상한: **{ultimate_ceiling}배**)  
-""", unsafe_allow_html=True)
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-5) 🔗 외부 링크 출력 (한 줄에 양쪽 정렬, 간격 최소화)
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>🔗 외부 링크</div>", unsafe_allow_html=True)
-        tv_url = f"https://www.tradingview.com/symbols/{selected_crypto}/"
-        yf_url = f"https://finance.yahoo.com/quote/{yf_ticker_symbol}/"
-        st.markdown(
-            f"<div class='external-links'>"
-            f"<a href='{tv_url}' target='_blank'>TradingView에서 보기 ▶</a>"
-            f"<a href='{yf_url}' target='_blank'>Yahoo Finance에서 보기 ▶</a>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-        # ────────────────────────────────────────────────────────────────────
-        # 6-6) 종가 & 예측 차트
-        # ────────────────────────────────────────────────────────────────────
-        st.markdown("<div class='section-title'>📈 종가 & 예측 차트</div>", unsafe_allow_html=True)
-        plot_df = pd.DataFrame({
-            'Close': df['Close'],
-            'MA50': df['MA50'],
-            'EMA200': df['EMA200'],
-        })
-        pred_plot = pd.Series(pred_in_sample.values, index=df.index, name='HW_InSample')
-        forecast_plot = pd.Series(future_forecast.values, index=future_dates, name='HW_Forecast')
-
-        combined = pd.concat([plot_df, pred_plot, forecast_plot], axis=1)
-        st.line_chart(combined, use_container_width=True)
-
-        # ============================== [순서 변경 종료] ==============================
-
-    except Exception as e:
-        st.error(f"❌ 오류 발생: {str(e)}")
+        
+        # 9. 외부 링크
+        render_external_links(selected_crypto)
+        
+        # 면책 조항
+        st.markdown("---")
         st.markdown("""
-**문제 해결 안내**
-1. 입력하신 심볼이 TradingView 및 Yahoo Finance에서 유효한지 확인하세요.  
-2. `yfinance` 라이브러리를 최신 버전으로 유지 (`pip install --upgrade yfinance`).  
-3. 최소 100 거래일 이상의 데이터가 필요합니다.  
-4. Streamlit Cloud에서 실행 시 `statsmodels>=0.12.0` 설치 여부를 확인하세요.
-""", unsafe_allow_html=True)
-        st.stop()
-
+        <div style='background-color:#FFF3CD; padding:15px; border-radius:8px; border-left:4px solid #FFC107;'>
+            <strong>⚠️ 면책 조항</strong><br>
+            본 시스템은 교육 목적으로 제공되며, 투자 조언이 아닙니다. 
+            암호화폐 투자는 높은 위험을 수반하므로 신중하게 결정하시기 바랍니다.
+            모든 투자 결정과 손실은 투자자 본인의 책임입니다.
+        </div>
+        """, unsafe_allow_html=True)
+        
+    except Exception as e:
+        st.error(f"❌ 오류가 발생했습니다: {str(e)}")
+        st.exception(e)
 else:
-    # 버튼 클릭 전 첫 화면 안내문
+    # 초기 화면
     st.markdown("""
-<div style='text-align:center'>
-    <h1>💎 코인 AI 예측 시스템</h1>
-    <p>사이드바에서 “암호화폐 심볼”과 “분석 기간”을 설정한 뒤, 투자/리스크 설정을 완료하고 『🚀 분석 시작』 버튼을 눌러주세요.</p>
-</div>
-""", unsafe_allow_html=True)
+    <div style='text-align:center; padding:50px;'>
+        <h1>🪙 코인 AI 예측 시스템</h1>
+        <p style='font-size:18px; color:#666;'>
+            왼쪽 사이드바에서 설정을 완료하고<br>
+            <strong>🚀 분석 시작</strong> 버튼을 클릭하세요!
+        </p>
+        <br>
+        <img src='https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/chart-line.svg' width='100'>
+    </div>
+    """, unsafe_allow_html=True)
