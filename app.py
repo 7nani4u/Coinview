@@ -22,6 +22,10 @@ from plotly.subplots import make_subplots
 from sklearn.model_selection import TimeSeriesSplit
 
 
+
+from sklearn.metrics import brier_score_loss, log_loss
+from sklearn.model_selection import TimeSeriesSplit
+
 # Keep-Alive 모듈 (선택적)
 try:
     from keep_alive import keep_alive
@@ -134,6 +138,215 @@ CRYPTO_MAP = {
     "에이다 (ADA)": "ADAUSDT",
     "솔라나 (SOL)": "SOLUSDT"
 }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 3: 실거래 시뮬레이션 - 거래소 프리셋
+# ════════════════════════════════════════════════════════════════════════════
+
+# 거래소별 수수료 프리셋
+EXCHANGE_PRESETS = {
+    '바이낸스 선물': {
+        'maker_fee': 0.0002,  # 0.02%
+        'taker_fee': 0.0004,  # 0.04%
+        'max_leverage': 125,
+        'slippage_rate': 0.0005,  # 0.05% (기본 슬리피지)
+        'funding_rate': 0.0001,  # 8시간당 0.01% (평균)
+    },
+    '바이비트 선물': {
+        'maker_fee': 0.0002,  # 0.02%
+        'taker_fee': 0.0006,  # 0.06%
+        'max_leverage': 100,
+        'slippage_rate': 0.0006,  # 0.06%
+        'funding_rate': 0.0001,
+    },
+    '사용자 정의': {
+        'maker_fee': 0.0002,
+        'taker_fee': 0.0004,
+        'max_leverage': 50,
+        'slippage_rate': 0.0005,
+        'funding_rate': 0.0001,
+    }
+}
+
+
+def calculate_effective_leverage(nominal_leverage, stop_loss_pct, volatility):
+    """
+    유효 레버리지 계산
+    
+    Parameters:
+    -----------
+    nominal_leverage : float
+        명목 레버리지
+    stop_loss_pct : float
+        손절 비율 (%)
+    volatility : float
+        변동성 (표준편차)
+    
+    Returns:
+    --------
+    dict : 유효 레버리지 정보
+        - 'effective': 유효 레버리지
+        - 'risk_adjusted': 리스크 조정 레버리지
+        - 'liquidation_distance': 청산 거리 (%)
+    """
+    # 청산 거리 계산
+    liquidation_distance = 100 / nominal_leverage  # %
+    
+    # 유효 레버리지 (손절 고려)
+    effective = min(nominal_leverage, 100 / stop_loss_pct)
+    
+    # 리스크 조정 레버리지 (변동성 고려)
+    risk_adjusted = effective * (1 - min(volatility / 10, 0.5))
+    
+    return {
+        'effective': effective,
+        'risk_adjusted': risk_adjusted,
+        'liquidation_distance': liquidation_distance
+    }
+
+
+def calculate_expected_fill_price(entry_price, side, slippage_rate, market_impact=0.0):
+    """
+    기대 체결가 계산 (슬리피지 반영)
+    
+    Parameters:
+    -----------
+    entry_price : float
+        진입 가격
+    side : str
+        'long' or 'short'
+    slippage_rate : float
+        슬리피지 비율 (0.0005 = 0.05%)
+    market_impact : float
+        시장 충격 비율 (큰 주문일 경우 추가)
+    
+    Returns:
+    --------
+    dict : 체결 정보
+        - 'expected_price': 기대 체결가
+        - 'slippage_amount': 슬리피지 금액
+        - 'slippage_pct': 슬리피지 퍼센트
+    """
+    total_slippage = slippage_rate + market_impact
+    
+    if side == 'long':
+        # 매수: 가격이 올라가므로 불리
+        expected_price = entry_price * (1 + total_slippage)
+        slippage_amount = expected_price - entry_price
+    else:  # short
+        # 매도: 가격이 내려가므로 불리
+        expected_price = entry_price * (1 - total_slippage)
+        slippage_amount = entry_price - expected_price
+    
+    slippage_pct = (slippage_amount / entry_price) * 100
+    
+    return {
+        'expected_price': expected_price,
+        'slippage_amount': slippage_amount,
+        'slippage_pct': slippage_pct
+    }
+
+
+def calculate_trading_costs(position_size, entry_price, exit_price, 
+                           leverage, exchange_preset, holding_hours=24):
+    """
+    총 거래 비용 계산 (수수료 + 슬리피지 + 펀딩 비용)
+    
+    Parameters:
+    -----------
+    position_size : float
+        포지션 크기 (코인 수량)
+    entry_price : float
+        진입가
+    exit_price : float
+        청산가
+    leverage : float
+        레버리지
+    exchange_preset : dict
+        거래소 프리셋
+    holding_hours : int
+        보유 시간 (시간)
+    
+    Returns:
+    --------
+    dict : 비용 내역
+    """
+    position_value = position_size * entry_price
+    
+    # 1. 진입 수수료 (Taker)
+    entry_fee = position_value * exchange_preset['taker_fee']
+    
+    # 2. 진입 슬리피지
+    entry_slip = calculate_expected_fill_price(
+        entry_price, 'long', exchange_preset['slippage_rate']
+    )
+    entry_slippage_cost = position_size * entry_slip['slippage_amount']
+    
+    # 3. 청산 수수료 (Taker)
+    exit_value = position_size * exit_price
+    exit_fee = exit_value * exchange_preset['taker_fee']
+    
+    # 4. 청산 슬리피지
+    exit_slip = calculate_expected_fill_price(
+        exit_price, 'short', exchange_preset['slippage_rate']
+    )
+    exit_slippage_cost = position_size * exit_slip['slippage_amount']
+    
+    # 5. 펀딩 비용 (8시간마다)
+    funding_periods = holding_hours / 8
+    funding_cost = position_value * exchange_preset['funding_rate'] * funding_periods
+    
+    total_cost = entry_fee + exit_fee + entry_slippage_cost + exit_slippage_cost + funding_cost
+    
+    return {
+        'entry_fee': entry_fee,
+        'exit_fee': exit_fee,
+        'entry_slippage': entry_slippage_cost,
+        'exit_slippage': exit_slippage_cost,
+        'funding_cost': funding_cost,
+        'total_cost': total_cost,
+        'cost_pct': (total_cost / position_value) * 100
+    }
+
+
+def calibrate_talib_pattern_confidence(pattern_value, candle_range, volatility):
+    """
+    TA-Lib 패턴 신뢰도 교정
+    
+    Parameters:
+    -----------
+    pattern_value : int
+        TA-Lib 패턴 값 (-100 ~ 100)
+    candle_range : float
+        봉 길이 (고가 - 저가)
+    volatility : float
+        변동성 (표준편차)
+    
+    Returns:
+    --------
+    float : 교정된 신뢰도 (0 ~ 100)
+    """
+    # 1. 기본 신뢰도 (절댓값 변환)
+    base_confidence = abs(pattern_value)
+    
+    # 2. 봉 길이 정규화 (긴 봉일수록 신뢰도 증가)
+    avg_candle_range = volatility * 2  # 평균 봉 길이 추정
+    if avg_candle_range > 0:
+        range_factor = min(candle_range / avg_candle_range, 2.0)  # 최대 2배
+    else:
+        range_factor = 1.0
+    
+    # 3. 변동성 대비 스케일링
+    # 고변동성 시장: 패턴 신뢰도 감소
+    volatility_factor = 1 / (1 + volatility / 10)
+    
+    # 4. 최종 신뢰도
+    calibrated = base_confidence * range_factor * volatility_factor
+    
+    return min(calibrated, 100.0)
+
+
 
 MAX_LEVERAGE_MAP = {
     "BTCUSDT": 125,
@@ -1128,6 +1341,214 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
         'risk_level': risk_level
     }
 
+
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Phase 2: 워크-포워드 검증 (Walk-Forward Validation)
+# ════════════════════════════════════════════════════════════════════════════
+
+def walk_forward_validation(data, n_splits=5, forecast_horizon=3, seasonal_period=7, seasonal_type='add'):
+    """
+    워크-포워드 검증 (시계열 교차 검증)
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        시계열 데이터
+    n_splits : int
+        분할 개수 (기본 5)
+    forecast_horizon : int
+        예측 기간 (기본 3)
+    seasonal_period : int
+        계절성 주기
+    seasonal_type : str
+        계절성 타입 ('add' or 'mul')
+    
+    Returns:
+    --------
+    dict : 검증 결과
+        - 'scores': 각 폴드별 점수 리스트
+        - 'mean_score': 평균 점수
+        - 'std_score': 표준편차
+        - 'direction_accuracy': 방향 정확도 리스트
+        - 'mean_direction': 평균 방향 정확도
+    """
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing, SimpleExpSmoothing
+    
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    
+    mase_scores = []
+    direction_accuracies = []
+    
+    for train_idx, test_idx in tscv.split(data):
+        train_data = data.iloc[train_idx]
+        test_data = data.iloc[test_idx]
+        
+        # 테스트 데이터가 예측 기간보다 작으면 스킵
+        if len(test_data) < forecast_horizon:
+            continue
+        
+        # 최신 500개 데이터만 사용 (성능 최적화)
+        if len(train_data) > 500:
+            train_data = train_data[-500:]
+        
+        try:
+            # 계절성 모델 시도
+            if seasonal_period and len(train_data) >= 2 * seasonal_period:
+                model = ExponentialSmoothing(
+                    train_data,
+                    seasonal_periods=seasonal_period,
+                    trend='add',
+                    seasonal=seasonal_type,
+                    initialization_method="estimated"
+                )
+                fitted = model.fit()
+            else:
+                # 비계절 모델
+                model = SimpleExpSmoothing(train_data, initialization_method="estimated")
+                fitted = model.fit()
+            
+            # 예측
+            forecast = fitted.forecast(steps=forecast_horizon)
+            actual = test_data.iloc[:forecast_horizon]
+            
+            # MASE 계산
+            naive_errors = np.abs(np.diff(train_data))
+            scale = np.mean(naive_errors)
+            
+            if scale > 0:
+                errors = np.abs(actual.values - forecast.values)
+                mase = np.mean(errors) / scale
+                mase_scores.append(mase)
+            
+            # 방향 정확도 계산
+            if len(actual) > 1:
+                actual_direction = (actual.values[1:] > actual.values[:-1]).astype(int)
+                forecast_direction = (forecast.values[1:] > forecast.values[:-1]).astype(int)
+                direction_acc = np.mean(actual_direction == forecast_direction) * 100
+                direction_accuracies.append(direction_acc)
+        
+        except Exception as e:
+            continue
+    
+    if not mase_scores:
+        return None
+    
+    return {
+        'scores': mase_scores,
+        'mean_score': np.mean(mase_scores),
+        'std_score': np.std(mase_scores),
+        'direction_accuracy': direction_accuracies,
+        'mean_direction': np.mean(direction_accuracies) if direction_accuracies else 0.0
+    }
+
+
+def calculate_brier_score(actual_direction, predicted_probs):
+    """
+    Brier Score 계산 (확률 예측 정확도)
+    
+    Parameters:
+    -----------
+    actual_direction : array-like
+        실제 방향 (0: 하락, 1: 상승)
+    predicted_probs : array-like
+        예측 확률 (0~1 사이)
+    
+    Returns:
+    --------
+    float : Brier Score (낮을수록 좋음, 0~1)
+    """
+    try:
+        score = brier_score_loss(actual_direction, predicted_probs)
+        return score
+    except Exception as e:
+        return None
+
+
+def calculate_log_loss_score(actual_direction, predicted_probs):
+    """
+    Log Loss 계산 (확률 예측 손실)
+    
+    Parameters:
+    -----------
+    actual_direction : array-like
+        실제 방향 (0: 하락, 1: 상승)
+    predicted_probs : array-like
+        예측 확률 (0~1 사이)
+    
+    Returns:
+    --------
+    float : Log Loss (낮을수록 좋음)
+    """
+    try:
+        # 확률을 0.01~0.99로 클리핑 (log(0) 방지)
+        predicted_probs = np.clip(predicted_probs, 0.01, 0.99)
+        score = log_loss(actual_direction, predicted_probs)
+        return score
+    except Exception as e:
+        return None
+
+
+def calculate_direction_metrics(actual, predicted):
+    """
+    방향 예측 메트릭 종합 계산
+    
+    Parameters:
+    -----------
+    actual : array-like
+        실제 가격 시계열
+    predicted : array-like
+        예측 가격 시계열
+    
+    Returns:
+    --------
+    dict : 방향 메트릭
+        - 'direction_accuracy': 방향 정확도 (%)
+        - 'brier_score': Brier Score
+        - 'log_loss': Log Loss
+        - 'up_accuracy': 상승 방향 정확도 (%)
+        - 'down_accuracy': 하락 방향 정확도 (%)
+    """
+    if len(actual) < 2 or len(predicted) < 2:
+        return None
+    
+    # 방향 계산 (1: 상승, 0: 하락)
+    actual_direction = (actual[1:] > actual[:-1]).astype(int)
+    predicted_direction = (predicted[1:] > predicted[:-1]).astype(int)
+    
+    # 방향 정확도
+    direction_accuracy = np.mean(actual_direction == predicted_direction) * 100
+    
+    # 확률 계산 (예측값의 변화율을 시그모이드 변환)
+    predicted_change_rate = (predicted[1:] - predicted[:-1]) / (predicted[:-1] + 1e-10)
+    predicted_probs = 1 / (1 + np.exp(-predicted_change_rate * 10))  # 시그모이드
+    
+    # Brier Score & Log Loss
+    brier = calculate_brier_score(actual_direction, predicted_probs)
+    logloss = calculate_log_loss_score(actual_direction, predicted_probs)
+    
+    # 상승/하락 별 정확도
+    up_mask = (actual_direction == 1)
+    down_mask = (actual_direction == 0)
+    
+    up_accuracy = (
+        np.mean(predicted_direction[up_mask] == 1) * 100 
+        if np.sum(up_mask) > 0 else 0.0
+    )
+    down_accuracy = (
+        np.mean(predicted_direction[down_mask] == 0) * 100 
+        if np.sum(down_mask) > 0 else 0.0
+    )
+    
+    return {
+        'direction_accuracy': direction_accuracy,
+        'brier_score': brier,
+        'log_loss': logloss,
+        'up_accuracy': up_accuracy,
+        'down_accuracy': down_accuracy
+    }
 
 
 def detect_seasonality_auto(series: pd.Series, max_period: int = 30) -> tuple:
