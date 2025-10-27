@@ -12,6 +12,7 @@ import numpy as np
 import yfinance as yf
 import datetime
 import streamlit as st
+from scipy import stats
 import os
 import logging
 import requests
@@ -1128,6 +1129,178 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
     }
 
 
+
+def detect_seasonality_auto(series: pd.Series, max_period: int = 30) -> tuple:
+    """
+    자동 계절성 감지 (v2.4.0)
+    
+    Returns:
+        tuple: (has_seasonality: bool, optimal_period: int, seasonality_type: str)
+    """
+    from scipy import stats
+    
+    if len(series) < 20:
+        return False, None, None
+    
+    # 1. ACF 기반 계절성 감지
+    try:
+        from statsmodels.tsa.stattools import acf
+        acf_values = acf(series, nlags=min(max_period, len(series) // 2), fft=True)
+        
+        # ACF 피크 찾기 (첫 번째 지연 제외)
+        peaks = []
+        for i in range(2, len(acf_values)):
+            if acf_values[i] > 0.3:  # 임계값
+                peaks.append((i, acf_values[i]))
+        
+        if peaks:
+            # 가장 강한 피크 선택
+            optimal_period = max(peaks, key=lambda x: x[1])[0]
+            has_seasonality = True
+        else:
+            has_seasonality = False
+            optimal_period = None
+    except:
+        has_seasonality = False
+        optimal_period = None
+    
+    # 2. 변동성 기반 계절성 타입 결정
+    if has_seasonality:
+        volatility = series.pct_change().std()
+        if volatility > 0.05:
+            seasonality_type = 'mul'  # 변동성 높으면 multiplicative
+        else:
+            seasonality_type = 'add'  # 변동성 낮으면 additive
+    else:
+        seasonality_type = None
+    
+    return has_seasonality, optimal_period, seasonality_type
+
+
+def fit_hw_model_robust(series: pd.Series, max_window: int = 500) -> tuple:
+    """
+    강건한 Holt-Winters 모델 학습 (v2.4.0)
+    
+    Features:
+    - 자동 계절성 감지
+    - 최신 윈도우 제한 (성능 개선)
+    - 폴백 전략
+    
+    Returns:
+        tuple: (model, seasonality_info: dict, training_window_size: int)
+    """
+    import statsmodels.api as sm
+    
+    # 최신 데이터만 사용 (성능 개선)
+    if len(series) > max_window:
+        series_windowed = series.iloc[-max_window:]
+        original_index = series.index
+        window_used = max_window
+    else:
+        series_windowed = series
+        original_index = series.index
+        window_used = len(series)
+    
+    # 계절성 자동 감지
+    has_seasonality, optimal_period, seasonality_type = detect_seasonality_auto(
+        series_windowed, 
+        max_period=min(30, len(series_windowed) // 3)
+    )
+    
+    seasonality_info = {
+        'detected': has_seasonality,
+        'period': optimal_period,
+        'type': seasonality_type,
+        'window_size': window_used
+    }
+    
+    # 모델 학습 (계층적 폴백)
+    model = None
+    error_log = []
+    
+    # Try 1: 감지된 계절성 사용
+    if has_seasonality and optimal_period and optimal_period >= 2:
+        try:
+            model = sm.tsa.ExponentialSmoothing(
+                series_windowed,
+                trend='add',
+                seasonal=seasonality_type,
+                seasonal_periods=optimal_period,
+                initialization_method="estimated"
+            ).fit(optimized=True)
+            seasonality_info['model_type'] = f'{seasonality_type}_seasonal'
+            return model, seasonality_info, window_used
+        except Exception as e:
+            error_log.append(f"Seasonal model failed: {str(e)[:50]}")
+    
+    # Try 2: 단순 계절성 (period=7)
+    if len(series_windowed) >= 14:
+        try:
+            model = sm.tsa.ExponentialSmoothing(
+                series_windowed,
+                trend='add',
+                seasonal='add',
+                seasonal_periods=7,
+                initialization_method="estimated"
+            ).fit(optimized=True)
+            seasonality_info['model_type'] = 'default_seasonal'
+            seasonality_info['period'] = 7
+            return model, seasonality_info, window_used
+        except Exception as e:
+            error_log.append(f"Default seasonal failed: {str(e)[:50]}")
+    
+    # Try 3: 비계절 모델 (폴백)
+    try:
+        model = sm.tsa.ExponentialSmoothing(
+            series_windowed,
+            trend='add',
+            seasonal=None,
+            initialization_method="estimated"
+        ).fit(optimized=True)
+        seasonality_info['model_type'] = 'non_seasonal'
+        seasonality_info['detected'] = False
+        return model, seasonality_info, window_used
+    except Exception as e:
+        error_log.append(f"Non-seasonal failed: {str(e)[:50]}")
+    
+    # 모든 시도 실패
+    raise ValueError(f"All model fitting attempts failed: {'; '.join(error_log)}")
+
+
+def forecast_with_offset_scaling(model, steps: int, last_actual_value: float, 
+                                  recent_trend: float) -> np.ndarray:
+    """
+    오프셋 스케일링 예측 (v2.4.0)
+    
+    절대가격 대신 차분(difference) 기반으로 예측하여 하락 추세 보정
+    
+    Args:
+        model: 학습된 HW 모델
+        steps: 예측 스텝 수
+        last_actual_value: 마지막 실제 가격
+        recent_trend: 최근 추세 (이동평균 기울기)
+    
+    Returns:
+        np.ndarray: 보정된 예측값
+    """
+    # 모델 예측 (차분 공간)
+    raw_forecast = model.forecast(steps=steps)
+    
+    # 오프셋 보정
+    # 1. 첫 예측값과 실제값의 차이 계산
+    offset = last_actual_value - raw_forecast.iloc[0]
+    
+    # 2. 추세 보정 (최근 추세 반영)
+    trend_correction = np.linspace(0, recent_trend * steps, steps)
+    
+    # 3. 최종 예측값 = 원본 예측 + 오프셋 + 추세 보정
+    corrected_forecast = raw_forecast + offset + trend_correction
+    
+    return corrected_forecast
+
+
+
+
 def perform_timeseries_cv(df: pd.DataFrame, n_splits: int = 5) -> pd.DataFrame:
     """TimeSeriesSplit 검증"""
     if len(df) < n_splits * 10:
@@ -2010,24 +2183,21 @@ if bt:
             st.error("❌ 모델 학습에 필요한 최소 데이터가 부족합니다.")
             st.stop()
         
-        seasonal_periods = max(2, min(7, len(close_series) // 3))
-        
+        # [개선됨] v2.4.0: 강건한 모델 학습 및 자동 계절성 감지
         try:
-            if seasonal_periods >= 2 and len(close_series) >= seasonal_periods * 2:
-                hw_model = sm.tsa.ExponentialSmoothing(
-                    close_series,
-                    trend='add',
-                    seasonal='add',
-                    seasonal_periods=seasonal_periods,
-                    initialization_method="estimated"
-                ).fit(optimized=True)
+            hw_model, seasonality_info, window_size = fit_hw_model_robust(
+                close_series, 
+                max_window=500  # 최신 500개 데이터만 사용 (성능 개선)
+            )
+            
+            # 계절성 정보 표시
+            if seasonality_info['detected']:
+                st.info(f"✅ 계절성 감지: 주기 {seasonality_info['period']}, "
+                       f"타입 {seasonality_info['type']}, "
+                       f"학습 데이터: {window_size}개")
             else:
-                hw_model = sm.tsa.ExponentialSmoothing(
-                    close_series,
-                    trend='add',
-                    seasonal=None,
-                    initialization_method="estimated"
-                ).fit(optimized=True)
+                st.info(f"ℹ️ 비계절 모델 사용 (학습 데이터: {window_size}개)")
+        
         except Exception as e:
             st.error(f"❌ 모델 학습 실패: {str(e)}")
             st.warning("""
@@ -2040,8 +2210,21 @@ if bt:
         
         pred_in_sample = hw_model.fittedvalues
         
+        # [개선됨] v2.4.0: 오프셋 스케일링 예측
         forecast_steps = min(30, len(close_series) // 2)
-        future_forecast = hw_model.forecast(steps=forecast_steps)
+        last_actual_value = close_series.iloc[-1]
+        
+        # 최근 추세 계산 (최근 20개 데이터의 선형 회귀 기울기)
+        recent_window = min(20, len(close_series))
+        recent_prices = close_series.iloc[-recent_window:].values
+        recent_trend = np.polyfit(range(recent_window), recent_prices, 1)[0]
+        
+        future_forecast = forecast_with_offset_scaling(
+            hw_model, 
+            forecast_steps, 
+            last_actual_value, 
+            recent_trend
+        )
         
         last_date = df.index[-1]
         future_dates = [last_date + pd.Timedelta(days=i + 1) for i in range(forecast_steps)]
