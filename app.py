@@ -39,7 +39,7 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    print("⚠️ PyTorch가 설치되지 않았습니다. 딥러닝 모델을 사용할 수 없습니다.")
+    # PyTorch 미설치 시 로그 (UI에서 표시)
     # 더미 클래스 정의 (import 오류 방지)
     class nn:
         class Module:
@@ -75,7 +75,7 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
-    print("⚠️ XGBoost가 설치되지 않았습니다.")
+    # XGBoost 미설치 시 로그 (UI에서 표시)
     # 더미 모듈
     class xgb:
         class XGBRegressor:
@@ -86,7 +86,7 @@ try:
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
-    print("⚠️ LightGBM이 설치되지 않았습니다.")
+    # LightGBM 미설치 시 로그 (UI에서 표시)
     # 더미 모듈
     class lgb:
         class LGBMRegressor:
@@ -98,7 +98,7 @@ try:
     PROPHET_AVAILABLE = True
 except ImportError:
     PROPHET_AVAILABLE = False
-    print("⚠️ Prophet이 설치되지 않았습니다.")
+    # Prophet 미설치 시 로그 (UI에서 표시)
     # 더미 클래스
     class Prophet:
         pass
@@ -117,7 +117,7 @@ except ImportError:
     pass
 except Exception as e:
     # Keep-alive 실패 시에도 앱은 정상 실행
-    print(f"ℹ️  Keep-alive 비활성화: {e}")
+    pass  # 로그는 UI에서 표시
 
 # TA-Lib 선택적 임포트
 try:
@@ -1722,7 +1722,7 @@ def train_nbeats(data, forecast_days=3, lookback=180, epochs=50):
         X = torch.FloatTensor(X)
         y = torch.FloatTensor(y)
     except Exception as e:
-        print(f"⚠️ N-BEATS 데이터 준비 실패: {e}")
+        # N-BEATS 데이터 준비 실패 (로그는 상위 함수에서 처리)
         return None, None
     
     try:
@@ -1743,7 +1743,7 @@ def train_nbeats(data, forecast_days=3, lookback=180, epochs=50):
         model.eval()
         return model, scaler
     except Exception as e:
-        print(f"⚠️ N-BEATS 학습 실패: {e}")
+        # N-BEATS 학습 실패 (로그는 상위 함수에서 처리)
         return None, scaler
 
 
@@ -1836,7 +1836,7 @@ def train_tft(data, features_df, forecast_days=3, lookback=90, epochs=50):
         model.eval()
         return model, scaler
     except Exception as e:
-        print(f"⚠️ TFT 학습 실패: {e}")
+        # TFT 학습 실패 (로그는 상위 함수에서 처리)
         return None, None
 
 
@@ -1979,7 +1979,7 @@ def train_gru(data, forecast_days=3, lookback=120, epochs=50):
         model.eval()
         return model, scaler
     except Exception as e:
-        print(f"⚠️ GRU 학습 실패: {e}")
+        # GRU 학습 실패 (로그는 상위 함수에서 처리)
         return None, None
 
 
@@ -2153,7 +2153,7 @@ def train_lstm(data, forecast_days=3, lookback=120, epochs=50):
         model.eval()
         return model, scaler
     except Exception as e:
-        print(f"⚠️ LSTM 학습 실패: {e}")
+        # LSTM 학습 실패 (로그는 상위 함수에서 처리)
         return None, None
 
 
@@ -2255,6 +2255,7 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
     st.info(f"🤖 앙상블 모델 선택: {config['description']}")
     
     progress_bar = st.progress(0)
+    status_text = st.empty()  # 동적 상태 텍스트용
     total_models = len(config['models'])
     
     for idx, model_name in enumerate(config['models']):
@@ -2262,7 +2263,7 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
             lookback = config['lookback'].get(model_name, 90)
             epochs = config['epochs']
             
-            st.text(f"학습 중: {model_name.upper()} ({idx+1}/{total_models})")
+            status_text.text(f"🔄 학습 중: {model_name.upper()} ({idx+1}/{total_models}) - lookback={lookback}, epochs={epochs}")
             
             if model_name == 'nbeats':
                 if not TORCH_AVAILABLE:
@@ -2270,7 +2271,11 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
                     models[model_name] = None
                 else:
                     model, scaler = train_nbeats(data, forecast_days, lookback, epochs)
-                    models['nbeats'] = {'model': model, 'scaler': scaler}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패 (데이터 부족 또는 오류)")
+                        models[model_name] = None
+                    else:
+                        models['nbeats'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'tft':
                 if not TORCH_AVAILABLE:
@@ -2278,7 +2283,11 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
                     models[model_name] = None
                 else:
                     model, scaler = train_tft(data, features_df, forecast_days, lookback, epochs)
-                    models['tft'] = {'model': model, 'scaler': scaler}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['tft'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'xgboost':
                 if not XGBOOST_AVAILABLE:
@@ -2286,7 +2295,11 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
                     models[model_name] = None
                 else:
                     model, metadata = train_xgboost(data, features_df, forecast_days, lookback)
-                    models['xgboost'] = {'model': model, 'metadata': metadata}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['xgboost'] = {'model': model, 'metadata': metadata}
             
             elif model_name == 'gru':
                 if not TORCH_AVAILABLE:
@@ -2294,31 +2307,47 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
                     models[model_name] = None
                 else:
                     model, scaler = train_gru(data, forecast_days, lookback, epochs)
-                    models['gru'] = {'model': model, 'scaler': scaler}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['gru'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'lightgbm':
                 if not LIGHTGBM_AVAILABLE:
-                    st.warning(f"⚠️ {model_name} 사용 부0가: LightGBM 미설치")
+                    st.warning(f"⚠️ {model_name} 사용 불가: LightGBM 미설치")
                     models[model_name] = None
                 else:
                     model, metadata = train_lightgbm(data, features_df, forecast_days, lookback)
-                    models['lightgbm'] = {'model': model, 'metadata': metadata}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['lightgbm'] = {'model': model, 'metadata': metadata}
             
             elif model_name == 'prophet':
                 if not PROPHET_AVAILABLE:
-                    st.warning(f"⚠️ {model_name} 사용 부0가: Prophet 미설치")
+                    st.warning(f"⚠️ {model_name} 사용 불가: Prophet 미설치")
                     models[model_name] = None
                 else:
                     model = train_prophet(data, forecast_days)
-                    models['prophet'] = {'model': model}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['prophet'] = {'model': model}
             
             elif model_name == 'lstm':
                 if not TORCH_AVAILABLE:
-                    st.warning(f"⚠️ {model_name} 사용 부0가: PyTorch 미설치")
+                    st.warning(f"⚠️ {model_name} 사용 불가: PyTorch 미설치")
                     models[model_name] = None
                 else:
                     model, scaler = train_lstm(data, forecast_days, lookback, epochs)
-                    models['lstm'] = {'model': model, 'scaler': scaler}
+                    if model is None:
+                        st.warning(f"⚠️ {model_name} 학습 실패")
+                        models[model_name] = None
+                    else:
+                        models['lstm'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'holtwinters':
                 # Holt-Winters는 기존 함수 재사용
@@ -2328,10 +2357,18 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
             progress_bar.progress((idx + 1) / total_models)
         
         except Exception as e:
-            st.warning(f"⚠️ {model_name} 학습 실패: {e}")
+            st.error(f"❌ {model_name.upper()} 학습 중 오류: {type(e).__name__}")
+            st.exception(e)  # 전체 traceback 표시
             models[model_name] = None
     
     progress_bar.empty()
+    status_text.empty()
+    
+    # 학습 결과 요약
+    successful_models = [k for k, v in models.items() if v is not None]
+    st.success(f"✅ 학습 완료: {len(successful_models)}/{total_models} 모델 성공")
+    if successful_models:
+        st.info(f"🎯 사용 가능 모델: {', '.join([m.upper() for m in successful_models])}")
     
     return models, config
 
