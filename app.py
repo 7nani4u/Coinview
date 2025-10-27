@@ -628,8 +628,12 @@ def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
     # MFI
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     df['MF'] = typical_price * df['Volume']
-    df['PosMF'] = df['MF'].where(df['Close'] > df['Close'].shift(1), 0)
-    df['NegMF'] = df['MF'].where(df['Close'] < df['Close'].shift(1), 0)
+    # 조건부 할당 (pandas 호환성 개선)
+    price_change = df['Close'].diff()
+    df['PosMF'] = df['MF'].copy()
+    df.loc[price_change <= 0, 'PosMF'] = 0
+    df['NegMF'] = df['MF'].copy()
+    df.loc[price_change >= 0, 'NegMF'] = 0
     roll_pos = df['PosMF'].rolling(window=window_14).sum()
     roll_neg = df['NegMF'].rolling(window=window_14).sum()
     df['MFI14'] = 100 - (100 / (1 + roll_pos / (roll_neg + 1e-8)))
