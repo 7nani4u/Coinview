@@ -543,7 +543,15 @@ def load_crypto_data(
             pass
 
     if df is not None and not df.empty:
-        return df
+        # MultiIndex 컴럼 처리 (yf.download가 MultiIndex 반환하는 경우)
+        if isinstance(df.columns, pd.MultiIndex):
+            # 컴럼이 ('Close', 'BTC-USD') 형태인 경우 평탄화
+            df.columns = df.columns.get_level_values(0)
+        
+        # 필수 컴럼 확인
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if all(col in df.columns for col in required_cols):
+            return df
     
     return pd.DataFrame()
 
