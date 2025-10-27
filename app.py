@@ -1705,38 +1705,46 @@ def train_nbeats(data, forecast_days=3, lookback=180, epochs=50):
     if not TORCH_AVAILABLE:
         return None, None
     
-    # 데이터 정규화
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
+    try:
+        # 데이터 정규화
+        scaler = MinMaxScaler()
+        scaled_data = scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
+        
+        # 학습 데이터 생성
+        X, y = [], []
+        for i in range(lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-lookback:i])
+            y.append(scaled_data[i:i+forecast_days])
+        
+        if len(X) < 10:
+            return None, scaler
+        
+        X = torch.FloatTensor(X)
+        y = torch.FloatTensor(y)
+    except Exception as e:
+        print(f"⚠️ N-BEATS 데이터 준비 실패: {e}")
+        return None, None
     
-    # 학습 데이터 생성
-    X, y = [], []
-    for i in range(lookback, len(scaled_data) - forecast_days):
-        X.append(scaled_data[i-lookback:i])
-        y.append(scaled_data[i:i+forecast_days])
-    
-    if len(X) < 10:
+    try:
+        # 모델 초기화
+        model = NBeatsModel(lookback, forecast_days, num_blocks=3, hidden_size=128)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+        
+        # 학습
+        model.train()
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = model(X)
+            loss = criterion(output, y)
+            loss.backward()
+            optimizer.step()
+        
+        model.eval()
+        return model, scaler
+    except Exception as e:
+        print(f"⚠️ N-BEATS 학습 실패: {e}")
         return None, scaler
-    
-    X = torch.FloatTensor(X)
-    y = torch.FloatTensor(y)
-    
-    # 모델 초기화
-    model = NBeatsModel(lookback, forecast_days, num_blocks=3, hidden_size=128)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-    
-    # 학습
-    model.train()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        output = model(X)
-        loss = criterion(output, y)
-        loss.backward()
-        optimizer.step()
-    
-    model.eval()
-    return model, scaler
 
 
 def predict_nbeats(model, scaler, last_sequence, forecast_days=3):
@@ -1790,42 +1798,46 @@ def train_tft(data, features_df, forecast_days=3, lookback=90, epochs=50):
     if not TORCH_AVAILABLE:
         return None, None
     
-    # 가격 + 지표 결합
-    combined_data = features_df[['Close', 'RSI14', 'MACD', 'Volume']].iloc[-len(data):].values
-    
-    # 정규화
-    scaler = StandardScaler()
-    scaled_data = scaler.fit_transform(combined_data)
-    
-    # 학습 데이터 생성
-    X, y = [], []
-    for i in range(lookback, len(scaled_data) - forecast_days):
-        X.append(scaled_data[i-lookback:i])
-        y.append(scaled_data[i:i+forecast_days, 0])  # Close만 예측
-    
-    if len(X) < 10:
-        return None, scaler
-    
-    X = torch.FloatTensor(X)
-    y = torch.FloatTensor(y)
-    
-    # 모델 초기화
-    model = SimpleTFT(input_size=combined_data.shape[1], hidden_size=64, 
-                      num_heads=4, forecast_size=forecast_days)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-    
-    # 학습
-    model.train()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        output = model(X)
-        loss = criterion(output, y)
-        loss.backward()
-        optimizer.step()
-    
-    model.eval()
-    return model, scaler
+    try:
+        # 가격 + 지표 결합
+        combined_data = features_df[['Close', 'RSI14', 'MACD', 'Volume']].iloc[-len(data):].values
+        
+        # 정규화
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(combined_data)
+        
+        # 학습 데이터 생성
+        X, y = [], []
+        for i in range(lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-lookback:i])
+            y.append(scaled_data[i:i+forecast_days, 0])  # Close만 예측
+        
+        if len(X) < 10:
+            return None, scaler
+        
+        X = torch.FloatTensor(X)
+        y = torch.FloatTensor(y)
+        
+        # 모델 초기화
+        model = SimpleTFT(input_size=combined_data.shape[1], hidden_size=64, 
+                          num_heads=4, forecast_size=forecast_days)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+        
+        # 학습
+        model.train()
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = model(X)
+            loss = criterion(output, y)
+            loss.backward()
+            optimizer.step()
+        
+        model.eval()
+        return model, scaler
+    except Exception as e:
+        print(f"⚠️ TFT 학습 실패: {e}")
+        return None, None
 
 
 def predict_tft(model, scaler, last_sequence, forecast_days=3):
@@ -1933,38 +1945,42 @@ def train_gru(data, forecast_days=3, lookback=120, epochs=50):
     if not TORCH_AVAILABLE:
         return None, None
     
-    # 데이터 정규화
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
-    
-    # 학습 데이터 생성
-    X, y = [], []
-    for i in range(lookback, len(scaled_data) - forecast_days):
-        X.append(scaled_data[i-lookback:i])
-        y.append(scaled_data[i:i+forecast_days].flatten())
-    
-    if len(X) < 10:
-        return None, scaler
-    
-    X = torch.FloatTensor(X)
-    y = torch.FloatTensor(y)
-    
-    # 모델 초기화
-    model = GRUModel(input_size=1, hidden_size=64, num_layers=2, forecast_size=forecast_days)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-    
-    # 학습
-    model.train()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        output = model(X)
-        loss = criterion(output, y)
-        loss.backward()
-        optimizer.step()
-    
-    model.eval()
-    return model, scaler
+    try:
+        # 데이터 정규화
+        scaler = MinMaxScaler()
+        scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+        
+        # 학습 데이터 생성
+        X, y = [], []
+        for i in range(lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-lookback:i])
+            y.append(scaled_data[i:i+forecast_days].flatten())
+        
+        if len(X) < 10:
+            return None, scaler
+        
+        X = torch.FloatTensor(X)
+        y = torch.FloatTensor(y)
+        
+        # 모델 초기화
+        model = GRUModel(input_size=1, hidden_size=64, num_layers=2, forecast_size=forecast_days)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+        
+        # 학습
+        model.train()
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = model(X)
+            loss = criterion(output, y)
+            loss.backward()
+            optimizer.step()
+        
+        model.eval()
+        return model, scaler
+    except Exception as e:
+        print(f"⚠️ GRU 학습 실패: {e}")
+        return None, None
 
 
 def predict_gru(model, scaler, last_sequence, forecast_days=3):
@@ -2103,38 +2119,42 @@ def train_lstm(data, forecast_days=3, lookback=120, epochs=50):
     if not TORCH_AVAILABLE:
         return None, None
     
-    # 데이터 정규화
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
-    
-    # 학습 데이터 생성
-    X, y = [], []
-    for i in range(lookback, len(scaled_data) - forecast_days):
-        X.append(scaled_data[i-lookback:i])
-        y.append(scaled_data[i:i+forecast_days].flatten())
-    
-    if len(X) < 10:
-        return None, scaler
-    
-    X = torch.FloatTensor(X)
-    y = torch.FloatTensor(y)
-    
-    # 모델 초기화
-    model = LSTMModel(input_size=1, hidden_size=128, num_layers=3, forecast_size=forecast_days)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-    
-    # 학습
-    model.train()
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        output = model(X)
-        loss = criterion(output, y)
-        loss.backward()
-        optimizer.step()
-    
-    model.eval()
-    return model, scaler
+    try:
+        # 데이터 정규화
+        scaler = MinMaxScaler()
+        scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+        
+        # 학습 데이터 생성
+        X, y = [], []
+        for i in range(lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-lookback:i])
+            y.append(scaled_data[i:i+forecast_days].flatten())
+        
+        if len(X) < 10:
+            return None, scaler
+        
+        X = torch.FloatTensor(X)
+        y = torch.FloatTensor(y)
+        
+        # 모델 초기화
+        model = LSTMModel(input_size=1, hidden_size=128, num_layers=3, forecast_size=forecast_days)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+        
+        # 학습
+        model.train()
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            output = model(X)
+            loss = criterion(output, y)
+            loss.backward()
+            optimizer.step()
+        
+        model.eval()
+        return model, scaler
+    except Exception as e:
+        print(f"⚠️ LSTM 학습 실패: {e}")
+        return None, None
 
 
 def predict_lstm(model, scaler, last_sequence, forecast_days=3):
