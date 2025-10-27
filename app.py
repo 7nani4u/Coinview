@@ -26,6 +26,48 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.model_selection import TimeSeriesSplit
 
+
+# 앙상블 모델 imports
+import warnings
+warnings.filterwarnings('ignore')
+
+# 딥러닝 모델
+try:
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import Dataset, DataLoader
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠️ PyTorch가 설치되지 않았습니다. 딥러닝 모델을 사용할 수 없습니다.")
+
+# 트리 기반 모델
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    print("⚠️ XGBoost가 설치되지 않았습니다.")
+
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+    print("⚠️ LightGBM이 설치되지 않았습니다.")
+
+# 시계열 모델
+try:
+    from prophet import Prophet
+    PROPHET_AVAILABLE = True
+except ImportError:
+    PROPHET_AVAILABLE = False
+    print("⚠️ Prophet이 설치되지 않았습니다.")
+
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
 # Keep-Alive 모듈 (선택적)
 try:
     from keep_alive import keep_alive
@@ -1551,6 +1593,764 @@ def calculate_direction_metrics(actual, predicted):
     }
 
 
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v2.5.0: 앙상블 모델 구현
+# ════════════════════════════════════════════════════════════════════════════
+
+# ────────────────────────────────────────────────────────────────────────────
+# 1. N-BEATS 모델 (Neural Basis Expansion Analysis for Time Series)
+# ────────────────────────────────────────────────────────────────────────────
+
+class NBeatsBlock(nn.Module):
+    """N-BEATS의 기본 블록"""
+    def __init__(self, input_size, theta_size, hidden_size=256):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size)
+        self.fc4 = nn.Linear(hidden_size, hidden_size)
+        
+        # Backcast and Forecast heads
+        self.backcast_fc = nn.Linear(hidden_size, input_size)
+        self.forecast_fc = nn.Linear(hidden_size, theta_size)
+        
+    def forward(self, x):
+        h = torch.relu(self.fc1(x))
+        h = torch.relu(self.fc2(h))
+        h = torch.relu(self.fc3(h))
+        h = torch.relu(self.fc4(h))
+        
+        backcast = self.backcast_fc(h)
+        forecast = self.forecast_fc(h)
+        
+        return backcast, forecast
+
+
+class NBeatsModel(nn.Module):
+    """N-BEATS 전체 모델"""
+    def __init__(self, input_size, forecast_size, num_blocks=3, hidden_size=256):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            NBeatsBlock(input_size, forecast_size, hidden_size)
+            for _ in range(num_blocks)
+        ])
+        
+    def forward(self, x):
+        residuals = x
+        forecast = torch.zeros(x.size(0), self.blocks[0].forecast_fc.out_features).to(x.device)
+        
+        for block in self.blocks:
+            backcast, block_forecast = block(residuals)
+            residuals = residuals - backcast
+            forecast = forecast + block_forecast
+        
+        return forecast
+
+
+def train_nbeats(data, forecast_days=3, lookback=180, epochs=50):
+    """N-BEATS 모델 학습"""
+    if not TORCH_AVAILABLE:
+        return None, None
+    
+    # 데이터 정규화
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
+    
+    # 학습 데이터 생성
+    X, y = [], []
+    for i in range(lookback, len(scaled_data) - forecast_days):
+        X.append(scaled_data[i-lookback:i])
+        y.append(scaled_data[i:i+forecast_days])
+    
+    if len(X) < 10:
+        return None, scaler
+    
+    X = torch.FloatTensor(X)
+    y = torch.FloatTensor(y)
+    
+    # 모델 초기화
+    model = NBeatsModel(lookback, forecast_days, num_blocks=3, hidden_size=128)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    # 학습
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        output = model(X)
+        loss = criterion(output, y)
+        loss.backward()
+        optimizer.step()
+    
+    model.eval()
+    return model, scaler
+
+
+def predict_nbeats(model, scaler, last_sequence, forecast_days=3):
+    """N-BEATS 예측"""
+    if model is None or not TORCH_AVAILABLE:
+        return None
+    
+    with torch.no_grad():
+        last_scaled = scaler.transform(last_sequence.reshape(-1, 1)).flatten()
+        X = torch.FloatTensor(last_scaled).unsqueeze(0)
+        forecast = model(X).numpy().flatten()
+        forecast_original = scaler.inverse_transform(forecast.reshape(-1, 1)).flatten()
+    
+    return forecast_original
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 2. TFT (Temporal Fusion Transformer) - 간소화 버전
+# ────────────────────────────────────────────────────────────────────────────
+
+class SimpleTFT(nn.Module):
+    """간소화된 TFT 모델 (핵심 어텐션 메커니즘)"""
+    def __init__(self, input_size, hidden_size=128, num_heads=4, forecast_size=3):
+        super().__init__()
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.attention = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, forecast_size)
+        
+    def forward(self, x):
+        # x shape: (batch, seq_len, features)
+        embedded = self.embedding(x)
+        
+        # Self-attention
+        attn_out, _ = self.attention(embedded, embedded, embedded)
+        
+        # LSTM
+        lstm_out, _ = self.lstm(attn_out)
+        
+        # Take last timestep
+        last_output = lstm_out[:, -1, :]
+        
+        # Forecast
+        forecast = self.fc(last_output)
+        
+        return forecast
+
+
+def train_tft(data, features_df, forecast_days=3, lookback=90, epochs=50):
+    """TFT 모델 학습 (다변량)"""
+    if not TORCH_AVAILABLE:
+        return None, None
+    
+    # 가격 + 지표 결합
+    combined_data = features_df[['Close', 'RSI14', 'MACD', 'Volume']].iloc[-len(data):].values
+    
+    # 정규화
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(combined_data)
+    
+    # 학습 데이터 생성
+    X, y = [], []
+    for i in range(lookback, len(scaled_data) - forecast_days):
+        X.append(scaled_data[i-lookback:i])
+        y.append(scaled_data[i:i+forecast_days, 0])  # Close만 예측
+    
+    if len(X) < 10:
+        return None, scaler
+    
+    X = torch.FloatTensor(X)
+    y = torch.FloatTensor(y)
+    
+    # 모델 초기화
+    model = SimpleTFT(input_size=combined_data.shape[1], hidden_size=64, 
+                      num_heads=4, forecast_size=forecast_days)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    # 학습
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        output = model(X)
+        loss = criterion(output, y)
+        loss.backward()
+        optimizer.step()
+    
+    model.eval()
+    return model, scaler
+
+
+def predict_tft(model, scaler, last_sequence, forecast_days=3):
+    """TFT 예측"""
+    if model is None or not TORCH_AVAILABLE:
+        return None
+    
+    with torch.no_grad():
+        last_scaled = scaler.transform(last_sequence)
+        X = torch.FloatTensor(last_scaled).unsqueeze(0)
+        forecast = model(X).numpy().flatten()
+        
+        # 역변환 (Close만)
+        dummy = np.zeros((forecast.shape[0], scaler.n_features_in_))
+        dummy[:, 0] = forecast
+        forecast_original = scaler.inverse_transform(dummy)[:, 0]
+    
+    return forecast_original
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 3. XGBoost
+# ────────────────────────────────────────────────────────────────────────────
+
+def train_xgboost(data, features_df, forecast_days=3, lookback=60):
+    """XGBoost 모델 학습"""
+    if not XGBOOST_AVAILABLE:
+        return None, None
+    
+    # 특징 선택 (기술적 지표)
+    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14']
+    X_features = features_df[feature_cols].iloc[-len(data):].values
+    
+    # 시계열 특징 추가 (과거 가격)
+    X, y = [], []
+    for i in range(lookback, len(data) - forecast_days):
+        past_prices = data.iloc[i-lookback:i].values
+        past_features = X_features[i-lookback:i].mean(axis=0)  # 평균 지표
+        X.append(np.concatenate([past_prices[-10:], past_features]))  # 최근 10개 가격 + 지표
+        y.append(data.iloc[i+forecast_days-1])  # forecast_days 후 가격
+    
+    if len(X) < 10:
+        return None, None
+    
+    X = np.array(X)
+    y = np.array(y)
+    
+    # XGBoost 학습
+    model = xgb.XGBRegressor(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        random_state=42
+    )
+    model.fit(X, y)
+    
+    return model, (lookback, feature_cols)
+
+
+def predict_xgboost(model, metadata, data, features_df, forecast_days=3):
+    """XGBoost 예측"""
+    if model is None or not XGBOOST_AVAILABLE:
+        return None
+    
+    lookback, feature_cols = metadata
+    X_features = features_df[feature_cols].values
+    
+    # 마지막 시퀀스
+    past_prices = data.iloc[-lookback:].values
+    past_features = X_features[-lookback:].mean(axis=0)
+    X_pred = np.concatenate([past_prices[-10:], past_features]).reshape(1, -1)
+    
+    forecast = model.predict(X_pred)
+    
+    # 반복 예측 (단일 스텝씩)
+    forecasts = [forecast[0]]
+    for _ in range(1, forecast_days):
+        # 이전 예측을 포함하여 다음 예측
+        new_prices = np.append(past_prices[1-10:], forecasts[-1])
+        X_pred = np.concatenate([new_prices, past_features]).reshape(1, -1)
+        forecasts.append(model.predict(X_pred)[0])
+    
+    return np.array(forecasts)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 4. GRU (Gated Recurrent Unit)
+# ────────────────────────────────────────────────────────────────────────────
+
+class GRUModel(nn.Module):
+    """GRU 모델"""
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, forecast_size=3):
+        super().__init__()
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        self.fc = nn.Linear(hidden_size, forecast_size)
+        
+    def forward(self, x):
+        out, _ = self.gru(x)
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+def train_gru(data, forecast_days=3, lookback=120, epochs=50):
+    """GRU 모델 학습"""
+    if not TORCH_AVAILABLE:
+        return None, None
+    
+    # 데이터 정규화
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+    
+    # 학습 데이터 생성
+    X, y = [], []
+    for i in range(lookback, len(scaled_data) - forecast_days):
+        X.append(scaled_data[i-lookback:i])
+        y.append(scaled_data[i:i+forecast_days].flatten())
+    
+    if len(X) < 10:
+        return None, scaler
+    
+    X = torch.FloatTensor(X)
+    y = torch.FloatTensor(y)
+    
+    # 모델 초기화
+    model = GRUModel(input_size=1, hidden_size=64, num_layers=2, forecast_size=forecast_days)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    # 학습
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        output = model(X)
+        loss = criterion(output, y)
+        loss.backward()
+        optimizer.step()
+    
+    model.eval()
+    return model, scaler
+
+
+def predict_gru(model, scaler, last_sequence, forecast_days=3):
+    """GRU 예측"""
+    if model is None or not TORCH_AVAILABLE:
+        return None
+    
+    with torch.no_grad():
+        last_scaled = scaler.transform(last_sequence.reshape(-1, 1))
+        X = torch.FloatTensor(last_scaled).unsqueeze(0)
+        forecast = model(X).numpy().flatten()
+        forecast_original = scaler.inverse_transform(forecast.reshape(-1, 1)).flatten()
+    
+    return forecast_original
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 5. LightGBM
+# ────────────────────────────────────────────────────────────────────────────
+
+def train_lightgbm(data, features_df, forecast_days=3, lookback=60):
+    """LightGBM 모델 학습"""
+    if not LIGHTGBM_AVAILABLE:
+        return None, None
+    
+    # 특징 선택
+    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14', 'BB_upper', 'BB_lower']
+    X_features = features_df[feature_cols].iloc[-len(data):].values
+    
+    # 학습 데이터 생성
+    X, y = [], []
+    for i in range(lookback, len(data) - forecast_days):
+        past_prices = data.iloc[i-lookback:i].values
+        past_features = X_features[i-lookback:i].mean(axis=0)
+        X.append(np.concatenate([past_prices[-10:], past_features]))
+        y.append(data.iloc[i+forecast_days-1])
+    
+    if len(X) < 10:
+        return None, None
+    
+    X = np.array(X)
+    y = np.array(y)
+    
+    # LightGBM 학습
+    model = lgb.LGBMRegressor(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        random_state=42,
+        verbose=-1
+    )
+    model.fit(X, y)
+    
+    return model, (lookback, feature_cols)
+
+
+def predict_lightgbm(model, metadata, data, features_df, forecast_days=3):
+    """LightGBM 예측"""
+    if model is None or not LIGHTGBM_AVAILABLE:
+        return None
+    
+    lookback, feature_cols = metadata
+    X_features = features_df[feature_cols].values
+    
+    # 마지막 시퀀스
+    past_prices = data.iloc[-lookback:].values
+    past_features = X_features[-lookback:].mean(axis=0)
+    X_pred = np.concatenate([past_prices[-10:], past_features]).reshape(1, -1)
+    
+    forecasts = [model.predict(X_pred)[0]]
+    for _ in range(1, forecast_days):
+        new_prices = np.append(past_prices[1-10:], forecasts[-1])
+        X_pred = np.concatenate([new_prices, past_features]).reshape(1, -1)
+        forecasts.append(model.predict(X_pred)[0])
+    
+    return np.array(forecasts)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 6. Prophet (간단한 래퍼)
+# ────────────────────────────────────────────────────────────────────────────
+
+def train_prophet(data, forecast_days=3):
+    """Prophet 모델 학습"""
+    if not PROPHET_AVAILABLE:
+        return None
+    
+    # Prophet 형식으로 변환
+    df_prophet = pd.DataFrame({
+        'ds': data.index,
+        'y': data.values
+    })
+    
+    model = Prophet(
+        daily_seasonality=True,
+        weekly_seasonality=True,
+        yearly_seasonality=False,
+        changepoint_prior_scale=0.05
+    )
+    
+    model.fit(df_prophet)
+    
+    return model
+
+
+def predict_prophet(model, forecast_days=3):
+    """Prophet 예측"""
+    if model is None or not PROPHET_AVAILABLE:
+        return None
+    
+    future = model.make_future_dataframe(periods=forecast_days)
+    forecast = model.predict(future)
+    
+    return forecast['yhat'].iloc[-forecast_days:].values
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 7. LSTM (기존보다 강화된 버전)
+# ────────────────────────────────────────────────────────────────────────────
+
+class LSTMModel(nn.Module):
+    """LSTM 모델"""
+    def __init__(self, input_size=1, hidden_size=128, num_layers=3, forecast_size=3):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        self.fc = nn.Linear(hidden_size, forecast_size)
+        
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+def train_lstm(data, forecast_days=3, lookback=120, epochs=50):
+    """LSTM 모델 학습"""
+    if not TORCH_AVAILABLE:
+        return None, None
+    
+    # 데이터 정규화
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
+    
+    # 학습 데이터 생성
+    X, y = [], []
+    for i in range(lookback, len(scaled_data) - forecast_days):
+        X.append(scaled_data[i-lookback:i])
+        y.append(scaled_data[i:i+forecast_days].flatten())
+    
+    if len(X) < 10:
+        return None, scaler
+    
+    X = torch.FloatTensor(X)
+    y = torch.FloatTensor(y)
+    
+    # 모델 초기화
+    model = LSTMModel(input_size=1, hidden_size=128, num_layers=3, forecast_size=forecast_days)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    # 학습
+    model.train()
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        output = model(X)
+        loss = criterion(output, y)
+        loss.backward()
+        optimizer.step()
+    
+    model.eval()
+    return model, scaler
+
+
+def predict_lstm(model, scaler, last_sequence, forecast_days=3):
+    """LSTM 예측"""
+    if model is None or not TORCH_AVAILABLE:
+        return None
+    
+    with torch.no_grad():
+        last_scaled = scaler.transform(last_sequence.reshape(-1, 1))
+        X = torch.FloatTensor(last_scaled).unsqueeze(0)
+        forecast = model(X).numpy().flatten()
+        forecast_original = scaler.inverse_transform(forecast.reshape(-1, 1)).flatten()
+    
+    return forecast_original
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 8. 앙상블 조합 및 자동 선택
+# ────────────────────────────────────────────────────────────────────────────
+
+def get_ensemble_config(interval):
+    """
+    시간 프레임에 따른 앙상블 모델 자동 선택
+    
+    Parameters:
+    -----------
+    interval : str
+        시간 프레임 ('1m', '5m', '1h', '1d')
+    
+    Returns:
+    --------
+    dict : 앙상블 설정
+        - 'models': 사용할 모델 리스트
+        - 'weights': 각 모델의 가중치
+        - 'lookback': 학습 윈도우 크기
+        - 'epochs': 학습 에폭 수
+    """
+    if interval in ['1m', '5m']:
+        # 초단타 트레이딩: N-BEATS + TFT + XGBoost
+        return {
+            'models': ['nbeats', 'tft', 'xgboost'],
+            'weights': [0.40, 0.35, 0.25],
+            'lookback': {'nbeats': 180, 'tft': 90, 'xgboost': 60},
+            'epochs': 30,
+            'description': '초단타 트레이딩 (N-BEATS 40% + TFT 35% + XGBoost 25%)'
+        }
+    elif interval == '1h':
+        # 단기 트레이딩 상단: N-BEATS + TFT + XGBoost (시간봉도 빠른 편)
+        return {
+            'models': ['nbeats', 'tft', 'xgboost'],
+            'weights': [0.40, 0.35, 0.25],
+            'lookback': {'nbeats': 240, 'tft': 120, 'xgboost': 90},
+            'epochs': 40,
+            'description': '시간봉 트레이딩 (N-BEATS 40% + TFT 35% + XGBoost 25%)'
+        }
+    elif interval == '1d':
+        # 단기 트레이딩: LightGBM + GRU + Prophet
+        return {
+            'models': ['gru', 'lightgbm', 'prophet'],
+            'weights': [0.40, 0.35, 0.25],
+            'lookback': {'gru': 120, 'lightgbm': 60, 'prophet': None},
+            'epochs': 50,
+            'description': '일봉 트레이딩 (GRU 40% + LightGBM 35% + Prophet 25%)'
+        }
+    else:
+        # 중기 트레이딩 (주봉 이상): XGBoost + LSTM + Holt-Winters
+        return {
+            'models': ['lstm', 'xgboost', 'holtwinters'],
+            'weights': [0.45, 0.30, 0.25],
+            'lookback': {'lstm': 150, 'xgboost': 90, 'holtwinters': None},
+            'epochs': 50,
+            'description': '중기 트레이딩 (LSTM 45% + XGBoost 30% + Holt-Winters 25%)'
+        }
+
+
+def train_ensemble_models(data, features_df, interval, forecast_days=3):
+    """
+    앙상블 모델 학습
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        가격 데이터
+    features_df : pd.DataFrame
+        기술적 지표 데이터
+    interval : str
+        시간 프레임
+    forecast_days : int
+        예측 일수
+    
+    Returns:
+    --------
+    dict : 학습된 모델들과 메타데이터
+    """
+    config = get_ensemble_config(interval)
+    models = {}
+    
+    st.info(f"🤖 앙상블 모델 선택: {config['description']}")
+    
+    progress_bar = st.progress(0)
+    total_models = len(config['models'])
+    
+    for idx, model_name in enumerate(config['models']):
+        try:
+            lookback = config['lookback'].get(model_name, 90)
+            epochs = config['epochs']
+            
+            st.text(f"학습 중: {model_name.upper()} ({idx+1}/{total_models})")
+            
+            if model_name == 'nbeats':
+                model, scaler = train_nbeats(data, forecast_days, lookback, epochs)
+                models['nbeats'] = {'model': model, 'scaler': scaler}
+            
+            elif model_name == 'tft':
+                model, scaler = train_tft(data, features_df, forecast_days, lookback, epochs)
+                models['tft'] = {'model': model, 'scaler': scaler}
+            
+            elif model_name == 'xgboost':
+                model, metadata = train_xgboost(data, features_df, forecast_days, lookback)
+                models['xgboost'] = {'model': model, 'metadata': metadata}
+            
+            elif model_name == 'gru':
+                model, scaler = train_gru(data, forecast_days, lookback, epochs)
+                models['gru'] = {'model': model, 'scaler': scaler}
+            
+            elif model_name == 'lightgbm':
+                model, metadata = train_lightgbm(data, features_df, forecast_days, lookback)
+                models['lightgbm'] = {'model': model, 'metadata': metadata}
+            
+            elif model_name == 'prophet':
+                model = train_prophet(data, forecast_days)
+                models['prophet'] = {'model': model}
+            
+            elif model_name == 'lstm':
+                model, scaler = train_lstm(data, forecast_days, lookback, epochs)
+                models['lstm'] = {'model': model, 'scaler': scaler}
+            
+            elif model_name == 'holtwinters':
+                # Holt-Winters는 기존 함수 재사용
+                hw_model, seasonality_info, window_size = fit_hw_model_robust(data, max_window=500)
+                models['holtwinters'] = {'model': hw_model, 'seasonality': seasonality_info}
+            
+            progress_bar.progress((idx + 1) / total_models)
+        
+        except Exception as e:
+            st.warning(f"⚠️ {model_name} 학습 실패: {e}")
+            models[model_name] = None
+    
+    progress_bar.empty()
+    
+    return models, config
+
+
+def predict_ensemble(models, config, data, features_df, forecast_days=3):
+    """
+    앙상블 예측
+    
+    Parameters:
+    -----------
+    models : dict
+        학습된 모델들
+    config : dict
+        앙상블 설정
+    data : pd.Series
+        가격 데이터
+    features_df : pd.DataFrame
+        기술적 지표
+    forecast_days : int
+        예측 일수
+    
+    Returns:
+    --------
+    np.array : 앙상블 예측값
+    dict : 각 모델별 예측값
+    """
+    predictions = {}
+    weights = {}
+    
+    for model_name, weight in zip(config['models'], config['weights']):
+        if models.get(model_name) is None:
+            continue
+        
+        try:
+            model_data = models[model_name]
+            lookback = config['lookback'].get(model_name, 90)
+            
+            if model_name == 'nbeats':
+                pred = predict_nbeats(
+                    model_data['model'], 
+                    model_data['scaler'], 
+                    data.iloc[-lookback:].values, 
+                    forecast_days
+                )
+            
+            elif model_name == 'tft':
+                last_features = features_df[['Close', 'RSI14', 'MACD', 'Volume']].iloc[-lookback:].values
+                pred = predict_tft(
+                    model_data['model'], 
+                    model_data['scaler'], 
+                    last_features, 
+                    forecast_days
+                )
+            
+            elif model_name == 'xgboost':
+                pred = predict_xgboost(
+                    model_data['model'], 
+                    model_data['metadata'], 
+                    data, 
+                    features_df, 
+                    forecast_days
+                )
+            
+            elif model_name == 'gru':
+                pred = predict_gru(
+                    model_data['model'], 
+                    model_data['scaler'], 
+                    data.iloc[-lookback:].values, 
+                    forecast_days
+                )
+            
+            elif model_name == 'lightgbm':
+                pred = predict_lightgbm(
+                    model_data['model'], 
+                    model_data['metadata'], 
+                    data, 
+                    features_df, 
+                    forecast_days
+                )
+            
+            elif model_name == 'prophet':
+                pred = predict_prophet(model_data['model'], forecast_days)
+            
+            elif model_name == 'lstm':
+                pred = predict_lstm(
+                    model_data['model'], 
+                    model_data['scaler'], 
+                    data.iloc[-lookback:].values, 
+                    forecast_days
+                )
+            
+            elif model_name == 'holtwinters':
+                hw_forecast = model_data['model'].forecast(steps=forecast_days)
+                pred = hw_forecast.values
+            
+            if pred is not None and len(pred) == forecast_days:
+                predictions[model_name] = pred
+                weights[model_name] = weight
+        
+        except Exception as e:
+            st.warning(f"⚠️ {model_name} 예측 실패: {e}")
+    
+    # 가중 평균
+    if not predictions:
+        return None, {}
+    
+    # 가중치 정규화
+    total_weight = sum(weights.values())
+    normalized_weights = {k: v/total_weight for k, v in weights.items()}
+    
+    # 앙상블 예측
+    ensemble_forecast = np.zeros(forecast_days)
+    for model_name, pred in predictions.items():
+        ensemble_forecast += pred * normalized_weights[model_name]
+    
+    return ensemble_forecast, predictions
+
+
 def detect_seasonality_auto(series: pd.Series, max_period: int = 30) -> tuple:
     """
     자동 계절성 감지 (v2.4.0)
@@ -2490,6 +3290,18 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("## 4️⃣ 투자 설정")
     
+    
+    # 예측 일수 설정
+    forecast_days = st.slider(
+        "🔮 예측 기간",
+        min_value=1,
+        max_value=30,
+        value=3,
+        step=1,
+        help="몇 일 후의 가격을 예측할지 선택하세요"
+    )
+    st.session_state['forecast_days'] = forecast_days
+
     investment_amount = st.number_input(
         "💰 투자 금액 (USDT)",
         min_value=1.0,
@@ -2596,7 +3408,37 @@ if bt:
             """)
         
         progress_placeholder.markdown(render_progress_bar(3, 6), unsafe_allow_html=True)
-        status_text.info("🤖 Holt-Winters Seasonal 모델을 학습하는 중...")
+        status_text.info("🤖 앙상블 모델을 학습하는 중...")
+        
+        close_series = df['Close']
+        
+        if len(close_series) < 10:
+            st.error("❌ 모델 학습에 필요한 최소 데이터가 부족합니다.")
+            st.stop()
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # v2.5.0: 앙상블 모델 학습 (시간 프레임 기반 자동 선택)
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            # 앙상블 모델 학습
+            ensemble_models, ensemble_config = train_ensemble_models(
+                data=close_series,
+                features_df=df,
+                interval=interval,
+                forecast_days=forecast_days
+            )
+            
+            if not ensemble_models:
+                st.error("❌ 앙상블 모델 학습에 실패했습니다.")
+                st.stop()
+            
+            st.success(f"✅ 앙상블 모델 학습 완료: {ensemble_config['description']}")
+            
+        except Exception as e:
+            st.error(f"❌ 앙상블 모델 학습 중 오류: {e}")
+            import traceback
+            st.text(traceback.format_exc())
+            st.stop()
         
         close_series = df['Close']
         
