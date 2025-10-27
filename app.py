@@ -40,6 +40,34 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
     print("⚠️ PyTorch가 설치되지 않았습니다. 딥러닝 모델을 사용할 수 없습니다.")
+    # 더미 클래스 정의 (import 오류 방지)
+    class nn:
+        class Module:
+            pass
+        class Linear:
+            pass
+        class ModuleList:
+            pass
+        class GRU:
+            pass
+        class LSTM:
+            pass
+    class torch:
+        @staticmethod
+        def relu(x):
+            return x
+        @staticmethod
+        def zeros(*args, **kwargs):
+            return None
+        class optim:
+            class Adam:
+                pass
+        class utils:
+            class data:
+                class Dataset:
+                    pass
+                class DataLoader:
+                    pass
 
 # 트리 기반 모델
 try:
@@ -48,6 +76,10 @@ try:
 except ImportError:
     XGBOOST_AVAILABLE = False
     print("⚠️ XGBoost가 설치되지 않았습니다.")
+    # 더미 모듈
+    class xgb:
+        class XGBRegressor:
+            pass
 
 try:
     import lightgbm as lgb
@@ -55,6 +87,10 @@ try:
 except ImportError:
     LIGHTGBM_AVAILABLE = False
     print("⚠️ LightGBM이 설치되지 않았습니다.")
+    # 더미 모듈
+    class lgb:
+        class LGBMRegressor:
+            pass
 
 # 시계열 모델
 try:
@@ -63,6 +99,9 @@ try:
 except ImportError:
     PROPHET_AVAILABLE = False
     print("⚠️ Prophet이 설치되지 않았습니다.")
+    # 더미 클래스
+    class Prophet:
+        pass
 
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -86,7 +125,7 @@ try:
     TALIB_AVAILABLE = True
 except ImportError:
     TALIB_AVAILABLE = False
-    st.warning("⚠️ TA-Lib이 설치되지 않아 기본 3개 패턴만 사용됩니다. 전체 61개 패턴을 사용하려면 `pip install TA-Lib`을 실행하세요.")
+    # 경고 메시지는 메인 UI에서 표시 (st 함수는 import 시점에 호출 불가)
 
 # ────────────────────────────────────────────────────────────────────────
 # 1) Streamlit 페이지 설정
@@ -2194,32 +2233,60 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
             st.text(f"학습 중: {model_name.upper()} ({idx+1}/{total_models})")
             
             if model_name == 'nbeats':
-                model, scaler = train_nbeats(data, forecast_days, lookback, epochs)
-                models['nbeats'] = {'model': model, 'scaler': scaler}
+                if not TORCH_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 불가: PyTorch 미설치")
+                    models[model_name] = None
+                else:
+                    model, scaler = train_nbeats(data, forecast_days, lookback, epochs)
+                    models['nbeats'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'tft':
-                model, scaler = train_tft(data, features_df, forecast_days, lookback, epochs)
-                models['tft'] = {'model': model, 'scaler': scaler}
+                if not TORCH_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 불가: PyTorch 미설치")
+                    models[model_name] = None
+                else:
+                    model, scaler = train_tft(data, features_df, forecast_days, lookback, epochs)
+                    models['tft'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'xgboost':
-                model, metadata = train_xgboost(data, features_df, forecast_days, lookback)
-                models['xgboost'] = {'model': model, 'metadata': metadata}
+                if not XGBOOST_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 불가: XGBoost 미설치")
+                    models[model_name] = None
+                else:
+                    model, metadata = train_xgboost(data, features_df, forecast_days, lookback)
+                    models['xgboost'] = {'model': model, 'metadata': metadata}
             
             elif model_name == 'gru':
-                model, scaler = train_gru(data, forecast_days, lookback, epochs)
-                models['gru'] = {'model': model, 'scaler': scaler}
+                if not TORCH_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 불가: PyTorch 미설치")
+                    models[model_name] = None
+                else:
+                    model, scaler = train_gru(data, forecast_days, lookback, epochs)
+                    models['gru'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'lightgbm':
-                model, metadata = train_lightgbm(data, features_df, forecast_days, lookback)
-                models['lightgbm'] = {'model': model, 'metadata': metadata}
+                if not LIGHTGBM_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 부0가: LightGBM 미설치")
+                    models[model_name] = None
+                else:
+                    model, metadata = train_lightgbm(data, features_df, forecast_days, lookback)
+                    models['lightgbm'] = {'model': model, 'metadata': metadata}
             
             elif model_name == 'prophet':
-                model = train_prophet(data, forecast_days)
-                models['prophet'] = {'model': model}
+                if not PROPHET_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 부0가: Prophet 미설치")
+                    models[model_name] = None
+                else:
+                    model = train_prophet(data, forecast_days)
+                    models['prophet'] = {'model': model}
             
             elif model_name == 'lstm':
-                model, scaler = train_lstm(data, forecast_days, lookback, epochs)
-                models['lstm'] = {'model': model, 'scaler': scaler}
+                if not TORCH_AVAILABLE:
+                    st.warning(f"⚠️ {model_name} 사용 부0가: PyTorch 미설치")
+                    models[model_name] = None
+                else:
+                    model, scaler = train_lstm(data, forecast_days, lookback, epochs)
+                    models['lstm'] = {'model': model, 'scaler': scaler}
             
             elif model_name == 'holtwinters':
                 # Holt-Winters는 기존 함수 재사용
