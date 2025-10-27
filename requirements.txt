@@ -1,10 +1,10 @@
-# 코인 예측 Streamlit 앱 — 의존성 (개정 v2.1.3)
+# 코인 예측 Streamlit 앱 — 의존성 (개정 v2.5.0)
 # Python: 3.9 또는 3.10+ (Cloud 권장: 3.10/3.11)
 
 # ── 필수 런타임 ───────────────────────────────────────────
 pandas>=1.5,<3.0
 numpy>=1.22,<3.0
-scipy>=1.10,<2.0  # ACF 계산용 (신규 추가)
+scipy>=1.8,<2.0
 statsmodels>=0.14,<0.15
 requests>=2.31,<3.0
 pytz>=2024.1
@@ -15,21 +15,114 @@ yfinance>=0.2.64,<0.3
 streamlit>=1.32.2,<2.0
 plotly>=5.14,<6.0
 
-# ── 머신러닝 / 예측 모델 ──────────────────────────────────
-# torch: 환경(CPU/GPU)에 맞는 휠 자동 선택. CPU만 사용할 경우
-#        배포 문서에서 --extra-index-url(공식)로 CPU 전용 휠 설치 가능
-torch
-xgboost
-lightgbm
-prophet  # PyPI 패키지명: 'prophet'(구 fbprophet 아님)
+# ── 선택: 거래소 데이터(미설치 시 yfinance만 사용) ────────
+# 설치 시 앱 사이드바에서 'ccxt' 데이터 소스 활성화
+ccxt>=4.3  ; python_version >= "3.8"
 
-# ── 선택: TA-Lib 캔들스틱 패턴 분석 ───────────────────────
+# ── 선택: 공식 TimeSeriesSplit 사용(환경 마커로 분기) ──────
+# Py 3.9 환경
+scikit-learn~=1.6.0 ; python_version == "3.9"
+# Py 3.10 이상 환경
+scikit-learn==1.7.2 ; python_version >= "3.10"
+
+
+# ── 선택: Keep-Alive 기능 (v2.1.2+) ───────────────────────
+# 앱이 슬립 모드로 전환되지 않도록 백그라운드 서버 실행
+# ⚠️ 주의: Streamlit Community Cloud에서는 제한적으로 작동할 수 있음
+Flask>=3.0.0,<4.0  ; python_version >= "3.8"
+
+# ── 선택: TA-Lib 캔들스틱 패턴 분석(v2.1.0+) ───────────────
 # 설치 시 61개 고급 캔들스틱 패턴 사용 가능 (미설치 시 기본 3개만 사용)
-# ⚠️ TA-Lib은 시스템 라이브러리 선행 설치 필요(Windows/macOS/Linux별 상이)
-# (Streamlit Cloud 배포 시 packages.txt에 'ta-lib' 추가 후, 본 라인을 유지)
+# ⚠️ 주의: TA-Lib은 사전에 시스템 라이브러리 설치 필요
+#
+# ┌─ 로컬 환경 설치 방법 ────────────────────────────────────┐
+# │ Windows:                                                  │
+# │   1. https://github.com/cgohlke/talib-build/releases 에서│
+# │      본인 Python 버전에 맞는 .whl 다운로드               │
+# │      예: TA_Lib-0.4.28-cp310-cp310-win_amd64.whl         │
+# │   2. pip install 다운로드한파일.whl                       │
+# │   3. pip install TA-Lib (또는 아래 명시된 버전)          │
+# │                                                           │
+# │ macOS:                                                    │
+# │   brew install ta-lib                                     │
+# │   pip install TA-Lib                                      │
+# │                                                           │
+# │ Linux (Ubuntu/Debian):                                    │
+# │   sudo apt-get update                                     │
+# │   sudo apt-get install -y ta-lib libta-lib-dev           │
+# │   pip install TA-Lib                                      │
+# └───────────────────────────────────────────────────────────┘
+#
+# ┌─ Streamlit Cloud 배포 시 ─────────────────────────────────┐
+# │ 1. 프로젝트 루트에 packages.txt 파일 생성:                │
+# │    ta-lib                                                 │
+# │                                                           │
+# │ 2. requirements.txt에 아래 TA-Lib 라인 포함              │
+# │                                                           │
+# │ 3. Streamlit Cloud가 자동으로 apt-get으로 설치 후        │
+# │    pip install 실행                                       │
+# └───────────────────────────────────────────────────────────┘
 TA-Lib>=0.4.28  ; python_version >= "3.8"
 
+
+# ── 선택: 앙상블 ML/DL 모델 (v2.5.0+) ──────────────────────
+# 시간 프레임별 최적화된 앙상블 예측 모델
+# 미설치 시 앱은 정상 작동하며 기본 통계 모델만 사용
+#
+# ┌─ 앙상블 구성 ─────────────────────────────────────────────┐
+# │ • 초단타 (1분~1시간): N-BEATS + TFT + XGBoost            │
+# │ • 단기 (일봉): GRU + LightGBM + Prophet                   │
+# │ • 중기 (주봉 이상): LSTM + XGBoost + Holt-Winters        │
+# └───────────────────────────────────────────────────────────┘
+#
+# ┌─ 딥러닝 프레임워크 ────────────────────────────────────────┐
+# │ PyTorch 기반 시계열 예측 모델                             │
+# │ - N-BEATS: 순수 MLP 기반 해석 가능 예측                  │
+# │ - TFT: Temporal Fusion Transformer (어텐션 메커니즘)     │
+# │ - GRU: Gated Recurrent Unit (경량 순환 신경망)           │
+# │ - LSTM: Long Short-Term Memory (장기 의존성 학습)        │
+# │                                                           │
+# │ ⚠️ 주의사항:                                              │
+# │ • CPU 학습 시간: 모델당 2~5분 (데이터 크기에 따라 변동) │
+# │ • 메모리 사용량: 500MB~1GB (동시 학습 시)                │
+# │ • GPU 사용 권장 (CUDA 11.8+ 호환)                        │
+# └───────────────────────────────────────────────────────────┘
+torch>=2.0.0,<3.0  ; python_version >= "3.8"
+torchvision>=0.15.0,<1.0  ; python_version >= "3.8"
+
+# ┌─ 트리 기반 그래디언트 부스팅 ──────────────────────────────┐
+# │ 고속 학습 및 높은 정확도의 앙상블 모델                    │
+# │ - XGBoost: eXtreme Gradient Boosting (범용성 우수)       │
+# │ - LightGBM: Light Gradient Boosting Machine (대용량 최적)│
+# │                                                           │
+# │ ⚠️ 주의사항:                                              │
+# │ • 학습 시간: 모델당 10~30초 (데이터 크기에 따라 변동)    │
+# │ • 메모리 효율적 (100MB 미만)                             │
+# │ • 범주형 변수 자동 처리 (LightGBM)                       │
+# └───────────────────────────────────────────────────────────┘
+xgboost>=2.0.0,<3.0  ; python_version >= "3.8"
+lightgbm>=4.0.0,<5.0  ; python_version >= "3.8"
+
+# ┌─ 시계열 특화 모델 ─────────────────────────────────────────┐
+# │ Facebook Prophet: 추세/계절성/휴일 효과 자동 분해         │
+# │                                                           │
+# │ ⚠️ 주의사항:                                              │
+# │ • cmdstanpy 종속성 자동 설치 (C++ 컴파일러 필요)         │
+# │ • Windows: Microsoft C++ Build Tools 필요                │
+# │ • 학습 시간: 1~3분 (MCMC 샘플링)                         │
+# │ • 일봉 이상 데이터에서 최적 성능                          │
+# │                                                           │
+# │ 설치 문제 시 대안:                                        │
+# │   pip install prophet --no-build-isolation               │
+# └───────────────────────────────────────────────────────────┘
+prophet>=1.1.5,<2.0  ; python_version >= "3.8"
+
+
 # ── 참고 ─────────────────────────────────────────────────
-# - xgboost / lightgbm / prophet / torch 는 선택 구성(미사용 시 제거 가능)
-# - requirements.txt에는 명령어가 아닌 패키지명과 제약만 기입
-# - PyTorch GPU 사용 시에는 CUDA/ROCm/Intel GPU 지원 매트릭스에 맞춘 별도 설치 권장
+# - patsy: statsmodels 종속으로 자동 설치됨 (명시 불필요)
+# - TA-Lib 미설치 시 앱은 정상 작동하며 기본 3개 패턴만 사용
+#   (Three White Soldiers, Morning Star, Doji)
+# - ML/DL 모델 미설치 시 앱은 정상 작동하며 기본 통계 모델만 사용
+#   (Holt-Winters, ARIMA, 단순 이동평균)
+# - GPU 사용 시 PyTorch CUDA 버전 별도 설치 권장:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
