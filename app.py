@@ -1690,7 +1690,8 @@ class NBeatsModel(nn.Module):
         
     def forward(self, x):
         residuals = x
-        forecast = torch.zeros(x.size(0), self.blocks[0].forecast_fc.out_features).to(x.device)
+        # [안전성] 디바이스 문제 해결 - x와 같은 디바이스 사용
+        forecast = torch.zeros(x.size(0), self.blocks[0].forecast_fc.out_features, dtype=x.dtype, device=x.device)
         
         for block in self.blocks:
             backcast, block_forecast = block(residuals)
@@ -1701,50 +1702,84 @@ class NBeatsModel(nn.Module):
 
 
 def train_nbeats(data, forecast_days=3, lookback=180, epochs=50):
-    """N-BEATS 모델 학습"""
+    """N-BEATS 모델 학습 (경량화 버전)"""
     if not TORCH_AVAILABLE:
         return None, None
     
     try:
+        # [안전성] 데이터 길이 체크
+        if len(data) < lookback + forecast_days + 20:
+            return None, None
+        
+        # [최적화] lookback 축소 (메모리 절약)
+        effective_lookback = min(lookback, 60)  # 최대 60일로 제한
+        
         # 데이터 정규화
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data.values.reshape(-1, 1)).flatten()
         
         # 학습 데이터 생성
         X, y = [], []
-        for i in range(lookback, len(scaled_data) - forecast_days):
-            X.append(scaled_data[i-lookback:i])
+        for i in range(effective_lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-effective_lookback:i])
             y.append(scaled_data[i:i+forecast_days])
         
-        if len(X) < 10:
-            return None, scaler
+        if len(X) < 20:  # 최소 20개 샘플 필요
+            return None, None
+        
+        # [안전성] 텐서 변환 전 크기 체크
+        if len(X) * effective_lookback > 100000:  # 메모리 제한
+            # 최근 500개만 사용
+            X = X[-500:]
+            y = y[-500:]
         
         X = torch.FloatTensor(X)
         y = torch.FloatTensor(y)
+        
     except Exception as e:
-        # N-BEATS 데이터 준비 실패 (로그는 상위 함수에서 처리)
+        # N-BEATS 데이터 준비 실패
         return None, None
     
     try:
-        # 모델 초기화
-        model = NBeatsModel(lookback, forecast_days, num_blocks=3, hidden_size=128)
+        # [경량화] 작은 모델 사용
+        model = NBeatsModel(
+            input_size=effective_lookback, 
+            forecast_size=forecast_days, 
+            num_blocks=2,  # 3→2 블록
+            hidden_size=64  # 128→64 차원
+        )
+        
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
-        # 학습
+        # [최적화] 배치 학습
+        batch_size = min(32, len(X))
+        num_batches = len(X) // batch_size
+        
+        # [안전성] epochs 제한
+        safe_epochs = min(epochs, 20)  # 최대 20 epoch
+        
         model.train()
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = model(X)
-            loss = criterion(output, y)
-            loss.backward()
-            optimizer.step()
+        for epoch in range(safe_epochs):
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = start_idx + batch_size
+                
+                X_batch = X[start_idx:end_idx]
+                y_batch = y[start_idx:end_idx]
+                
+                optimizer.zero_grad()
+                output = model(X_batch)
+                loss = criterion(output, y_batch)
+                loss.backward()
+                optimizer.step()
         
         model.eval()
         return model, scaler
+        
     except Exception as e:
-        # N-BEATS 학습 실패 (로그는 상위 함수에서 처리)
-        return None, scaler
+        # N-BEATS 학습 실패
+        return None, None
 
 
 def predict_nbeats(model, scaler, last_sequence, forecast_days=3):
@@ -1794,11 +1829,18 @@ class SimpleTFT(nn.Module):
 
 
 def train_tft(data, features_df, forecast_days=3, lookback=90, epochs=50):
-    """TFT 모델 학습 (다변량)"""
+    """TFT 모델 학습 (경량화 버전)"""
     if not TORCH_AVAILABLE:
         return None, None
     
     try:
+        # [안전성] 데이터 길이 체크
+        if len(data) < lookback + forecast_days + 20:
+            return None, None
+        
+        # [최적화] lookback 축소
+        effective_lookback = min(lookback, 60)
+        
         # 가격 + 지표 결합
         combined_data = features_df[['Close', 'RSI14', 'MACD', 'Volume']].iloc[-len(data):].values
         
@@ -1808,35 +1850,55 @@ def train_tft(data, features_df, forecast_days=3, lookback=90, epochs=50):
         
         # 학습 데이터 생성
         X, y = [], []
-        for i in range(lookback, len(scaled_data) - forecast_days):
-            X.append(scaled_data[i-lookback:i])
+        for i in range(effective_lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-effective_lookback:i])
             y.append(scaled_data[i:i+forecast_days, 0])  # Close만 예측
         
-        if len(X) < 10:
-            return None, scaler
+        if len(X) < 20:
+            return None, None
+        
+        # [안전성] 메모리 제한
+        if len(X) > 500:
+            X = X[-500:]
+            y = y[-500:]
         
         X = torch.FloatTensor(X)
         y = torch.FloatTensor(y)
         
-        # 모델 초기화
-        model = SimpleTFT(input_size=combined_data.shape[1], hidden_size=64, 
-                          num_heads=4, forecast_size=forecast_days)
+        # [경량화] 작은 모델
+        model = SimpleTFT(
+            input_size=combined_data.shape[1], 
+            hidden_size=32,  # 64→32
+            num_heads=2,      # 4→2
+            forecast_size=forecast_days
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
-        # 학습
+        # [최적화] 배치 학습
+        batch_size = min(32, len(X))
+        safe_epochs = min(epochs, 15)
+        
         model.train()
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = model(X)
-            loss = criterion(output, y)
-            loss.backward()
-            optimizer.step()
+        for epoch in range(safe_epochs):
+            for i in range(0, len(X), batch_size):
+                X_batch = X[i:i+batch_size]
+                y_batch = y[i:i+batch_size]
+                
+                if len(X_batch) == 0:
+                    continue
+                
+                optimizer.zero_grad()
+                output = model(X_batch)
+                loss = criterion(output, y_batch)
+                loss.backward()
+                optimizer.step()
         
         model.eval()
         return model, scaler
+        
     except Exception as e:
-        # TFT 학습 실패 (로그는 상위 함수에서 처리)
+        # TFT 학습 실패
         return None, None
 
 
@@ -1928,10 +1990,14 @@ def predict_xgboost(model, metadata, data, features_df, forecast_days=3):
 # ────────────────────────────────────────────────────────────────────────────
 
 class GRUModel(nn.Module):
-    """GRU 모델"""
+    """GRU 모델 (경량화)"""
     def __init__(self, input_size=1, hidden_size=64, num_layers=2, forecast_size=3):
         super().__init__()
-        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        # [안전성] dropout은 num_layers>1일 때만 사용
+        if num_layers > 1:
+            self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        else:
+            self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, forecast_size)
         
     def forward(self, x):
@@ -1941,45 +2007,73 @@ class GRUModel(nn.Module):
 
 
 def train_gru(data, forecast_days=3, lookback=120, epochs=50):
-    """GRU 모델 학습"""
+    """GRU 모델 학습 (경량화)"""
     if not TORCH_AVAILABLE:
         return None, None
     
     try:
+        # [안전성] 데이터 체크
+        if len(data) < lookback + forecast_days + 20:
+            return None, None
+        
+        # [최적화] lookback 축소
+        effective_lookback = min(lookback, 60)
+        
         # 데이터 정규화
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
         
         # 학습 데이터 생성
         X, y = [], []
-        for i in range(lookback, len(scaled_data) - forecast_days):
-            X.append(scaled_data[i-lookback:i])
+        for i in range(effective_lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-effective_lookback:i])
             y.append(scaled_data[i:i+forecast_days].flatten())
         
-        if len(X) < 10:
-            return None, scaler
+        if len(X) < 20:
+            return None, None
+        
+        # [안전성] 메모리 제한
+        if len(X) > 500:
+            X = X[-500:]
+            y = y[-500:]
         
         X = torch.FloatTensor(X)
         y = torch.FloatTensor(y)
         
-        # 모델 초기화
-        model = GRUModel(input_size=1, hidden_size=64, num_layers=2, forecast_size=forecast_days)
+        # [경량화] 작은 모델
+        model = GRUModel(
+            input_size=1, 
+            hidden_size=32,  # 64→32
+            num_layers=1,    # 2→1
+            forecast_size=forecast_days
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
-        # 학습
+        # [최적화] 배치 학습
+        batch_size = min(32, len(X))
+        safe_epochs = min(epochs, 15)
+        
         model.train()
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = model(X)
-            loss = criterion(output, y)
-            loss.backward()
-            optimizer.step()
+        for epoch in range(safe_epochs):
+            for i in range(0, len(X), batch_size):
+                X_batch = X[i:i+batch_size]
+                y_batch = y[i:i+batch_size]
+                
+                if len(X_batch) == 0:
+                    continue
+                
+                optimizer.zero_grad()
+                output = model(X_batch)
+                loss = criterion(output, y_batch)
+                loss.backward()
+                optimizer.step()
         
         model.eval()
         return model, scaler
+        
     except Exception as e:
-        # GRU 학습 실패 (로그는 상위 함수에서 처리)
+        # GRU 학습 실패
         return None, None
 
 
@@ -2102,10 +2196,14 @@ def predict_prophet(model, forecast_days=3):
 # ────────────────────────────────────────────────────────────────────────────
 
 class LSTMModel(nn.Module):
-    """LSTM 모델"""
+    """LSTM 모델 (경량화)"""
     def __init__(self, input_size=1, hidden_size=128, num_layers=3, forecast_size=3):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        # [안전성] dropout은 num_layers>1일 때만 사용
+        if num_layers > 1:
+            self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
+        else:
+            self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, forecast_size)
         
     def forward(self, x):
@@ -2115,45 +2213,73 @@ class LSTMModel(nn.Module):
 
 
 def train_lstm(data, forecast_days=3, lookback=120, epochs=50):
-    """LSTM 모델 학습"""
+    """LSTM 모델 학습 (경량화)"""
     if not TORCH_AVAILABLE:
         return None, None
     
     try:
+        # [안전성] 데이터 체크
+        if len(data) < lookback + forecast_days + 20:
+            return None, None
+        
+        # [최적화] lookback 축소
+        effective_lookback = min(lookback, 60)
+        
         # 데이터 정규화
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data.values.reshape(-1, 1))
         
         # 학습 데이터 생성
         X, y = [], []
-        for i in range(lookback, len(scaled_data) - forecast_days):
-            X.append(scaled_data[i-lookback:i])
+        for i in range(effective_lookback, len(scaled_data) - forecast_days):
+            X.append(scaled_data[i-effective_lookback:i])
             y.append(scaled_data[i:i+forecast_days].flatten())
         
-        if len(X) < 10:
-            return None, scaler
+        if len(X) < 20:
+            return None, None
+        
+        # [안전성] 메모리 제한
+        if len(X) > 500:
+            X = X[-500:]
+            y = y[-500:]
         
         X = torch.FloatTensor(X)
         y = torch.FloatTensor(y)
         
-        # 모델 초기화
-        model = LSTMModel(input_size=1, hidden_size=128, num_layers=3, forecast_size=forecast_days)
+        # [경량화] 작은 모델
+        model = LSTMModel(
+            input_size=1, 
+            hidden_size=32,  # 128→32
+            num_layers=1,    # 3→1
+            forecast_size=forecast_days
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
         criterion = nn.MSELoss()
         
-        # 학습
+        # [최적화] 배치 학습
+        batch_size = min(32, len(X))
+        safe_epochs = min(epochs, 15)
+        
         model.train()
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-            output = model(X)
-            loss = criterion(output, y)
-            loss.backward()
-            optimizer.step()
+        for epoch in range(safe_epochs):
+            for i in range(0, len(X), batch_size):
+                X_batch = X[i:i+batch_size]
+                y_batch = y[i:i+batch_size]
+                
+                if len(X_batch) == 0:
+                    continue
+                
+                optimizer.zero_grad()
+                output = model(X_batch)
+                loss = criterion(output, y_batch)
+                loss.backward()
+                optimizer.step()
         
         model.eval()
         return model, scaler
+        
     except Exception as e:
-        # LSTM 학습 실패 (로그는 상위 함수에서 처리)
+        # LSTM 학습 실패
         return None, None
 
 
@@ -2197,8 +2323,8 @@ def get_ensemble_config(interval):
         return {
             'models': ['nbeats', 'tft', 'xgboost'],
             'weights': [0.40, 0.35, 0.25],
-            'lookback': {'nbeats': 180, 'tft': 90, 'xgboost': 60},
-            'epochs': 30,
+            'lookback': {'nbeats': 60, 'tft': 60, 'xgboost': 60},  # [최적화] 축소
+            'epochs': 20,  # [최적화] 30→20
             'description': '초단타 트레이딩 (N-BEATS 40% + TFT 35% + XGBoost 25%)'
         }
     elif interval == '1h':
@@ -2206,8 +2332,8 @@ def get_ensemble_config(interval):
         return {
             'models': ['nbeats', 'tft', 'xgboost'],
             'weights': [0.40, 0.35, 0.25],
-            'lookback': {'nbeats': 240, 'tft': 120, 'xgboost': 90},
-            'epochs': 40,
+            'lookback': {'nbeats': 60, 'tft': 60, 'xgboost': 60},  # [최적화] 축소
+            'epochs': 20,  # [최적화] 40→20
             'description': '시간봉 트레이딩 (N-BEATS 40% + TFT 35% + XGBoost 25%)'
         }
     elif interval == '1d':
@@ -2215,8 +2341,8 @@ def get_ensemble_config(interval):
         return {
             'models': ['gru', 'lightgbm', 'prophet'],
             'weights': [0.40, 0.35, 0.25],
-            'lookback': {'gru': 120, 'lightgbm': 60, 'prophet': None},
-            'epochs': 50,
+            'lookback': {'gru': 60, 'lightgbm': 60, 'prophet': None},  # [최적화] 축소
+            'epochs': 20,  # [최적화] 50→20
             'description': '일봉 트레이딩 (GRU 40% + LightGBM 35% + Prophet 25%)'
         }
     else:
@@ -2224,8 +2350,8 @@ def get_ensemble_config(interval):
         return {
             'models': ['lstm', 'xgboost', 'holtwinters'],
             'weights': [0.45, 0.30, 0.25],
-            'lookback': {'lstm': 150, 'xgboost': 90, 'holtwinters': None},
-            'epochs': 50,
+            'lookback': {'lstm': 60, 'xgboost': 60, 'holtwinters': None},  # [최적화] 축소
+            'epochs': 20,  # [최적화] 50→20
             'description': '중기 트레이딩 (LSTM 45% + XGBoost 30% + Holt-Winters 25%)'
         }
 
