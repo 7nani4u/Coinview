@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.6.2 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.6.3 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -132,7 +132,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.1",
+    page_title="코인 AI 예측 시스템 v2.6.3",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -300,24 +300,17 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.02):
 
 
 
-def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d', rebalance_freq='M'):
+
+def backtest_portfolio_simple(price_data_df, symbol_name):
     """
-    다중 코인 포트폴리오 백테스트
+    단일 코인 포트폴리오 분석 (이미 다운로드된 데이터 사용)
     
     Parameters:
     -----------
-    symbols : list
-        코인 심볼 리스트 (예: ['BTCUSDT', 'ETHUSDT'])
-    start_date : datetime.date
-        시작일
-    end_date : datetime.date
-        종료일
-    weights : list or None
-        각 코인의 가중치 (None이면 균등 배분)
-    interval : str
-        시간 프레임
-    rebalance_freq : str
-        리밸런싱 주기 ('D': 일, 'W': 주, 'M': 월)
+    price_data_df : pd.DataFrame
+        가격 데이터 (Close 컬럼 포함)
+    symbol_name : str
+        코인 심볼 (예: 'BTCUSDT')
     
     Returns:
     --------
@@ -329,77 +322,29 @@ def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d
         - 'portfolio_value': 포트폴리오 가치 시계열
         - 'individual_returns': 각 코인별 수익률
     """
-    import yfinance as yf
-    
     try:
-        if weights is None:
-            weights = [1.0 / len(symbols)] * len(symbols)
-        
-        if len(symbols) != len(weights):
+        # Close 가격 추출
+        if 'Close' not in price_data_df.columns:
             return None
         
-        # 데이터 수집
-        price_data = {}
-        for symbol in symbols:
-            try:
-                ticker = symbol[:-4] + "-USD"
-                # 더 긴 기간으로 다운로드 시도
-                data = yf.download(
-                    ticker, 
-                    start=start_date, 
-                    end=end_date, 
-                    interval=interval, 
-                    progress=False,
-                    auto_adjust=True  # 주가 조정
-                )
-                
-                # Close 컴럼 추출
-                if isinstance(data, pd.DataFrame):
-                    if 'Close' in data.columns:
-                        close_data = data['Close']
-                    else:
-                        close_data = data.iloc[:, 0] if len(data.columns) > 0 else pd.Series()
-                else:
-                    close_data = data
-                
-                if len(close_data) > 0:
-                    price_data[symbol[:-4]] = close_data
-            except Exception as e:
-                # 개별 코인 다운로드 실패 시 건너뛰기
-                continue
+        prices = price_data_df['Close'].dropna()
         
-        if len(price_data) == 0:
-            return None
-        
-        # DataFrame 생성
-        prices_df = pd.DataFrame(price_data)
-        
-        # NaN 제거 전 데이터 확인
-        if len(prices_df) < 5:
-            return None
-        
-        # 누락된 값 처리 (선형 보간)
-        prices_df = prices_df.fillna(method='ffill').fillna(method='bfill')
-        
-        # 여전히 NaN이 남아있으면 제거
-        prices_df = prices_df.dropna()
-        
-        if len(prices_df) < 5:
+        if len(prices) < 5:
             return None
         
         # 수익률 계산
-        returns_df = prices_df.pct_change().dropna()
+        returns = prices.pct_change().dropna()
         
-        # 포트폴리오 수익률 (가중 평균)
-        portfolio_returns = (returns_df * weights).sum(axis=1)
+        if len(returns) < 2:
+            return None
         
         # 누적 수익률
-        cumulative_returns = (1 + portfolio_returns).cumprod()
+        cumulative_returns = (1 + returns).cumprod()
         portfolio_value = cumulative_returns * 1000  # 초기 투자 $1000
         
         # 성과 지표 계산
         total_return = (cumulative_returns.iloc[-1] - 1) * 100
-        sharpe = calculate_sharpe_ratio(portfolio_returns)
+        sharpe = calculate_sharpe_ratio(returns)
         
         # 최대 낙폭 (Maximum Drawdown)
         running_max = cumulative_returns.cummax()
@@ -407,14 +352,13 @@ def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d
         max_drawdown = drawdown.min() * 100
         
         # 승률 (양의 수익률 비율)
-        win_rate = (portfolio_returns > 0).sum() / len(portfolio_returns) * 100
+        win_rate = (returns > 0).sum() / len(returns) * 100
         
-        # 각 코인별 총 수익률
-        individual_returns = {}
-        for col in returns_df.columns:
-            coin_cumulative = (1 + returns_df[col]).cumprod()
-            coin_return = (coin_cumulative.iloc[-1] - 1) * 100
-            individual_returns[col] = coin_return
+        # 코인별 수익률 (단일 코인)
+        coin_short_name = symbol_name[:-4] if symbol_name.endswith('USDT') else symbol_name
+        individual_returns = {
+            coin_short_name: total_return
+        }
         
         return {
             'total_return': total_return,
@@ -427,6 +371,7 @@ def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d
     
     except Exception as e:
         return None
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3624,16 +3569,14 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
 
 
 
-def render_portfolio_backtest(symbols, start_date, end_date, interval):
+def render_portfolio_backtest(price_data_df, symbol_name):
     """
-    포트폴리오 백테스트 결과 렌더링 (단일 코인도 지원)
+    포트폴리오 분석 결과 렌더링 (이미 다운로드된 데이터 사용)
     """
-    # 단일 코인인 경우에도 처리
-    
-    result = backtest_portfolio(symbols, start_date, end_date, interval=interval)
+    result = backtest_portfolio_simple(price_data_df, symbol_name)
     
     if result is None:
-        st.warning("⚠️ 백테스트를 위한 데이터가 부족합니다.")
+        st.warning("⚠️ 포트폴리오 분석을 위한 데이터가 부족합니다.")
         return
     
     # 성과 지표
@@ -3755,6 +3698,16 @@ with st.sidebar:
             current_value = fg_data['current_value']
             classification = fg_data['current_classification']
             
+            # 한글 번역 맵
+            korean_map = {
+                'Extreme Fear': '극도의 공포',
+                'Fear': '공포',
+                'Neutral': '중립',
+                'Greed': '탐욕',
+                'Extreme Greed': '극도의 탐욕'
+            }
+            korean_classification = korean_map.get(classification, classification)
+            
             color_map = {
                 'Extreme Fear': '#e74c3c',
                 'Fear': '#e67e22',
@@ -3769,7 +3722,7 @@ with st.sidebar:
                         padding:20px; border-radius:15px; text-align:center; 
                         box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom:20px;'>
                 <h1 style='margin:0; color:white; font-size:48px;'>{current_value}</h1>
-                <p style='margin:5px 0 0 0; color:white; font-size:18px; font-weight:bold;'>{classification}</p>
+                <p style='margin:5px 0 0 0; color:white; font-size:18px; font-weight:bold;'>{korean_classification}</p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -3790,7 +3743,7 @@ with st.sidebar:
     else:
         st.warning("⚠️ TA-Lib 미설치 (기본 3개 패턴)")
     
-    st.markdown("## 1️⃣ 분해능 선택")
+    st.markdown("## 1️⃣ 시간 선택")
     resolution_choice = st.selectbox(
         "📈 시간 프레임",
         list(RESOLUTION_MAP.keys()),
@@ -4204,8 +4157,8 @@ if bt:
         - 선택한 기간 동안의 투자 성과를 시각화
         """)
         
-        # 선택한 코인에 대해 포트폴리오 분석 자동 실행
-        render_portfolio_backtest([selected_crypto], START, END, interval)
+        # 선택한 코인에 대해 포트폴리오 분석 자동 실행 (raw_df 사용)
+        render_portfolio_backtest(raw_df, selected_crypto)
         
         # 가격 차트
         st.markdown("---")
