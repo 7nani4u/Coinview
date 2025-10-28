@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.6.1 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.6.2 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -341,18 +341,50 @@ def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d
         # 데이터 수집
         price_data = {}
         for symbol in symbols:
-            ticker = symbol[:-4] + "-USD"
-            data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)['Close']
-            if len(data) > 0:
-                price_data[symbol[:-4]] = data
+            try:
+                ticker = symbol[:-4] + "-USD"
+                # 더 긴 기간으로 다운로드 시도
+                data = yf.download(
+                    ticker, 
+                    start=start_date, 
+                    end=end_date, 
+                    interval=interval, 
+                    progress=False,
+                    auto_adjust=True  # 주가 조정
+                )
+                
+                # Close 컴럼 추출
+                if isinstance(data, pd.DataFrame):
+                    if 'Close' in data.columns:
+                        close_data = data['Close']
+                    else:
+                        close_data = data.iloc[:, 0] if len(data.columns) > 0 else pd.Series()
+                else:
+                    close_data = data
+                
+                if len(close_data) > 0:
+                    price_data[symbol[:-4]] = close_data
+            except Exception as e:
+                # 개별 코인 다운로드 실패 시 건너뛰기
+                continue
         
         if len(price_data) == 0:
             return None
         
         # DataFrame 생성
-        prices_df = pd.DataFrame(price_data).dropna()
+        prices_df = pd.DataFrame(price_data)
         
-        if len(prices_df) < 10:
+        # NaN 제거 전 데이터 확인
+        if len(prices_df) < 5:
+            return None
+        
+        # 누락된 값 처리 (선형 보간)
+        prices_df = prices_df.fillna(method='ffill').fillna(method='bfill')
+        
+        # 여전히 NaN이 남아있으면 제거
+        prices_df = prices_df.dropna()
+        
+        if len(prices_df) < 5:
             return None
         
         # 수익률 계산
@@ -834,6 +866,12 @@ def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
     df['MACD'] = df['EMA12'] - df['EMA26']
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
+    # Bollinger Bands (추가)
+    df['BB_middle'] = df['Close'].rolling(window=window_20).mean()
+    df['BB_std'] = df['Close'].rolling(window=window_20).std()
+    df['BB_upper'] = df['BB_middle'] + (df['BB_std'] * 2)
+    df['BB_lower'] = df['BB_middle'] - (df['BB_std'] * 2)
 
     # EMA 교차
     df['Cross_Signal'] = 0
@@ -2338,9 +2376,9 @@ def train_prophet(data, forecast_days=3):
     if not PROPHET_AVAILABLE:
         return None
     
-    # Prophet 형식으로 변환
+    # Prophet 형식으로 변환 (timezone 제거)
     df_prophet = pd.DataFrame({
-        'ds': data.index,
+        'ds': pd.to_datetime(data.index).tz_localize(None),
         'y': data.values
     })
     
