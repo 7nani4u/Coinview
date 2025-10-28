@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.6.5 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.7.0 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -709,6 +709,121 @@ def load_crypto_data(
     return pd.DataFrame()
 
 
+def add_candlestick_pattern_features(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """
+    캠들스틱 패턴 특징 추가 (AI 모델 학습용)
+    
+    6개 특징 추가:
+    - pattern_bullish: 상승 패턴 개수 (최근 20 캠들)
+    - pattern_bearish: 하락 패턴 개수 (최근 20 캠들)
+    - pattern_strength: 평균 신뢰도 (0-100)
+    - pattern_momentum: (-1 to +1, 상승/하락 밸런스)
+    - pattern_recency: 최근성 (0-1, 지수 감쇠)
+    - pattern_diversity: 다양성 (0-1)
+    """
+    df = df.copy()
+    
+    # 초기화
+    df['pattern_bullish'] = 0.0
+    df['pattern_bearish'] = 0.0
+    df['pattern_strength'] = 0.0
+    df['pattern_momentum'] = 0.0
+    df['pattern_recency'] = 0.0
+    df['pattern_diversity'] = 0.0
+    
+    if not TALIB_AVAILABLE or len(df) < 5:
+        return df
+    
+    try:
+        # 패턴 방향 매핑 (간략화된 버전)
+        bullish_patterns = [
+            'CDLHAMMER', 'CDLINVERTEDHAMMER', 'CDLMORNINGSTAR', 'CDL3WHITESOLDIERS',
+            'CDLPIERCING', 'CDLMATCHINGLOW', 'CDLHOMINGPIGEON', 'CDLTAKURI',
+            'CDLMATHOLD', 'CDLCONCEALBABYSWALL', 'CDLLADDERBOTTOM', 'CDLUNIQUE3RIVER',
+            'CDL3STARSINSOUTH'
+        ]
+        
+        bearish_patterns = [
+            'CDLSHOOTINGSTAR', 'CDLHANGINGMAN', 'CDLEVENINGSTAR', 'CDL3BLACKCROWS',
+            'CDLDARKCLOUDCOVER', 'CDLONNECK', 'CDLINNECK', 'CDLTHRUSTING',
+            'CDL2CROWS', 'CDLIDENTICAL3CROWS', 'CDLADVANCEBLOCK', 'CDLSTALLEDPATTERN',
+            'CDLUPSIDEGAP2CROWS'
+        ]
+        
+        # 모든 패턴 감지 결과 저장
+        all_pattern_results = {}
+        
+        for pattern_list, pattern_type in [(bullish_patterns, 'bullish'), (bearish_patterns, 'bearish')]:
+            for pattern_name in pattern_list:
+                if hasattr(talib, pattern_name):
+                    try:
+                        pattern_func = getattr(talib, pattern_name)
+                        result = pattern_func(df['Open'].values, df['High'].values, 
+                                            df['Low'].values, df['Close'].values)
+                        all_pattern_results[pattern_name] = (result, pattern_type)
+                    except:
+                        continue
+        
+        # 각 행에 대해 윈도우 기반 특징 계산
+        for i in range(window, len(df)):
+            bullish_count = 0
+            bearish_count = 0
+            confidences = []
+            unique_patterns = set()
+            min_distance = window
+            
+            # 윈도우 범위
+            start_idx = i - window
+            end_idx = i + 1
+            
+            # 모든 패턴 결과 검사
+            for pattern_name, (result, pattern_type) in all_pattern_results.items():
+                for j in range(start_idx, end_idx):
+                    if j < 0 or j >= len(result):
+                        continue
+                    
+                    if result[j] != 0:
+                        conf = abs(result[j])
+                        confidences.append(conf)
+                        unique_patterns.add(pattern_name)
+                        
+                        if pattern_type == 'bullish':
+                            bullish_count += 1
+                        else:
+                            bearish_count += 1
+                        
+                        distance = i - j
+                        if distance < min_distance:
+                            min_distance = distance
+            
+            # 특징 값 설정
+            total_patterns = bullish_count + bearish_count
+            
+            df.iloc[i, df.columns.get_loc('pattern_bullish')] = bullish_count
+            df.iloc[i, df.columns.get_loc('pattern_bearish')] = bearish_count
+            
+            if confidences:
+                df.iloc[i, df.columns.get_loc('pattern_strength')] = np.mean(confidences)
+            
+            if total_patterns > 0:
+                # 모멘텀 (-1 to +1)
+                momentum = (bullish_count - bearish_count) / (total_patterns + 1)
+                df.iloc[i, df.columns.get_loc('pattern_momentum')] = momentum
+                
+                # 최근성 (지수 감쇠)
+                recency = np.exp(-min_distance / 5)
+                df.iloc[i, df.columns.get_loc('pattern_recency')] = recency
+                
+                # 다양성
+                diversity = len(unique_patterns) / total_patterns
+                df.iloc[i, df.columns.get_loc('pattern_diversity')] = diversity
+    
+    except Exception as e:
+        pass
+    
+    return df
+
+
 def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
     """적응형 지표 계산"""
     df = df.copy()
@@ -827,10 +942,15 @@ def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_up, 'Cross_Signal'] = 1
     df.loc[cond_down, 'Cross_Signal'] = -1
 
+    # [v2.7.0 새로 추가] 캠들스틱 패턴 특징 추가
+    df = add_candlestick_pattern_features(df)
+    
     essential_cols = ['Close', 'High', 'Low', 'Volume', '일일수익률']
     df_clean = df.dropna(subset=essential_cols)
     
-    optional_cols = ['RSI14', 'ATR14', 'StochK14', 'MFI14', 'MACD', 'MACD_Signal']
+    optional_cols = ['RSI14', 'ATR14', 'StochK14', 'MFI14', 'MACD', 'MACD_Signal',
+                     'pattern_bullish', 'pattern_bearish', 'pattern_strength',
+                     'pattern_momentum', 'pattern_recency', 'pattern_diversity']
     for col in optional_cols:
         if col in df_clean.columns:
             df_clean[col].fillna(0, inplace=True)
@@ -2118,8 +2238,10 @@ def train_xgboost(data, features_df, forecast_days=3, lookback=60):
     if not XGBOOST_AVAILABLE:
         return None, None
     
-    # 특징 선택 (기술적 지표)
-    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14']
+    # 특징 선택 (기술적 지표 + 패턴 특징)
+    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14',
+                    'pattern_bullish', 'pattern_bearish', 'pattern_strength',
+                    'pattern_momentum', 'pattern_recency', 'pattern_diversity']
     X_features = features_df[feature_cols].iloc[-len(data):].values
     
     # 시계열 특징 추가 (과거 가격)
@@ -2289,8 +2411,10 @@ def train_lightgbm(data, features_df, forecast_days=3, lookback=60):
     if not LIGHTGBM_AVAILABLE:
         return None, None
     
-    # 특징 선택
-    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14', 'BB_upper', 'BB_lower']
+    # 특징 선택 (기술 지표 + 패턴 특징)
+    feature_cols = ['RSI14', 'MACD', 'StochK14', 'MFI14', 'ATR14', 'BB_upper', 'BB_lower',
+                    'pattern_bullish', 'pattern_bearish', 'pattern_strength',
+                    'pattern_momentum', 'pattern_recency', 'pattern_diversity']
     X_features = features_df[feature_cols].iloc[-len(data):].values
     
     # 학습 데이터 생성
