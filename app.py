@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.2.0 (AI Prediction + Position Recommendation)
-- TA-Lib 기반 61개 캔들스틱 패턴 지원
-- 매도 시점 예측 기능 (언제 팔아야 하는지)
+코인 AI 예측 시스템 - v2.6.0 (Advanced Analytics)
+✨ 신규 기능:
+- 시장 심리 지수 (Fear & Greed Index)
+- Sharpe Ratio 최적화
+- 앙상블 예측 (8개 모델)
 - 적응형 지표 계산
-- 직접 입력 코인 지원
 """
 
 import pandas as pd
@@ -20,12 +21,12 @@ import statsmodels.api as sm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.model_selection import TimeSeriesSplit
-
-
-
 from sklearn.metrics import brier_score_loss, log_loss
-from sklearn.model_selection import TimeSeriesSplit
 
+# v2.6.0: 추가 분석 도구
+import seaborn as sns
+from io import BytesIO
+from datetime import timedelta
 
 # 앙상블 모델 imports
 import warnings
@@ -219,6 +220,326 @@ CRYPTO_MAP = {
     "에이다 (ADA)": "ADAUSDT",
     "솔라나 (SOL)": "SOLUSDT"
 }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v2.6.0: 고급 분석 기능
+# ════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600)
+def get_fear_greed_index(limit=30):
+    """
+    Fear & Greed Index 가져오기 (Alternative.me API)
+    
+    Returns:
+    --------
+    dict or None
+        - 'current_value': 현재 값 (0-100)
+        - 'current_classification': 분류
+        - 'historical_data': DataFrame
+    """
+    try:
+        url = f'https://api.alternative.me/fng/?limit={limit}'
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        if 'data' not in data:
+            return None
+        
+        current = data['data'][0]
+        current_value = int(current['value'])
+        current_classification = current['value_classification']
+        
+        historical = []
+        for item in data['data']:
+            historical.append({
+                'timestamp': datetime.datetime.fromtimestamp(int(item['timestamp'])),
+                'value': int(item['value']),
+                'classification': item['value_classification']
+            })
+        
+        historical_df = pd.DataFrame(historical)
+        
+        return {
+            'current_value': current_value,
+            'current_classification': current_classification,
+            'historical_data': historical_df
+        }
+    except Exception as e:
+        return None
+
+
+def calculate_sharpe_ratio(returns, risk_free_rate=0.02):
+    """
+    Sharpe Ratio 계산
+    
+    Parameters:
+    -----------
+    returns : pd.Series
+        수익률 데이터
+    risk_free_rate : float
+        연간 무위험 이자율 (기본 2%)
+    
+    Returns:
+    --------
+    float : Sharpe Ratio (연율화)
+    """
+    if len(returns) < 2:
+        return 0.0
+    
+    daily_rf = risk_free_rate / 252
+    excess_returns = returns - daily_rf
+    
+    if excess_returns.std() == 0:
+        return 0.0
+    
+    sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252)
+    return sharpe
+
+
+def optimize_leverage_sharpe(data, max_leverage=10.0):
+    """
+    레버리지별 Sharpe Ratio 계산 및 최적화
+    
+    Parameters:
+    -----------
+    data : pd.Series
+        가격 데이터
+    max_leverage : float
+        최대 레버리지
+    
+    Returns:
+    --------
+    dict or None
+        - 'best_leverage': 최적 레버리지
+        - 'best_sharpe': 최대 Sharpe Ratio
+        - 'leverage_sharpe': DataFrame
+    """
+    returns = data.pct_change().dropna()
+    
+    if len(returns) < 20:
+        return None
+    
+    leverages = np.arange(1.0, max_leverage + 0.5, 0.5)
+    sharpe_values = []
+    
+    for leverage in leverages:
+        leveraged_returns = returns * leverage
+        sharpe = calculate_sharpe_ratio(leveraged_returns)
+        sharpe_values.append(sharpe)
+    
+    best_idx = np.argmax(sharpe_values)
+    best_leverage = leverages[best_idx]
+    best_sharpe = sharpe_values[best_idx]
+    
+    leverage_df = pd.DataFrame({
+        'leverage': leverages,
+        'sharpe_ratio': sharpe_values
+    })
+    
+    return {
+        'best_leverage': best_leverage,
+        'best_sharpe': best_sharpe,
+        'leverage_sharpe': leverage_df
+    }
+
+
+def analyze_correlation(main_symbol, start_date, end_date, interval='1d'):
+    """
+    주요 자산들과의 상관관계 분석
+    
+    Parameters:
+    -----------
+    main_symbol : str
+        메인 암호화폐 심볼 (예: BTCUSDT)
+    start_date : datetime.date
+        시작일
+    end_date : datetime.date
+        종료일
+    interval : str
+        시간 프레임
+    
+    Returns:
+    --------
+    dict or None
+        - 'correlation_matrix': 상관계수 행렬 DataFrame
+        - 'analysis': 분석 결과 텍스트
+    """
+    import yfinance as yf
+    
+    try:
+        # 메인 암호화폐 데이터
+        main_ticker = main_symbol[:-4] + "-USD"
+        main_data = yf.download(main_ticker, start=start_date, end=end_date, interval=interval, progress=False)['Close']
+        
+        if len(main_data) < 10:
+            return None
+        
+        # 비교 자산들
+        symbols = {
+            'BTC-USD': 'Bitcoin',
+            'ETH-USD': 'Ethereum',
+            '^GSPC': 'S&P500',
+            'GC=F': 'Gold',
+            'DX-Y.NYB': 'USD Index'
+        }
+        
+        # 메인 코인이 BTC나 ETH면 제외
+        if main_ticker == 'BTC-USD':
+            symbols.pop('BTC-USD', None)
+        if main_ticker == 'ETH-USD':
+            symbols.pop('ETH-USD', None)
+        
+        correlation_data = {main_symbol[:-4]: main_data}
+        
+        for symbol, name in symbols.items():
+            try:
+                data = yf.download(symbol, start=start_date, end=end_date, interval=interval, progress=False)['Close']
+                if len(data) > 0:
+                    correlation_data[name] = data
+            except:
+                pass
+        
+        if len(correlation_data) < 2:
+            return None
+        
+        # DataFrame 생성 및 상관계수 계산
+        corr_df = pd.DataFrame(correlation_data)
+        corr_df = corr_df.dropna()
+        
+        if len(corr_df) < 10:
+            return None
+        
+        correlation_matrix = corr_df.corr()
+        
+        # 분석 텍스트 생성
+        main_corr = correlation_matrix[main_symbol[:-4]].drop(main_symbol[:-4])
+        analysis_text = f"**{main_symbol[:-4]} 상관관계 분석**\n\n"
+        
+        for asset, corr_value in main_corr.items():
+            if corr_value > 0.7:
+                relationship = "강한 양의 상관관계"
+                emoji = "📈"
+            elif corr_value > 0.3:
+                relationship = "약한 양의 상관관계"
+                emoji = "↗️"
+            elif corr_value > -0.3:
+                relationship = "상관관계 없음"
+                emoji = "➡️"
+            elif corr_value > -0.7:
+                relationship = "약한 음의 상관관계"
+                emoji = "↘️"
+            else:
+                relationship = "강한 음의 상관관계"
+                emoji = "📉"
+            
+            analysis_text += f"- {emoji} **{asset}**: {corr_value:.3f} ({relationship})\n"
+        
+        return {
+            'correlation_matrix': correlation_matrix,
+            'analysis': analysis_text
+        }
+    
+    except Exception as e:
+        return None
+
+
+def backtest_portfolio(symbols, start_date, end_date, weights=None, interval='1d', rebalance_freq='M'):
+    """
+    다중 코인 포트폴리오 백테스트
+    
+    Parameters:
+    -----------
+    symbols : list
+        코인 심볼 리스트 (예: ['BTCUSDT', 'ETHUSDT'])
+    start_date : datetime.date
+        시작일
+    end_date : datetime.date
+        종료일
+    weights : list or None
+        각 코인의 가중치 (None이면 균등 배분)
+    interval : str
+        시간 프레임
+    rebalance_freq : str
+        리밸런싱 주기 ('D': 일, 'W': 주, 'M': 월)
+    
+    Returns:
+    --------
+    dict or None
+        - 'total_return': 총 수익률
+        - 'sharpe_ratio': Sharpe Ratio
+        - 'max_drawdown': 최대 낙폭
+        - 'win_rate': 승률
+        - 'portfolio_value': 포트폴리오 가치 시계열
+        - 'individual_returns': 각 코인별 수익률
+    """
+    import yfinance as yf
+    
+    try:
+        if weights is None:
+            weights = [1.0 / len(symbols)] * len(symbols)
+        
+        if len(symbols) != len(weights):
+            return None
+        
+        # 데이터 수집
+        price_data = {}
+        for symbol in symbols:
+            ticker = symbol[:-4] + "-USD"
+            data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False)['Close']
+            if len(data) > 0:
+                price_data[symbol[:-4]] = data
+        
+        if len(price_data) == 0:
+            return None
+        
+        # DataFrame 생성
+        prices_df = pd.DataFrame(price_data).dropna()
+        
+        if len(prices_df) < 10:
+            return None
+        
+        # 수익률 계산
+        returns_df = prices_df.pct_change().dropna()
+        
+        # 포트폴리오 수익률 (가중 평균)
+        portfolio_returns = (returns_df * weights).sum(axis=1)
+        
+        # 누적 수익률
+        cumulative_returns = (1 + portfolio_returns).cumprod()
+        portfolio_value = cumulative_returns * 1000  # 초기 투자 $1000
+        
+        # 성과 지표 계산
+        total_return = (cumulative_returns.iloc[-1] - 1) * 100
+        sharpe = calculate_sharpe_ratio(portfolio_returns)
+        
+        # 최대 낙폭 (Maximum Drawdown)
+        running_max = cumulative_returns.cummax()
+        drawdown = (cumulative_returns - running_max) / running_max
+        max_drawdown = drawdown.min() * 100
+        
+        # 승률 (양의 수익률 비율)
+        win_rate = (portfolio_returns > 0).sum() / len(portfolio_returns) * 100
+        
+        # 각 코인별 총 수익률
+        individual_returns = {}
+        for col in returns_df.columns:
+            coin_cumulative = (1 + returns_df[col]).cumprod()
+            coin_return = (coin_cumulative.iloc[-1] - 1) * 100
+            individual_returns[col] = coin_return
+        
+        return {
+            'total_return': total_return,
+            'sharpe_ratio': sharpe,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'portfolio_value': portfolio_value,
+            'individual_returns': individual_returns
+        }
+    
+    except Exception as e:
+        return None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3406,6 +3727,217 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         st.warning(f"⚠️ 낮은 RR Ratio ({rr_ratio:.2f}) - 리스크 대비 수익이 작음")
 
 
+def render_sharpe_optimization(close_series, max_leverage):
+    """
+    Sharpe Ratio 최적화 결과 렌더링
+    """
+    st.markdown("<div class='section-title'>📈 Sharpe Ratio 최적화</div>", unsafe_allow_html=True)
+    
+    result = optimize_leverage_sharpe(close_series, max_leverage=max_leverage)
+    
+    if result is None:
+        st.warning("⚠️ Sharpe Ratio 최적화를 위한 데이터가 부족합니다.")
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 🎯 최적 레버리지")
+        st.metric(
+            label="리스크 조정 최적 레버리지",
+            value=f"{result['best_leverage']:.1f}x",
+            help="Sharpe Ratio를 최대화하는 레버리지"
+        )
+        st.metric(
+            label="최대 Sharpe Ratio",
+            value=f"{result['best_sharpe']:.3f}",
+            help="리스크 대비 수익률 지표 (높을수록 좋음)"
+        )
+    
+    with col2:
+        st.markdown("### 📊 레버리지별 Sharpe Ratio")
+        
+        fig = go.Figure()
+        
+        leverage_df = result['leverage_sharpe']
+        
+        fig.add_trace(
+            go.Scatter(
+                x=leverage_df['leverage'],
+                y=leverage_df['sharpe_ratio'],
+                mode='lines+markers',
+                name='Sharpe Ratio',
+                line=dict(color='#3498db', width=2),
+                marker=dict(size=6)
+            )
+        )
+        
+        # 최적 레버리지 표시
+        fig.add_vline(
+            x=result['best_leverage'],
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"최적: {result['best_leverage']:.1f}x"
+        )
+        
+        fig.update_layout(
+            xaxis_title='레버리지',
+            yaxis_title='Sharpe Ratio',
+            template='plotly_white',
+            height=300,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.info("""
+    **💡 해석**:
+    - Sharpe Ratio가 높을수록 리스크 대비 수익률이 좋습니다
+    - 일반적으로 1.0 이상이면 양호, 2.0 이상이면 우수
+    - 최적 레버리지는 리스크를 고려한 수익률 최대화 지점입니다
+    """)
+
+
+def render_correlation_analysis(symbol, start_date, end_date, interval):
+    """
+    상관관계 분석 결과 렌더링
+    """
+    st.markdown("<div class='section-title'>🔗 상관관계 분석</div>", unsafe_allow_html=True)
+    
+    result = analyze_correlation(symbol, start_date, end_date, interval)
+    
+    if result is None:
+        st.warning("⚠️ 상관관계 분석을 위한 데이터가 부족합니다.")
+        return
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.markdown("### 📊 상관계수 히트맵")
+        
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(
+            result['correlation_matrix'],
+            annot=True,
+            fmt='.3f',
+            cmap='coolwarm',
+            center=0,
+            vmin=-1,
+            vmax=1,
+            square=True,
+            ax=ax,
+            cbar_kws={'label': '상관계수'}
+        )
+        ax.set_title('자산 간 상관관계', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        st.pyplot(fig)
+    
+    with col2:
+        st.markdown("### 🔍 분석 결과")
+        st.markdown(result['analysis'])
+        
+        st.markdown("""\n\n**💡 활용 방법**:
+        - **양의 상관관계**: 함께 움직이는 자산 → 분산 효과 낮음
+        - **음의 상관관계**: 반대로 움직이는 자산 → 헷지 효과
+        - **상관관계 없음**: 독립적 움직임 → 포트폴리오 분산 효과
+        """)
+
+
+def render_portfolio_backtest(symbols, start_date, end_date, interval):
+    """
+    포트폴리오 백테스트 결과 렌더링
+    """
+    st.markdown("<div class='section-title'>🎯 포트폴리오 백테스트</div>", unsafe_allow_html=True)
+    
+    if len(symbols) < 2:
+        st.info("💡 포트폴리오 백테스트는 2개 이상의 코인이 필요합니다. 아래에서 추가 코인을 선택하세요.")
+        return
+    
+    result = backtest_portfolio(symbols, start_date, end_date, interval=interval)
+    
+    if result is None:
+        st.warning("⚠️ 백테스트를 위한 데이터가 부족합니다.")
+        return
+    
+    # 성과 지표
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        return_color = "normal" if result['total_return'] >= 0 else "inverse"
+        st.metric(
+            label="📈 총 수익률",
+            value=f"{result['total_return']:.2f}%",
+            delta=f"{result['total_return']:.2f}%",
+            delta_color=return_color
+        )
+    
+    with col2:
+        st.metric(
+            label="📊 Sharpe Ratio",
+            value=f"{result['sharpe_ratio']:.3f}",
+            help="리스크 조정 수익률 (높을수록 좋음)"
+        )
+    
+    with col3:
+        st.metric(
+            label="📉 최대 낙폭",
+            value=f"{result['max_drawdown']:.2f}%",
+            delta=f"{result['max_drawdown']:.2f}%",
+            delta_color="inverse"
+        )
+    
+    with col4:
+        st.metric(
+            label="🎯 승률",
+            value=f"{result['win_rate']:.1f}%",
+            help="양의 수익률을 기록한 날의 비율"
+        )
+    
+    # 포트폴리오 가치 추이
+    st.markdown("### 📈 포트폴리오 가치 추이")
+    
+    fig = go.Figure()
+    
+    fig.add_trace(
+        go.Scatter(
+            x=result['portfolio_value'].index,
+            y=result['portfolio_value'].values,
+            mode='lines',
+            name='Portfolio Value',
+            line=dict(color='#3498db', width=2),
+            fill='tozeroy',
+            fillcolor='rgba(52, 152, 219, 0.1)'
+        )
+    )
+    
+    fig.update_layout(
+        xaxis_title='날짜',
+        yaxis_title='포트폴리오 가치 (USD)',
+        template='plotly_white',
+        height=400,
+        hovermode='x unified'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # 개별 코인 수익률
+    st.markdown("### 💎 개별 코인 성과")
+    
+    individual_df = pd.DataFrame([
+        {'코인': coin, '수익률 (%)': return_pct}
+        for coin, return_pct in result['individual_returns'].items()
+    ]).sort_values('수익률 (%)', ascending=False)
+    
+    st.dataframe(
+        individual_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
 def render_technical_indicators(df: pd.DataFrame):
     """기술적 지표"""
     st.markdown("<div class='section-title'>📊 기술적 지표</div>", unsafe_allow_html=True)
@@ -3438,6 +3970,43 @@ def render_technical_indicators(df: pd.DataFrame):
 # ────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("# 🚀 설정")
+    st.markdown("---")
+    
+    # v2.6.0: Fear & Greed Index
+    st.markdown("### 😱 시장 심리")
+    try:
+        fg_data = get_fear_greed_index()
+        if fg_data:
+            current_value = fg_data['current_value']
+            classification = fg_data['current_classification']
+            
+            color_map = {
+                'Extreme Fear': '#e74c3c',
+                'Fear': '#e67e22',
+                'Neutral': '#f39c12',
+                'Greed': '#2ecc71',
+                'Extreme Greed': '#27ae60'
+            }
+            color = color_map.get(classification, 'gray')
+            
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, {color}aa, {color}); 
+                        padding:20px; border-radius:15px; text-align:center; 
+                        box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom:20px;'>
+                <h1 style='margin:0; color:white; font-size:48px;'>{current_value}</h1>
+                <p style='margin:5px 0 0 0; color:white; font-size:18px; font-weight:bold;'>{classification}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if current_value < 25:
+                st.success("🟢 극도의 공포 → 매수 기회")
+            elif current_value > 75:
+                st.warning("🔴 극도의 탐욕 → 매도 고려")
+        else:
+            st.info("ℹ️ Fear & Greed 데이터 로딩 중...")
+    except Exception as e:
+        pass
+    
     st.markdown("---")
     
     # TA-Lib 상태 표시
@@ -3848,6 +4417,40 @@ if bt:
         
         # 매도 전략 (신규)
         render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
+        
+        # v2.6.0: Sharpe Ratio 최적화
+        st.markdown("---")
+        render_sharpe_optimization(close_series, max_leverage=leverage_ceiling)
+        
+        # v2.6.0: 상관관계 분석
+        st.markdown("---")
+        render_correlation_analysis(selected_crypto, START, END, interval)
+        
+        # v2.6.0: 포트폴리오 백테스트 (선택적)
+        st.markdown("---")
+        st.markdown("<div class='section-title'>🎯 포트폴리오 분석</div>", unsafe_allow_html=True)
+        
+        with st.expander("💎 추가 코인으로 포트폴리오 백테스트 (선택 사항)", expanded=False):
+            st.markdown("""
+            **💡 포트폴리오 백테스트란?**
+            - 여러 코인을 결합한 투자 전략 성과 분석
+            - 분산 효과 및 리스크 감소 효과 확인
+            - 최대 5개 코인까지 선택 가능
+            """)
+            
+            # 포트폴리오 코인 선택
+            portfolio_coins = st.multiselect(
+                "💎 포트폴리오에 추가할 코인 선택",
+                options=[k for k in CRYPTO_MAP.keys() if CRYPTO_MAP[k] != selected_crypto],
+                max_selections=4,
+                help="현재 코인 외 최대 4개 코인 추가 가능"
+            )
+            
+            if portfolio_coins:
+                portfolio_symbols = [selected_crypto] + [CRYPTO_MAP[coin] for coin in portfolio_coins]
+                
+                if st.button("🚀 포트폴리오 백테스트 실행", use_container_width=True):
+                    render_portfolio_backtest(portfolio_symbols, START, END, interval)
         
         # 가격 차트
         st.markdown("---")
