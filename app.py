@@ -4165,7 +4165,7 @@ if bt:
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
-        st.markdown("<div class='section-title'>🎯 포트폴리오 분석</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>🎯 포트폴리오 분석 (선택 기간별 투자 성과 종합 분석)</div>", unsafe_allow_html=True)
         
         # 선택한 코인에 대해 포트폴리오 분석 자동 실행 (raw_df 사용)
         render_portfolio_backtest(raw_df, selected_crypto)
