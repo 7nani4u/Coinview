@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.6.4 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.6.5 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -1055,12 +1055,13 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> list:
 
 
 def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float, 
-                            investment_amount: float, leverage: float) -> dict:
+                            investment_amount: float, leverage: float, interval: str = '1h') -> dict:
     """
     매도 시점 예측
     - 보수적/중립/공격적 시나리오 제공
     - ATR 기반 동적 손절/익절
     - 추세 전환 신호 감지
+    - 시간 기반 예측 (분/시간/일 단위)
     """
     current_price = df['Close'].iloc[-1]
     rsi = df['RSI14'].iloc[-1]
@@ -1069,6 +1070,13 @@ def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float,
     
     # 추세 판단
     trend = 'bullish' if ema50 > ema200 else 'bearish'
+    
+    # 시간 간격별 분 단위 계산
+    interval_minutes = {
+        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '4h': 240, '1d': 1440
+    }
+    minutes_per_candle = interval_minutes.get(interval, 60)
     
     # 3가지 시나리오
     scenarios = {}
@@ -1079,6 +1087,7 @@ def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float,
         'take_profit': entry_price + (atr * 1.5),
         'stop_loss': entry_price - (atr * 1.0),
         'holding_period': '1-3일',
+        'time_estimate_minutes': 24 * 60,  # 1일 기본값
         'description': '빠른 수익 실현, 리스크 최소화',
         'rr_ratio': 1.5,
         'exit_signals': [
@@ -1094,6 +1103,7 @@ def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float,
         'take_profit': entry_price + (atr * 2.5),
         'stop_loss': entry_price - (atr * 1.5),
         'holding_period': '3-7일',
+        'time_estimate_minutes': 5 * 24 * 60,  # 5일 기본값
         'description': '리스크-수익 균형',
         'rr_ratio': 1.67,
         'exit_signals': [
@@ -1109,6 +1119,7 @@ def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float,
         'take_profit': entry_price + (atr * 4.0),
         'stop_loss': entry_price - (atr * 2.0),
         'holding_period': '7-14일',
+        'time_estimate_minutes': 10 * 24 * 60,  # 10일 기본값
         'description': '큰 수익 추구, 높은 리스크',
         'rr_ratio': 2.0,
         'exit_signals': [
@@ -1124,6 +1135,30 @@ def calculate_exit_strategy(df: pd.DataFrame, entry_price: float, atr: float,
         for scenario in scenarios.values():
             scenario['take_profit'] *= 0.8
             scenario['stop_loss'] *= 1.2
+    
+    # 시간 예측 계산 (가격 변동률 기반)
+    try:
+        # 최근 24시간 가격 변동률 계산
+        recent_prices = df['Close'].tail(min(24, len(df)))
+        price_changes = recent_prices.pct_change().dropna()
+        avg_change_per_period = price_changes.mean() if len(price_changes) > 0 else 0.001
+        
+        # 각 시나리오별 예측 시간 계산
+        for scenario in scenarios.values():
+            target_price = scenario['take_profit']
+            price_diff_pct = (target_price - current_price) / current_price
+            
+            if avg_change_per_period > 0.0001:  # 영으로 나누기 방지
+                periods_needed = abs(price_diff_pct / avg_change_per_period)
+                minutes_needed = int(periods_needed * minutes_per_candle)
+                
+                # 최소/최대 제한
+                minutes_needed = max(60, min(minutes_needed, 30 * 24 * 60))  # 1시간 ~ 30일
+                scenario['time_estimate_minutes'] = minutes_needed
+            
+    except Exception as e:
+        # 계산 실패 시 기본값 유지
+        pass
     
     # 현재 상태 평가
     current_status = {
@@ -3193,7 +3228,7 @@ def render_patterns(patterns: list):
 
 def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amount: float, leverage: float):
     """매도 전략 (신규)"""
-    st.markdown("<div class='section-title'>💰 매도 시점 예측 (언제 팔아야 하는가?)</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>💰 매도 시점 예측</div>", unsafe_allow_html=True)
     
     current_status = exit_strategy['current_status']
     scenarios = exit_strategy['scenarios']
@@ -3264,6 +3299,19 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
             profit_amount = investment_amount * leverage * (profit_pct / 100)
             loss_amount = investment_amount * leverage * (loss_pct / 100)
             
+            # 시간 예측 포맷팅
+            time_minutes = scenario.get('time_estimate_minutes', 0)
+            if time_minutes >= 1440:  # 1일 이상
+                days = time_minutes // 1440
+                hours = (time_minutes % 1440) // 60
+                time_str = f"{days}일" if hours == 0 else f"{days}일 {hours}시간"
+            elif time_minutes >= 60:  # 1시간 이상
+                hours = time_minutes // 60
+                minutes = time_minutes % 60
+                time_str = f"{hours}시간" if minutes == 0 else f"{hours}시간 {minutes}분"
+            else:  # 1시간 미만
+                time_str = f"{time_minutes}분"
+            
             st.markdown(f"""
                 <div class='exit-card'>
                     <div class='exit-title'>{scenario['name']}</div>
@@ -3271,7 +3319,7 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
                         <tr>
                             <td style='width: 33%; padding: 8px 0;'>🎯 익절가: ${scenario['take_profit']:,.2f} (+{profit_pct:.2f}%)</td>
                             <td style='width: 33%; padding: 8px 0;'>🛑 손절가: ${scenario['stop_loss']:,.2f} (-{loss_pct:.2f}%)</td>
-                            <td style='width: 34%; padding: 8px 0;'>⏱️ 보유기간: {scenario['holding_period']}</td>
+                            <td style='width: 34%; padding: 8px 0;'>⏰ 예측 시간: <strong style='color: #ffd700;'>{time_str} 후</strong></td>
                         </tr>
                         <tr>
                             <td style='padding: 8px 0;'>💵 목표 수익: ${profit_amount:,.2f}</td>
@@ -3622,47 +3670,7 @@ def render_portfolio_backtest(price_data_df, symbol_name):
             help="양의 수익률을 기록한 날의 비율"
         )
     
-    # 포트폴리오 가치 추이
-    st.markdown("### 📈 포트폴리오 가치 추이")
-    
-    fig = go.Figure()
-    
-    fig.add_trace(
-        go.Scatter(
-            x=result['portfolio_value'].index,
-            y=result['portfolio_value'].values,
-            mode='lines',
-            name='Portfolio Value',
-            line=dict(color='#3498db', width=2),
-            fill='tozeroy',
-            fillcolor='rgba(52, 152, 219, 0.1)'
-        )
-    )
-    
-    fig.update_layout(
-        xaxis_title='날짜',
-        yaxis_title='포트폴리오 가치 (USD)',
-        template='plotly_white',
-        height=400,
-        hovermode='x unified'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # 코인별 성과
-    if result['individual_returns']:
-        st.markdown("### 💎 코인별 성과")
-        
-        individual_df = pd.DataFrame([
-            {'코인': coin, '수익률 (%)': return_pct}
-            for coin, return_pct in result['individual_returns'].items()
-        ]).sort_values('수익률 (%)', ascending=False)
-        
-        st.dataframe(
-            individual_df,
-            use_container_width=True,
-            hide_index=True
-        )
+    # 포트폴리오 가치 추이 및 코인별 성과 섹션 삭제됨
 
 
 def render_technical_indicators(df: pd.DataFrame):
@@ -3805,11 +3813,11 @@ with st.sidebar:
     
     period_choice = st.radio(
         "📅 기간 설정",
-        ["자동 (분해능에 최적화)", "수동 설정"],
+        ["자동", "수동 설정"],
         help="자동 모드는 분해능별 제한을 자동으로 적용합니다"
     )
     
-    if period_choice == "자동 (분해능에 최적화)":
+    if period_choice == "자동":
         today = datetime.date.today()
         
         interval_periods = {
@@ -4101,8 +4109,8 @@ if bt:
         
         rr_ratio = calculate_rr_ratio(entry_price, take_profit, stop_loss)
         
-        # 매도 전략 계산
-        exit_strategy = calculate_exit_strategy(df, entry_price, atr, investment_amount, leverage_info['recommended'])
+        # 매도 전략 계산 (interval 파라미터 추가)
+        exit_strategy = calculate_exit_strategy(df, entry_price, atr, investment_amount, leverage_info['recommended'], interval)
         
         progress_placeholder.empty()
         status_text.empty()
@@ -4158,13 +4166,6 @@ if bt:
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
         st.markdown("<div class='section-title'>🎯 포트폴리오 분석</div>", unsafe_allow_html=True)
-        
-        st.markdown("""
-        **💡 포트폴리오 분석이란?**
-        - 선택한 코인의 단일 투자 성과 분석
-        - 총 수익률, Sharpe Ratio, 최대 낙폭, 승률 등 주요 지표 제공
-        - 선택한 기간 동안의 투자 성과를 시각화
-        """)
         
         # 선택한 코인에 대해 포트폴리오 분석 자동 실행 (raw_df 사용)
         render_portfolio_backtest(raw_df, selected_crypto)
