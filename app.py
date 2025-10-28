@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.6.3 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.6.4 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -132,7 +132,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.6.3",
+    page_title="코인 AI 예측 시스템 v2.1",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -1491,12 +1491,7 @@ def render_position_recommendation(position_rec: dict):
         with col_loss:
             st.error(f"**최대 손실:** -{position_rec['potential_loss_pct']:.2f}%")
     
-    st.warning("""
-    ⚠️ **주의사항**  
-    - 이 추천은 과거 데이터 기반 확률적 예측이며, 투자 권유가 아닙니다.  
-    - 실제 투자 시 본인의 리스크 허용 범위 내에서 결정하시기 바랍니다.  
-    - 시장 상황은 실시간으로 변하므로, 지속적인 모니터링이 필요합니다.
-    """)
+    # 주의사항 삭제됨
 
 
 def calculate_optimized_leverage(investment_amount: float, volatility: float, 
@@ -3220,17 +3215,31 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         )
     
     with col3:
+        # RSI 상태 한글 번역
+        rsi_korean = {
+            'overbought': '과매수',
+            'oversold': '과매도',
+            'neutral': '중립'
+        }
+        rsi_status_kr = rsi_korean.get(current_status['rsi_status'], current_status['rsi_status'])
         rsi_color = "🔴" if current_status['rsi_status'] == 'overbought' else "🟢" if current_status['rsi_status'] == 'oversold' else "⚪"
         st.metric(
             label="RSI 상태",
-            value=f"{rsi_color} {current_status['rsi_status'].upper()}"
+            value=f"{rsi_color} {rsi_status_kr}"
         )
     
     with col4:
+        # 추세 한글 번역
+        trend_korean = {
+            'bullish': '상승',
+            'bearish': '하락',
+            'neutral': '중립'
+        }
+        trend_kr = trend_korean.get(current_status['trend'], current_status['trend'])
         trend_color = "📈" if current_status['trend'] == 'bullish' else "📉"
         st.metric(
             label="추세",
-            value=f"{trend_color} {current_status['trend'].upper()}"
+            value=f"{trend_color} {trend_kr}"
         )
     
     # 권장사항
@@ -3641,7 +3650,7 @@ def render_portfolio_backtest(price_data_df, symbol_name):
     st.plotly_chart(fig, use_container_width=True)
     
     # 코인별 성과
-    if len(symbols) >= 1:
+    if result['individual_returns']:
         st.markdown("### 💎 코인별 성과")
         
         individual_df = pd.DataFrame([
@@ -4105,7 +4114,7 @@ if bt:
         render_ai_forecast(future_df, hw_confidence)
         render_patterns(patterns)
         render_technical_indicators(df)
-        render_validation_results(cv_results)
+        # render_validation_results(cv_results)  # 삭제됨
         # [추가됨] v2.2.1: AI 예측에 필요한 변수 추출
         ema_short = df['EMA50'].iloc[-1]
         ema_long = df['EMA200'].iloc[-1]
