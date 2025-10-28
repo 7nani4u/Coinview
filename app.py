@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.7.0 (Portfolio Analytics)
+코인 AI 예측 시스템 - v2.7.1 (Portfolio Analytics)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -221,6 +221,152 @@ CRYPTO_MAP = {
     "솔라나 (SOL)": "SOLUSDT"
 }
 
+
+@st.cache_data(ttl=3600)
+def get_all_binance_usdt_pairs():
+    """
+    바이낸스에서 거래 가능한 모든 USDT 페어 가져오기
+    
+    Returns:
+    --------
+    list : USDT 페어 리스트 [("비트코인 (BTC)", "BTCUSDT"), ...]
+    """
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        usdt_pairs = []
+        
+        for symbol_info in data['symbols']:
+            symbol = symbol_info['symbol']
+            status = symbol_info['status']
+            
+            # USDT 페어이고 거래 가능한 것만 필터링
+            if symbol.endswith('USDT') and status == 'TRADING':
+                base_asset = symbol_info['baseAsset']
+                
+                # 한글 이름 매핑 (주요 코인)
+                korean_names = {
+                    'BTC': '비트코인',
+                    'ETH': '이더리움',
+                    'BNB': '바이낸스코인',
+                    'XRP': '리플',
+                    'ADA': '카다노',
+                    'SOL': '솔라나',
+                    'DOGE': '도지코인',
+                    'DOT': '폴카닷',
+                    'MATIC': '폴리곤',
+                    'SHIB': '시바이누',
+                    'AVAX': '아발란체',
+                    'UNI': '유니스왑',
+                    'LINK': '체인링크',
+                    'ATOM': '코스모스',
+                    'LTC': '라이트코인',
+                    'ETC': '이더리움클래식',
+                    'XLM': '스텔라루멘',
+                    'NEAR': '니어프로토콜',
+                    'APT': '앱토스',
+                    'FIL': '파일코인',
+                    'ARB': '아비트럼',
+                    'OP': '옵티미즘',
+                    'SUI': '수이',
+                    'TRX': '트론',
+                    'BCH': '비트코인캐시',
+                    'ALGO': '알고랜드',
+                    'VET': '비체인',
+                    'ICP': '인터넷컴퓨터',
+                    'FTM': '팬텀',
+                    'XMR': '모네로',
+                    'SAND': '샌드박스',
+                    'MANA': '디센트럴랜드',
+                    'AXS': '액시인피니티',
+                    'THETA': '쎄타',
+                    'XTZ': '테조스',
+                    'AAVE': '에이브',
+                    'GRT': '더그래프',
+                    'EOS': '이오스',
+                    'MKR': '메이커',
+                    'RUNE': '토르체인',
+                    'KSM': '쿠사마',
+                    'CAKE': '팬케이크스왑',
+                    'CRV': '커브',
+                    'WAVES': '웨이브',
+                    'ZEC': '지캐시',
+                    'DASH': '대시',
+                    'COMP': '컴파운드',
+                    'YFI': '연파이낸스',
+                    'SNX': '신세틱스',
+                    'BAT': '베이직어텐션토큰',
+                    'ENJ': '엔진코인',
+                    'SUSHI': '스시스왑',
+                    '1INCH': '원인치',
+                    'CHZ': '칠리즈',
+                    'HBAR': '헤데라',
+                    'HOT': '홀로체인',
+                    'ZIL': '질리카',
+                    'ONT': '온톨로지',
+                    'ICX': '아이콘',
+                    'QNT': '퀀트',
+                    'LRC': '루프링',
+                    'CELO': '셀로',
+                    'ANKR': '앵커',
+                    'KAVA': '카바',
+                    'BAND': '밴드프로토콜',
+                    'SC': '시아코인',
+                    'RVN': '레이븐코인',
+                    'ZEN': '호라이즌',
+                    'IOST': '아이오스트',
+                    'CVC': '시빅',
+                    'STORJ': '스토리지',
+                    'DYDX': '디와이디엑스',
+                    'GMX': '지엠엑스',
+                    'LDO': '리도',
+                    'BLUR': '블러',
+                    'PEPE': '페페',
+                    'FLOKI': '플로키',
+                    'INJ': '인젝티브',
+                    'STX': '스택스',
+                    'IMX': '이뮤터블엑스',
+                    'TIA': '셀레스티아',
+                    'SEI': '세이',
+                    'PYTH': '피스네트워크',
+                    'JUP': '주피터',
+                    'WIF': '도그위프햇',
+                    'BONK': '봉크',
+                    'STRK': '스타크넷',
+                    'WLD': '월드코인',
+                    'FET': '페치AI',
+                    'AGIX': '싱귤래리티넷',
+                    'RNDR': '렌더토큰',
+                    'GRT': '더그래프',
+                    'OCEAN': '오션프로토콜'
+                }
+                
+                if base_asset in korean_names:
+                    display_name = f"{korean_names[base_asset]} ({base_asset})"
+                else:
+                    display_name = base_asset
+                
+                usdt_pairs.append((display_name, symbol))
+        
+        # 심볼 알파벳 순서로 정렬
+        usdt_pairs.sort(key=lambda x: x[1])
+        
+        return usdt_pairs
+    
+    except Exception as e:
+        st.warning(f"⚠️ 바이낸스 API 오류: {e}")
+        # 실패 시 기본 목록 반환
+        return [
+            ("비트코인 (BTC)", "BTCUSDT"),
+            ("이더리움 (ETH)", "ETHUSDT"),
+            ("리플 (XRP)", "XRPUSDT"),
+            ("도지코인 (DOGE)", "DOGEUSDT"),
+            ("카다노 (ADA)", "ADAUSDT"),
+            ("솔라나 (SOL)", "SOLUSDT")
+        ]
 
 # ════════════════════════════════════════════════════════════════════════════
 # v2.6.0: 고급 분석 기능
@@ -942,7 +1088,7 @@ def calculate_indicators_wilders(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_up, 'Cross_Signal'] = 1
     df.loc[cond_down, 'Cross_Signal'] = -1
 
-    # [v2.7.0 새로 추가] 캠들스틱 패턴 특징 추가
+    # [v2.7.1 새로 추가] 캠들스틱 패턴 특징 추가
     df = add_candlestick_pattern_features(df)
     
     essential_cols = ['Close', 'High', 'Low', 'Volume', '일일수익률']
@@ -3908,17 +4054,63 @@ with st.sidebar:
     
     coin_input_method = st.radio(
         "🔧 입력 방식",
-        ["목록에서 선택", "직접 입력"],
+        ["기본 목록", "전체 코인 검색 (바이낸스)", "직접 입력"],
         horizontal=True
     )
     
-    if coin_input_method == "목록에서 선택":
+    if coin_input_method == "기본 목록":
         crypto_choice = st.selectbox(
             "💎 암호화폐",
             list(CRYPTO_MAP.keys())
         )
         selected_crypto = CRYPTO_MAP[crypto_choice]
-    else:
+    
+    elif coin_input_method == "전체 코인 검색 (바이낸스)":
+        # 바이낸스 모든 USDT 페어 가져오기
+        with st.spinner("🔎 바이낸스에서 코인 목록을 불러오는 중..."):
+            all_pairs = get_all_binance_usdt_pairs()
+        
+        # 검색 기능 추가
+        search_query = st.text_input(
+            "🔍 코인 검색",
+            value="",
+            placeholder="코인 이름 또는 심볼 입력 (예: BTC, 비트코인, SOL)"
+        )
+        
+        # 검색 필터링
+        if search_query:
+            search_upper = search_query.upper()
+            filtered_pairs = [
+                pair for pair in all_pairs 
+                if search_upper in pair[0].upper() or search_upper in pair[1].upper()
+            ]
+        else:
+            filtered_pairs = all_pairs
+        
+        if filtered_pairs:
+            # 매칭된 코인 수 표시
+            st.caption(f"📊 총 {len(filtered_pairs)}개 코인 표시 중 (Binance USDT 페어)")
+            
+            # selectbox로 선택
+            display_names = [pair[0] for pair in filtered_pairs]
+            selected_display = st.selectbox(
+                "💎 코인 선택",
+                display_names,
+                key="binance_coin_select"
+            )
+            
+            # 선택된 코인의 심볼 찾기
+            for pair in filtered_pairs:
+                if pair[0] == selected_display:
+                    selected_crypto = pair[1]
+                    break
+            
+            st.success(f"✅ 선택됨: **{selected_crypto}**")
+        else:
+            st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
+            selected_crypto = "BTCUSDT"
+    
+    else:  # "직접 입력"
         custom_symbol = st.text_input(
             "💎 코인 심볼 입력",
             value="BTCUSDT",
