@@ -1,3 +1,43 @@
+
+# === FIX: TimeSeriesSplit import and safe fallback ===
+try:
+    from sklearn.model_selection import TimeSeriesSplit  # type: ignore
+except Exception:  # scikit-learn가 없거나 로딩 실패 시 간단한 대체 구현
+    class TimeSeriesSplit:  # minimal compatible fallback
+        def __init__(self, n_splits=5, *, test_size=None, gap=0, max_train_size=None):
+            if n_splits is None:
+                n_splits = 5
+            self.n_splits = int(n_splits)
+            self.test_size = test_size
+            self.gap = int(gap) if gap else 0
+            self.max_train_size = max_train_size
+
+        def split(self, X):
+            n_samples = len(X)
+            if self.n_splits < 2:
+                raise ValueError("n_splits must be >= 2")
+            # 테스트 크기 추정
+            test_size = self.test_size if self.test_size is not None else max(1, n_samples // (self.n_splits + 1))
+
+            # 유효 분할 수 조정
+            effective = min(self.n_splits, max(1, (n_samples - 1) // max(1, test_size)))
+            for i in range(effective):
+                # 뒤에서부터 고정 크기 창을 이동
+                test_end = n_samples - (effective - i - 1) * test_size
+                test_start = max(1, test_end - test_size)
+                train_end = max(0, test_start - self.gap)
+                if self.max_train_size is None:
+                    train_start = 0
+                else:
+                    train_start = max(0, train_end - self.max_train_size)
+
+                train_idx = list(range(train_start, train_end))
+                test_idx = list(range(test_start, test_end))
+                if len(train_idx) == 0 or len(test_idx) == 0:
+                    continue
+                yield (train_idx, test_idx)
+# === END FIX ===
+
 # -*- coding: utf-8 -*-
 """
 코인 AI 예측 시스템 - v2.8.1 (Advanced Risk Management)
@@ -3260,6 +3300,22 @@ def perform_timeseries_cv(df: pd.DataFrame, n_splits: int = 5) -> pd.DataFrame:
     close_values = df['Close'].values
     
     for fold, (train_idx, test_idx) in enumerate(tscv.split(close_values), 1):
+    # === FIX: normalize n_splits to avoid NameError/ValueError ===
+    n_splits = kwargs.get('n_splits', locals().get('n_splits', 5)) if 'kwargs' in locals() else locals().get('n_splits', 5)
+    try:
+        n_total = len(df) if 'df' in locals() else (len(X) if 'X' in locals() else 0)
+    except Exception:
+        n_total = 0
+    if not isinstance(n_splits, int):
+        try:
+            n_splits = int(n_splits)
+        except Exception:
+            n_splits = 5
+    if n_total <= 0:
+        n_total = 0
+    # 최소 2, 데이터 크기에 따른 상한
+    n_splits = max(2, min(n_splits, max(2, n_total // 20) if n_total else 5))
+    # === END FIX ===
         train_data = close_values[train_idx]
         test_data = close_values[test_idx]
         
