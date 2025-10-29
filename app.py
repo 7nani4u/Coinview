@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.8.1 (Advanced Risk Management)
+코인 AI 예측 시스템 - v2.9.0 (Global Data Integration) (Advanced Risk Management)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -23,6 +23,13 @@
 - 가격 유효성 검증 추가
 
 🔵 v2.8.1 최적화 (Optimization):
+
+🟢 v2.9.0 글로벌 데이터 통합:
+- Monte Carlo 시뮬레이션 제거 (단순 시뮬레이션 → 실제 데이터 기반)
+- CryptoPanic API: 실시간 글로벌 뉴스 및 센티먼트 분석
+- FRED API: 미국 CPI 경제 지표 실시간 연동
+- 비트코인 도미넌스, 김치 프리미엄, 펀딩비 온체인 분석
+- 종합 시장 스코어링: 뉴스+매크로+온체인 통합 (0-100점)
 - Dead Code 제거: detect_candlestick_patterns_basic() 삭제
 - 미사용 Validation 함수 제거 (4개)
 - 미사용 imports 제거 (seaborn, BytesIO, sklearn validation)
@@ -1967,63 +1974,8 @@ def calculate_trailing_stop(entry_price: float, current_price: float, highest_pr
 
 
 
-def monte_carlo_simulation(entry_price: float, stop_loss: float, take_profit: float,
-                          position_size: float, win_probability: float, num_simulations: int = 10000,
-                          use_normal_distribution: bool = True, volatility: float = 0.02) -> dict:
-    """
-    Monte Carlo 시뮬레이션을 통한 확률적 손익 분석
-    - 승/패 시나리오를 10,000회 시뮬레이션
-    - VaR (Value at Risk) 계산
-    - Profit Factor 계산
-    """
-    results = []
-    max_profit = position_size * (take_profit - entry_price)
-    max_loss = position_size * (stop_loss - entry_price)
-    
-    for _ in range(num_simulations):
-        if use_normal_distribution:
-            outcome = np.random.normal(win_probability, 0.2)
-            outcome = max(0, min(1, outcome))
-            
-            if outcome > 0.5:
-                profit_ratio = np.random.normal(1.0, volatility)
-                profit = max_profit * max(0.5, min(1.5, profit_ratio))
-            else:
-                loss_ratio = np.random.normal(1.0, volatility)
-                profit = max_loss * max(0.5, min(1.5, loss_ratio))
-        else:
-            profit = max_profit if np.random.random() < win_probability else max_loss
-        
-        results.append(profit)
-    
-    results = np.array(results)
-    win_count = (results > 0).sum()
-    loss_count = (results < 0).sum()
-    total_profit = results[results > 0].sum()
-    total_loss = abs(results[results < 0].sum())
-    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
-    
-    return {
-        'mean_profit': round(results.mean(), 2),
-        'median_profit': round(np.median(results), 2),
-        'std_dev': round(results.std(), 2),
-        'min_loss': round(results.min(), 2),
-        'max_profit': round(results.max(), 2),
-        'var_95': round(np.percentile(results, 5), 2),
-        'var_99': round(np.percentile(results, 1), 2),
-        'percentile_25': round(np.percentile(results, 25), 2),
-        'percentile_75': round(np.percentile(results, 75), 2),
-        'win_count': int(win_count),
-        'loss_count': int(loss_count),
-        'win_rate_actual': round((win_count / num_simulations) * 100, 2),
-        'profit_factor': round(profit_factor, 2),
-        'total_profit': round(total_profit, 2),
-        'total_loss': round(total_loss, 2),
-        'num_simulations': num_simulations,
-        'results_array': results
-    }
 
-
+# [v2.9.0] Monte Carlo simulation removed
 
 def compare_position_sizing_strategies(investment_amount: float, entry_price: float,
                                       stop_loss: float, take_profit: float,
@@ -4168,141 +4120,8 @@ def render_trailing_stop_info(trailing_result: dict, entry_price: float, current
         st.plotly_chart(fig, use_container_width=True)
 
 
-def render_monte_carlo_results(mc_result: dict, investment_amount: float):
-    """🎲 Monte Carlo 시뮬레이션 결과 표시"""
-    st.markdown("<div class='section-title'>🎲 Monte Carlo 시뮬레이션 ({:,}회)</div>".format(mc_result['num_simulations']), unsafe_allow_html=True)
-    
-    # 주요 통계
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="평균 손익",
-            value=f"${mc_result['mean_profit']:,.2f}",
-            delta=f"{(mc_result['mean_profit']/investment_amount)*100:.2f}%",
-            help="모든 시뮬레이션의 평균값"
-        )
-    
-    with col2:
-        st.metric(
-            label="중간값 손익",
-            value=f"${mc_result['median_profit']:,.2f}",
-            help="50백분위수 (가운데 값)"
-        )
-    
-    with col3:
-        st.metric(
-            label="실제 승률",
-            value=f"{mc_result['win_rate_actual']:.1f}%",
-            help=f"승: {mc_result['win_count']:,}, 패: {mc_result['loss_count']:,}"
-        )
-    
-    with col4:
-        pf = mc_result['profit_factor']
-        pf_display = "∞" if pf == float('inf') else f"{pf:.2f}"
-        pf_color = "green" if pf > 1.5 else "orange" if pf > 1.0 else "red"
-        st.metric(
-            label="Profit Factor",
-            value=pf_display,
-            help="총수익 / 총손실 (기대값)"
-        )
-    
-    # 리스크 분석
-    st.markdown("---")
-    st.markdown("### 🚨 리스크 분석 (VaR)")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="VaR 95% (최악 5%)",
-            value=f"${mc_result['var_95']:,.2f}",
-            delta=f"{(mc_result['var_95']/investment_amount)*100:.2f}%",
-            help="95% 확률로 이 이상의 손실은 발생하지 않음"
-        )
-    
-    with col2:
-        st.metric(
-            label="VaR 99% (최악 1%)",
-            value=f"${mc_result['var_99']:,.2f}",
-            delta=f"{(mc_result['var_99']/investment_amount)*100:.2f}%",
-            help="99% 확률로 이 이상의 손실은 발생하지 않음"
-        )
-    
-    with col3:
-        st.metric(
-            label="최악 시나리오",
-            value=f"${mc_result['min_loss']:,.2f}",
-            delta=f"{(mc_result['min_loss']/investment_amount)*100:.2f}%",
-            help=f"{mc_result['num_simulations']:,}회 중 최악의 경우"
-        )
-    
-    # 해석
-    if mc_result['var_95'] < 0:
-        var_95_loss_pct = abs((mc_result['var_95'] / investment_amount) * 100)
-        if var_95_loss_pct < 2:
-            st.success(f"✅ 리스크 관리 우수: 95% 확률로 손실이 {var_95_loss_pct:.2f}% 이하로 제한됩니다.")
-        elif var_95_loss_pct < 5:
-            st.info(f"📊 리스크 관리 적정: 95% 확률로 손실이 {var_95_loss_pct:.2f}% 이하입니다.")
-        else:
-            st.warning(f"⚠️ 리스크 높음: 95% 확률로도 손실이 {var_95_loss_pct:.2f}%까지 가능합니다.")
-    
-    # 히스토그램
-    st.markdown("---")
-    st.markdown("### 📈 손익 분포")
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Histogram(
-        x=mc_result['results_array'],
-        nbinsx=50,
-        name='손익 분포',
-        marker_color='lightblue'
-    ))
-    
-    # 평균, VaR 라인
-    fig.add_vline(x=mc_result['mean_profit'], line_dash="dash", line_color="green", 
-                 annotation_text=f"평균: ${mc_result['mean_profit']:,.0f}")
-    fig.add_vline(x=mc_result['var_95'], line_dash="dot", line_color="orange", 
-                 annotation_text=f"VaR 95%: ${mc_result['var_95']:,.0f}")
-    fig.add_vline(x=0, line_dash="solid", line_color="red", 
-                 annotation_text="손익 분기점")
-    
-    fig.update_layout(
-        title=f"Monte Carlo 시뮬레이션 결과 ({mc_result['num_simulations']:,}회)",
-        xaxis_title="손익 (USD)",
-        yaxis_title="발생 횟수",
-        height=400,
-        showlegend=False
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # 상세 통계
-    with st.expander("📊 상세 통계"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown(f"""
-            **기본 통계:**
-            - 평균: ${mc_result['mean_profit']:,.2f}
-            - 중간값: ${mc_result['median_profit']:,.2f}
-            - 표준편차: ${mc_result['std_dev']:,.2f}
-            - 25백분위수: ${mc_result['percentile_25']:,.2f}
-            - 75백분위수: ${mc_result['percentile_75']:,.2f}
-            """)
-        
-        with col2:
-            st.markdown(f"""
-            **승패 분석:**
-            - 승률: {mc_result['win_rate_actual']:.1f}%
-            - 승리: {mc_result['win_count']:,}회
-            - 패배: {mc_result['loss_count']:,}회
-            - 총수익: ${mc_result['total_profit']:,.2f}
-            - 총손실: ${mc_result['total_loss']:,.2f}
-            - Profit Factor: {mc_result['profit_factor']:.2f}
-            """)
 
+# [v2.9.0] Monte Carlo UI rendering removed
 
 def render_strategy_comparison(comparison: dict, investment_amount: float):
     """🏆 Position Sizing 전략 비교"""
@@ -5028,17 +4847,44 @@ if bt:
         
         # 3. Monte Carlo 시뮬레이션
         st.markdown("---")
-        mc_result = monte_carlo_simulation(
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            position_size=position_size,
-            win_probability=ai_prediction['confidence'] / 100.0,
-            num_simulations=10000,
-            use_normal_distribution=True,
-            volatility=volatility
+
+        # 3. 실시간 글로벌 데이터 통합 분석 (v2.9.0)
+        st.markdown('---')
+        st.markdown('<div class="section-title">🌐 실시간 글로벌 시장 데이터</div>', unsafe_allow_html=True)
+        
+        # API 키 가져오기
+        cryptopanic_key = None
+        fred_key = None
+        try:
+            if hasattr(st, 'secrets'):
+                cryptopanic_key = st.secrets.get('CRYPTOPANIC_API_KEY')
+                fred_key = st.secrets.get('FRED_API_KEY')
+        except: pass
+        
+        with st.spinner('📡 실시간 뉴스 수집...'):
+            news_data = fetch_cryptopanic_news(selected_crypto.replace('-USDT',''), cryptopanic_key, 20)
+            news_analysis = analyze_news_sentiment_advanced(news_data)
+        render_news_analysis(news_data, news_analysis)
+        st.markdown('---')
+        
+        with st.spinner('🌍 경제 지표 수집...'):
+            fred_data = fetch_fred_economic_data('CPIAUCSL', fred_key, 12)
+        render_macro_indicators(fred_data)
+        st.markdown('---')
+        
+        with st.spinner('⛓️ 온체인 데이터 수집...'):
+            dominance_data = fetch_btc_dominance()
+            kimchi_data = fetch_kimchi_premium(selected_crypto.replace('-USDT',''))
+            funding_data = fetch_funding_rate(selected_crypto)
+        render_onchain_metrics(dominance_data, kimchi_data, funding_data)
+        st.markdown('---')
+        
+        comprehensive = analyze_comprehensive_market(
+            selected_crypto, news_data, fred_data, dominance_data,
+            kimchi_data, funding_data, current_price, ai_prediction['confidence']/100.0
         )
-        render_monte_carlo_results(mc_result, investment_amount)
+        render_comprehensive_analysis(comprehensive)
+        # [v2.9.0] Monte Carlo 시뮬레이션 완전 제거됨
         
         # 4. Position Sizing 전략 비교
         st.markdown("---")
