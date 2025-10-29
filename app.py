@@ -51,7 +51,8 @@ import requests
 import statsmodels.api as sm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-# Removed: TimeSeriesSplit, brier_score_loss, log_loss (unused)
+# v2.9.0.1: TimeSeriesSplit 복원 (사용됨)
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import brier_score_loss, log_loss
 
 # v2.6.0: 추가 분석 도구
@@ -1772,7 +1773,7 @@ def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: f
     if rr_ratio <= 0:
         return {'kelly_full': 0.0, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
                 'position_pct': 0.0, 'recommendation': 'NO TRADE',
-                'risk_category': 'INVALID', 'reason': 'RR Ratio가 0 이하입니다.',
+                'risk_category': '비정상', 'reason': 'RR Ratio가 0 이하입니다.',
                 'win_rate_used': p, 'rr_ratio_used': rr_ratio, 'kelly_fraction_used': kelly_fraction}
     
     b = rr_ratio
@@ -1781,7 +1782,7 @@ def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: f
     if kelly_full <= 0:
         return {'kelly_full': kelly_full, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
                 'position_pct': 0.0, 'recommendation': 'NO TRADE',
-                'risk_category': 'NEGATIVE_EXPECTANCY',
+                'risk_category': '기대값 음수',
                 'reason': f'기대값이 음수입니다 (p={p:.1%}, b={b:.2f})',
                 'win_rate_used': p, 'rr_ratio_used': b, 'kelly_fraction_used': kelly_fraction}
     
@@ -1789,19 +1790,19 @@ def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: f
     kelly_capped = min(kelly_adjusted, max_position)
     
     if kelly_capped < 0.02:
-        risk_category, recommendation = 'SKIP', 'SKIP'
+        risk_category, recommendation = '거래 제외', 'SKIP'
         reason = '포지션 크기가 너무 작습니다 (2% 미만)'
     elif kelly_capped < 0.05:
-        risk_category, recommendation = 'CONSERVATIVE', 'TRADE'
+        risk_category, recommendation = '매우 보수적', 'TRADE'
         reason = '보수적 포지션 (2-5%)'
     elif kelly_capped < 0.10:
-        risk_category, recommendation = 'MODERATE', 'TRADE'
+        risk_category, recommendation = '중립적', 'TRADE'
         reason = '중립적 포지션 (5-10%)'
     elif kelly_capped < 0.15:
-        risk_category, recommendation = 'AGGRESSIVE', 'TRADE'
+        risk_category, recommendation = '공격적', 'TRADE'
         reason = '공격적 포지션 (10-15%)'
     else:
-        risk_category, recommendation = 'VERY_AGGRESSIVE', 'TRADE'
+        risk_category, recommendation = '매우 공격적', 'TRADE'
         reason = '매우 공격적 포지션 (15%+)'
     
     return {
@@ -3835,9 +3836,10 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
             delta=f"-{(expected_loss / investment_amount) * 100:.2f}%"
         )
     
-    # [추가됨] v2.7.2: 증거금 정보 표시
+    # [개선됨] v2.9.0.1: 초보자 친화적 증거금 정보 표시
     st.markdown("---")
-    st.markdown("### 💳 증거금 정보")
+    st.markdown("### 💳 거래 자금 정보")
+    st.caption("📌 레버리지를 사용하면 적은 자금으로 큰 거래가 가능합니다")
     
     position_value = position_size * entry_price
     required_margin = position_value / leverage_info['recommended']
@@ -3848,33 +3850,53 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     
     with col1:
         st.metric(
-            label="포지션 가치",
+            label="📊 실제 거래 금액",
             value=f"${position_value:,.2f}",
-            help="실제 거래되는 총 가치"
+            help="레버리지를 사용하여 거래하는 총 금액입니다"
         )
     
     with col2:
         st.metric(
-            label="필요 증거금",
+            label="💵 필요한 내 돈",
             value=f"${required_margin:,.2f}",
             delta=f"-{((margin_saved) / investment_amount * 100):.1f}% 절약",
-            help=f"{leverage_info['recommended']}x 레버리지로 증거금 절약"
+            help=f"실제로 내가 내야 하는 돈입니다 ({leverage_info['recommended']}배 레버리지 사용)"
         )
     
     with col3:
         st.metric(
-            label="증거금 사용률",
+            label="📈 자금 사용률",
             value=f"{margin_usage:.1f}%",
-            help="전체 투자 금액 대비 사용 비율"
+            help="내 투자금 중에서 이번 거래에 쓰는 비율입니다"
         )
     
     with col4:
         st.metric(
-            label="여유 자금",
+            label="💰 남은 자금",
             value=f"${margin_saved:,.2f}",
             delta=f"+{(margin_saved / investment_amount * 100):.1f}%",
-            help="다른 거래에 사용 가능한 금액"
+            help="다른 거래에 사용할 수 있는 남은 돈입니다"
         )
+    
+    # 초보자를 위한 쉬운 설명 추가
+    with st.expander("💡 레버리지란? (초보자 가이드)"):
+        st.markdown(f"""
+        **레버리지는 '지렛대'라는 뜻입니다. 적은 돈으로 큰 거래를 하는 방법이에요!**
+        
+        🎯 **현재 예시:**
+        - 실제 거래 금액: **${position_value:,.2f}**
+        - 내가 내야 할 돈: **${required_margin:,.2f}**
+        - 레버리지: **{leverage_info['recommended']}배**
+        
+        💡 **쉽게 말하면:**
+        - ${required_margin:,.2f}만 있으면 ${position_value:,.2f}어치 거래를 할 수 있어요
+        - 나머지 ${margin_saved:,.2f}는 다른 코인에 투자할 수 있어요
+        
+        ⚠️ **주의사항:**
+        - 수익도 {leverage_info['recommended']}배가 되지만, **손실도 {leverage_info['recommended']}배**가 됩니다
+        - 손실이 증거금을 넘으면 자동으로 청산(강제 종료)됩니다
+        - 처음에는 낮은 레버리지(1-3배)로 시작하는 것을 권장합니다
+        """)
     
     # [추가됨] v2.7.2: 리스크 검증 메시지
     st.markdown("---")
@@ -3930,13 +3952,13 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
     
     with col4:
         category_emoji = {
-            'CONSERVATIVE': '🛡️',
-            'MODERATE': '⚖️',
-            'AGGRESSIVE': '🚀',
-            'VERY_AGGRESSIVE': '🔥',
-            'SKIP': '⛔',
-            'NEGATIVE_EXPECTANCY': '❌',
-            'INVALID': '⚠️'
+            '매우 보수적': '🛡️',
+            '중립적': '⚖️',
+            '공격적': '🚀',
+            '매우 공격적': '🔥',
+            '거래 제외': '⛔',
+            '기대값 음수': '❌',
+            '비정상': '⚠️'
         }
         emoji = category_emoji.get(kelly_result['risk_category'], '📊')
         st.metric(
