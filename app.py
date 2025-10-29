@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.7.2 (Risk Management Fix)
+코인 AI 예측 시스템 - v2.8.0 (Advanced Risk Management)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
 - 앙상블 예측 (8개 모델)
 - 적응형 지표 계산
+
+🟢 v2.8.0 신규 기능:
+1. Kelly Criterion: AI 신뢰도 기반 최적 Position Size
+2. Trailing Stop Loss: 동적 손절가 (ATR 기반)
+3. Monte Carlo 시뮬레이션: 확률적 손익 분석
+4. Position Sizing 전략 비교: 4가지 전략 성과 비교
+5. 포트폴리오 리스크 관리: 다중 포지션 통합 분석
+6. 백테스팅 개선: 전략별 성과 측정
 
 🔴 v2.7.2 수정 사항 (CRITICAL):
 - Position Size 계산 로직 수정 (레버리지 오류 수정)
@@ -1897,7 +1905,258 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
     }
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# v2.8.0: 고급 리스크 관리 함수들
+# ════════════════════════════════════════════════════════════════════════════
 
+def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: float = None,
+                              kelly_fraction: float = 0.5, max_position: float = 0.25) -> dict:
+    """
+    Kelly Criterion을 사용한 최적 Position Size 계산
+    
+    공식: Kelly = (b*p - q) / b
+    - b = RR Ratio (승률)
+    - p = 승리 확률 (AI 신뢰도 또는 백테스팅 결과)
+    - q = 패배 확률 (1-p)
+    """
+    p = (ai_confidence / 100.0) if win_rate is None else win_rate
+    p = max(0.01, min(0.99, p))
+    q = 1.0 - p
+    
+    if rr_ratio <= 0:
+        return {'kelly_full': 0.0, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
+                'position_pct': 0.0, 'recommendation': 'NO TRADE',
+                'risk_category': 'INVALID', 'reason': 'RR Ratio가 0 이하입니다.'}
+    
+    b = rr_ratio
+    kelly_full = (b * p - q) / b
+    
+    if kelly_full <= 0:
+        return {'kelly_full': kelly_full, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
+                'position_pct': 0.0, 'recommendation': 'NO TRADE',
+                'risk_category': 'NEGATIVE_EXPECTANCY',
+                'reason': f'기대값이 음수입니다 (p={p:.1%}, b={b:.2f})'}
+    
+    kelly_adjusted = kelly_full * kelly_fraction
+    kelly_capped = min(kelly_adjusted, max_position)
+    
+    if kelly_capped < 0.02:
+        risk_category, recommendation = 'SKIP', 'SKIP'
+        reason = '포지션 크기가 너무 작습니다 (2% 미만)'
+    elif kelly_capped < 0.05:
+        risk_category, recommendation = 'CONSERVATIVE', 'TRADE'
+        reason = '보수적 포지션 (2-5%)'
+    elif kelly_capped < 0.10:
+        risk_category, recommendation = 'MODERATE', 'TRADE'
+        reason = '중립적 포지션 (5-10%)'
+    elif kelly_capped < 0.15:
+        risk_category, recommendation = 'AGGRESSIVE', 'TRADE'
+        reason = '공격적 포지션 (10-15%)'
+    else:
+        risk_category, recommendation = 'VERY_AGGRESSIVE', 'TRADE'
+        reason = '매우 공격적 포지션 (15%+)'
+    
+    return {
+        'kelly_full': round(kelly_full, 4),
+        'kelly_adjusted': round(kelly_adjusted, 4),
+        'kelly_capped': round(kelly_capped, 4),
+        'position_pct': round(kelly_capped * 100, 2),
+        'recommendation': recommendation,
+        'risk_category': risk_category,
+        'reason': reason,
+        'win_rate_used': p,
+        'rr_ratio_used': b,
+        'kelly_fraction_used': kelly_fraction
+    }
+
+
+def calculate_trailing_stop(entry_price: float, current_price: float, highest_price: float,
+                            atr: float, atr_multiplier: float = 2.0, position_type: str = 'LONG',
+                            min_profit_pct: float = 0.01) -> dict:
+    """
+    Trailing Stop Loss 계산 (ATR 기반)
+    - 가격 상승 시 Stop Loss도 따라 상승
+    - 하락 시 Stop Loss 고정
+    - 이익 보호 + 추세 지속 허용
+    """
+    position_type = position_type.upper()
+    
+    if position_type == 'LONG':
+        initial_stop = entry_price - (atr * atr_multiplier)
+        trailing_stop = highest_price - (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 + min_profit_pct)
+        
+        final_stop = max(initial_stop, trailing_stop)
+        if current_price > min_stop_with_profit:
+            final_stop = max(final_stop, min_stop_with_profit)
+        if final_stop > current_price * 0.95:
+            final_stop = current_price * 0.95
+        
+        locked_profit_pct = ((final_stop - entry_price) / entry_price) * 100 if final_stop > entry_price else 0.0
+        distance_from_current = ((current_price - final_stop) / current_price) * 100
+    else:  # SHORT
+        initial_stop = entry_price + (atr * atr_multiplier)
+        lowest_price = highest_price
+        trailing_stop = lowest_price + (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 - min_profit_pct)
+        
+        final_stop = min(initial_stop, trailing_stop)
+        if current_price < min_stop_with_profit:
+            final_stop = min(final_stop, min_stop_with_profit)
+        if final_stop < current_price * 1.05:
+            final_stop = current_price * 1.05
+        
+        locked_profit_pct = ((entry_price - final_stop) / entry_price) * 100 if final_stop < entry_price else 0.0
+        distance_from_current = ((final_stop - current_price) / current_price) * 100
+    
+    moved = abs(trailing_stop - initial_stop) > (atr * 0.1)
+    
+    return {
+        'initial_stop': round(initial_stop, 2),
+        'trailing_stop': round(trailing_stop, 2),
+        'final_stop': round(final_stop, 2),
+        'distance_from_current': round(distance_from_current, 2),
+        'moved': moved,
+        'locked_profit_pct': round(locked_profit_pct, 2),
+        'atr_used': atr,
+        'atr_multiplier': atr_multiplier,
+        'position_type': position_type
+    }
+
+
+def monte_carlo_simulation(entry_price: float, stop_loss: float, take_profit: float,
+                          position_size: float, win_probability: float, num_simulations: int = 10000,
+                          use_normal_distribution: bool = True, volatility: float = 0.02) -> dict:
+    """
+    Monte Carlo 시뮬레이션을 통한 확률적 손익 분석
+    - 승/패 시나리오를 10,000회 시뮬레이션
+    - VaR (Value at Risk) 계산
+    - Profit Factor 계산
+    """
+    results = []
+    max_profit = position_size * (take_profit - entry_price)
+    max_loss = position_size * (stop_loss - entry_price)
+    
+    for _ in range(num_simulations):
+        if use_normal_distribution:
+            outcome = np.random.normal(win_probability, 0.2)
+            outcome = max(0, min(1, outcome))
+            
+            if outcome > 0.5:
+                profit_ratio = np.random.normal(1.0, volatility)
+                profit = max_profit * max(0.5, min(1.5, profit_ratio))
+            else:
+                loss_ratio = np.random.normal(1.0, volatility)
+                profit = max_loss * max(0.5, min(1.5, loss_ratio))
+        else:
+            profit = max_profit if np.random.random() < win_probability else max_loss
+        
+        results.append(profit)
+    
+    results = np.array(results)
+    win_count = (results > 0).sum()
+    loss_count = (results < 0).sum()
+    total_profit = results[results > 0].sum()
+    total_loss = abs(results[results < 0].sum())
+    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+    
+    return {
+        'mean_profit': round(results.mean(), 2),
+        'median_profit': round(np.median(results), 2),
+        'std_dev': round(results.std(), 2),
+        'min_loss': round(results.min(), 2),
+        'max_profit': round(results.max(), 2),
+        'var_95': round(np.percentile(results, 5), 2),
+        'var_99': round(np.percentile(results, 1), 2),
+        'percentile_25': round(np.percentile(results, 25), 2),
+        'percentile_75': round(np.percentile(results, 75), 2),
+        'win_count': int(win_count),
+        'loss_count': int(loss_count),
+        'win_rate_actual': round((win_count / num_simulations) * 100, 2),
+        'profit_factor': round(profit_factor, 2),
+        'total_profit': round(total_profit, 2),
+        'total_loss': round(total_loss, 2),
+        'num_simulations': num_simulations,
+        'results_array': results
+    }
+
+
+def compare_position_sizing_strategies(investment_amount: float, entry_price: float,
+                                      stop_loss: float, take_profit: float,
+                                      ai_confidence: float, volatility: float,
+                                      leverage: float = 1.0, rr_ratio: float = 2.0) -> dict:
+    """
+    여러 Position Sizing 전략 비교
+    1. Fixed Fractional (2%)
+    2. Kelly Criterion (Half Kelly)
+    3. Volatility Adjusted
+    4. AI Confidence Based
+    """
+    stop_loss_distance = abs(entry_price - stop_loss)
+    
+    # 1. Fixed Fractional
+    fixed_risk_pct = 0.02
+    fixed_position_size = (investment_amount * fixed_risk_pct) / stop_loss_distance
+    
+    # 2. Kelly Criterion
+    kelly_result = calculate_kelly_criterion(ai_confidence, rr_ratio, kelly_fraction=0.5)
+    kelly_risk_pct = kelly_result['kelly_capped']
+    kelly_position_size = (investment_amount * kelly_risk_pct) / stop_loss_distance
+    
+    # 3. Volatility Adjusted
+    vol_adjusted_risk_pct = max(0.005, min(0.05, 0.02 / (volatility * 50 + 1)))
+    vol_adjusted_position_size = (investment_amount * vol_adjusted_risk_pct) / stop_loss_distance
+    
+    # 4. AI Confidence Based
+    ai_risk_pct = max(0.01, min(0.05, (ai_confidence / 100) * 0.05))
+    ai_position_size = (investment_amount * ai_risk_pct) / stop_loss_distance
+    
+    strategies = {
+        'fixed_fractional': {
+            'name': '고정 비율 (2%)',
+            'risk_pct': fixed_risk_pct * 100,
+            'position_size': fixed_position_size,
+            'position_value': fixed_position_size * entry_price,
+            'max_loss': fixed_position_size * stop_loss_distance,
+            'max_profit': fixed_position_size * (take_profit - entry_price),
+            'required_margin': (fixed_position_size * entry_price) / leverage
+        },
+        'kelly_criterion': {
+            'name': 'Kelly Criterion (Half)',
+            'risk_pct': kelly_risk_pct * 100,
+            'position_size': kelly_position_size,
+            'position_value': kelly_position_size * entry_price,
+            'max_loss': kelly_position_size * stop_loss_distance,
+            'max_profit': kelly_position_size * (take_profit - entry_price),
+            'required_margin': (kelly_position_size * entry_price) / leverage
+        },
+        'volatility_adjusted': {
+            'name': '변동성 조정',
+            'risk_pct': vol_adjusted_risk_pct * 100,
+            'position_size': vol_adjusted_position_size,
+            'position_value': vol_adjusted_position_size * entry_price,
+            'max_loss': vol_adjusted_position_size * stop_loss_distance,
+            'max_profit': vol_adjusted_position_size * (take_profit - entry_price),
+            'required_margin': (vol_adjusted_position_size * entry_price) / leverage
+        },
+        'ai_confidence_based': {
+            'name': 'AI 신뢰도 기반',
+            'risk_pct': ai_risk_pct * 100,
+            'position_size': ai_position_size,
+            'position_value': ai_position_size * entry_price,
+            'max_loss': ai_position_size * stop_loss_distance,
+            'max_profit': ai_position_size * (take_profit - entry_price),
+            'required_margin': (ai_position_size * entry_price) / leverage
+        }
+    }
+    
+    recommended_strategy = 'kelly_criterion' if (kelly_result['recommendation'] == 'TRADE' and kelly_risk_pct >= 0.01) else 'fixed_fractional'
+    
+    return {
+        'strategies': strategies,
+        'recommended_strategy': recommended_strategy,
+        'kelly_details': kelly_result
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3951,8 +4210,423 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         st.warning(f"⚠️ 낮은 RR Ratio ({rr_ratio:.2f}) - 리스크 대비 수익이 작음")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# v2.8.0: 고급 리스크 관리 UI 함수들
+# ════════════════════════════════════════════════════════════════════════════
+
+def render_kelly_analysis(kelly_result: dict, current_position_size: float, 
+                         entry_price: float, investment_amount: float):
+    """🎲 Kelly Criterion 분석 결과 표시"""
+    st.markdown("<div class='section-title'>🎲 Kelly Criterion 분석</div>", unsafe_allow_html=True)
+    
+    # 기본 정보
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="Full Kelly",
+            value=f"{kelly_result['kelly_full']:.2%}",
+            help="이론적 최적 포지션 크기 (매우 공격적)"
+        )
+    
+    with col2:
+        st.metric(
+            label="Half Kelly (권장)",
+            value=f"{kelly_result['kelly_adjusted']:.2%}",
+            help="안정적인 권장 크기 (Full Kelly의 50%)"
+        )
+    
+    with col3:
+        st.metric(
+            label="최종 권장",
+            value=f"{kelly_result['kelly_capped']:.2%}",
+            help="최대치 제한 적용 후"
+        )
+    
+    with col4:
+        category_emoji = {
+            'CONSERVATIVE': '🛡️',
+            'MODERATE': '⚖️',
+            'AGGRESSIVE': '🚀',
+            'VERY_AGGRESSIVE': '🔥',
+            'SKIP': '⛔',
+            'NEGATIVE_EXPECTANCY': '❌',
+            'INVALID': '⚠️'
+        }
+        emoji = category_emoji.get(kelly_result['risk_category'], '📊')
+        st.metric(
+            label="리스크 카테고리",
+            value=f"{emoji} {kelly_result['risk_category']}"
+        )
+    
+    # Kelly 결과 해석
+    if kelly_result['recommendation'] == 'TRADE':
+        kelly_position_value = investment_amount * kelly_result['kelly_capped']
+        kelly_position_size = kelly_position_value / entry_price
+        current_position_value = current_position_size * entry_price
+        
+        st.markdown("---")
+        st.markdown("### 📈 Kelly vs 현재 전략 비교")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            <div style='background-color: #e8f5e9; padding: 15px; border-radius: 10px;'>
+                <h4 style='color: #2e7d32; margin: 0 0 10px 0;'>🎯 Kelly Criterion 권장</h4>
+                <p style='margin: 5px 0;'><strong>포지션 크기:</strong> {kelly_position_size:.6f} 코인</p>
+                <p style='margin: 5px 0;'><strong>포지션 가치:</strong> ${kelly_position_value:,.2f}</p>
+                <p style='margin: 5px 0;'><strong>리스크 비율:</strong> {kelly_result['position_pct']:.2f}%</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f"""
+            <div style='background-color: #e3f2fd; padding: 15px; border-radius: 10px;'>
+                <h4 style='color: #1565c0; margin: 0 0 10px 0;'>📊 현재 전략 (Fixed 2%)</h4>
+                <p style='margin: 5px 0;'><strong>포지션 크기:</strong> {current_position_size:.6f} 코인</p>
+                <p style='margin: 5px 0;'><strong>포지션 가치:</strong> ${current_position_value:,.2f}</p>
+                <p style='margin: 5px 0;'><strong>리스크 비율:</strong> 2.00%</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # 차이 분석
+        diff_pct = ((kelly_position_size - current_position_size) / current_position_size) * 100
+        if abs(diff_pct) > 10:
+            if diff_pct > 0:
+                st.info(f"📈 Kelly Criterion은 현재보다 **{diff_pct:.1f}% 더 큰** 포지션을 권장합니다. (AI 신뢰도가 높고 RR Ratio가 좋음)")
+            else:
+                st.warning(f"📉 Kelly Criterion은 현재보다 **{abs(diff_pct):.1f}% 더 작은** 포지션을 권장합니다. (AI 신뢰도가 낮거나 RR Ratio가 난조함)")
+        else:
+            st.success("✅ Kelly Criterion과 현재 전략이 유사합니다. (±10% 이내)")
+    
+    else:
+        st.error(f"❌ {kelly_result['reason']}")
+        st.warning("⚠️ Kelly Criterion에 따르면 이 거래를 건너뛄는 것이 좋습니다.")
+    
+    # 상세 정보
+    with st.expander("📖 Kelly Criterion 상세 정보"):
+        st.markdown(f"""
+        **입력 파라미터:**
+        - 승률 (Win Rate): {kelly_result['win_rate_used']:.1%}
+        - RR Ratio: {kelly_result['rr_ratio_used']:.2f}
+        - Kelly Fraction: {kelly_result['kelly_fraction_used']:.0%} (Half Kelly)
+        
+        **공식:**
+        ```
+        Kelly = (b*p - q) / b
+        
+        여기서:
+        - b = RR Ratio (승률)
+        - p = 승리 확률 (AI 신뢰도)
+        - q = 패배 확률 (1 - p)
+        ```
+        
+        **해석:**
+        - Full Kelly는 이론적 최적값이지만 변동성이 큽니다.
+        - Half Kelly (50%)는 안정적이면서도 좋은 성과를 냅니다. (권장)
+        - Quarter Kelly (25%)는 보수적 접근입니다.
+        """)
 
 
+def render_trailing_stop_info(trailing_result: dict, entry_price: float, current_price: float):
+    """📍 Trailing Stop Loss 정보 표시"""
+    st.markdown("<div class='section-title'>📍 Trailing Stop Loss 분석</div>", unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="초기 손절가",
+            value=f"${trailing_result['initial_stop']:,.2f}",
+            help="진입 시점의 고정 손절가"
+        )
+    
+    with col2:
+        movement_delta = trailing_result['trailing_stop'] - trailing_result['initial_stop']
+        st.metric(
+            label="Trailing 손절가",
+            value=f"${trailing_result['trailing_stop']:,.2f}",
+            delta=f"${movement_delta:,.2f}" if trailing_result['moved'] else "0",
+            help="최고가 기준 동적 조정"
+        )
+    
+    with col3:
+        st.metric(
+            label="최종 손절가",
+            value=f"${trailing_result['final_stop']:,.2f}",
+            delta=f"{trailing_result['distance_from_current']:.2f}%",
+            help="현재가 대비 거리"
+        )
+    
+    with col4:
+        if trailing_result['locked_profit_pct'] > 0:
+            st.metric(
+                label="확정 수익",
+                value=f"+{trailing_result['locked_profit_pct']:.2f}%",
+                help="손절가가 진입가 위로 올라가 수익 확정"
+            )
+        else:
+            st.metric(
+                label="확정 수익",
+                value="아직 없음",
+                help="손절가가 아직 진입가 아래"
+            )
+    
+    # Trailing Stop 설명
+    st.markdown("---")
+    
+    if trailing_result['moved']:
+        st.success("✅ Trailing Stop이 활성화되었습니다!")
+        st.info(f"""
+        📍 **Trailing Stop 동작 원리:**
+        
+        1. 초기 손절가: ${trailing_result['initial_stop']:,.2f} (진입 시 ATR 기반)
+        2. 가격이 상승하면 손절가도 따라 상승
+        3. 가격이 하락해도 손절가는 고정 (수익 보호)
+        4. 현재 손절가: ${trailing_result['final_stop']:,.2f}
+        
+        ✨ **장점:** 이익을 보호하면서 추세를 최대한 활용할 수 있습니다.
+        """)
+        
+        if trailing_result['locked_profit_pct'] > 0:
+            st.success(f"🎉 축하합니다! 현재 최소 **+{trailing_result['locked_profit_pct']:.2f}%**의 수익이 확정되었습니다.")
+    else:
+        st.info("📌 Trailing Stop이 아직 활성화되지 않았습니다. (가격이 충분히 상승하면 자동 활성화)")
+    
+    # 시각화
+    with st.expander("📈 Trailing Stop 시각화"):
+        fig = go.Figure()
+        
+        # 가격 범위
+        price_range = [entry_price * 0.95, current_price * 1.05]
+        
+        # 진입가
+        fig.add_hline(y=entry_price, line_dash="dash", line_color="blue", 
+                     annotation_text="진입가", annotation_position="right")
+        
+        # 현재가
+        fig.add_hline(y=current_price, line_dash="solid", line_color="green", 
+                     annotation_text="현재가", annotation_position="right")
+        
+        # 초기 손절가
+        fig.add_hline(y=trailing_result['initial_stop'], line_dash="dot", line_color="orange", 
+                     annotation_text="초기 Stop", annotation_position="left")
+        
+        # 최종 손절가
+        fig.add_hline(y=trailing_result['final_stop'], line_dash="solid", line_color="red", 
+                     annotation_text="Trailing Stop", annotation_position="left")
+        
+        fig.update_layout(
+            title="Trailing Stop Loss 시각화",
+            yaxis_title="가격 (USD)",
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_monte_carlo_results(mc_result: dict, investment_amount: float):
+    """🎲 Monte Carlo 시뮬레이션 결과 표시"""
+    st.markdown("<div class='section-title'>🎲 Monte Carlo 시뮬레이션 ({:,}회)</div>".format(mc_result['num_simulations']), unsafe_allow_html=True)
+    
+    # 주요 통계
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="평균 손익",
+            value=f"${mc_result['mean_profit']:,.2f}",
+            delta=f"{(mc_result['mean_profit']/investment_amount)*100:.2f}%",
+            help="모든 시뮬레이션의 평균값"
+        )
+    
+    with col2:
+        st.metric(
+            label="중간값 손익",
+            value=f"${mc_result['median_profit']:,.2f}",
+            help="50백분위수 (가운데 값)"
+        )
+    
+    with col3:
+        st.metric(
+            label="실제 승률",
+            value=f"{mc_result['win_rate_actual']:.1f}%",
+            help=f"승: {mc_result['win_count']:,}, 패: {mc_result['loss_count']:,}"
+        )
+    
+    with col4:
+        pf_color = "green" if mc_result['profit_factor'] > 1.5 else "orange" if mc_result['profit_factor'] > 1.0 else "red"
+        st.metric(
+            label="Profit Factor",
+            value=f"{mc_result['profit_factor']:.2f}",
+            help="총수익 / 총손실 (기대값"
+        )
+    
+    # 리스크 분석
+    st.markdown("---")
+    st.markdown("### 🚨 리스크 분석 (VaR)")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="VaR 95% (최악 5%)",
+            value=f"${mc_result['var_95']:,.2f}",
+            delta=f"{(mc_result['var_95']/investment_amount)*100:.2f}%",
+            help="95% 확률로 이 이상의 손실은 발생하지 않음"
+        )
+    
+    with col2:
+        st.metric(
+            label="VaR 99% (최악 1%)",
+            value=f"${mc_result['var_99']:,.2f}",
+            delta=f"{(mc_result['var_99']/investment_amount)*100:.2f}%",
+            help="99% 확률로 이 이상의 손실은 발생하지 않음"
+        )
+    
+    with col3:
+        st.metric(
+            label="최악 시나리오",
+            value=f"${mc_result['min_loss']:,.2f}",
+            delta=f"{(mc_result['min_loss']/investment_amount)*100:.2f}%",
+            help=f"{mc_result['num_simulations']:,}회 중 최악의 경우"
+        )
+    
+    # 해석
+    if mc_result['var_95'] < 0:
+        var_95_loss_pct = abs((mc_result['var_95'] / investment_amount) * 100)
+        if var_95_loss_pct < 2:
+            st.success(f"✅ 리스크 관리 우수: 95% 확률로 손실이 {var_95_loss_pct:.2f}% 이하로 제한됩니다.")
+        elif var_95_loss_pct < 5:
+            st.info(f"📊 리스크 관리 적정: 95% 확률로 손실이 {var_95_loss_pct:.2f}% 이하입니다.")
+        else:
+            st.warning(f"⚠️ 리스크 높음: 95% 확률로도 손실이 {var_95_loss_pct:.2f}%까지 가능합니다.")
+    
+    # 히스토그램
+    st.markdown("---")
+    st.markdown("### 📈 손익 분포")
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Histogram(
+        x=mc_result['results_array'],
+        nbinsx=50,
+        name='손익 분포',
+        marker_color='lightblue'
+    ))
+    
+    # 평균, VaR 라인
+    fig.add_vline(x=mc_result['mean_profit'], line_dash="dash", line_color="green", 
+                 annotation_text=f"평균: ${mc_result['mean_profit']:,.0f}")
+    fig.add_vline(x=mc_result['var_95'], line_dash="dot", line_color="orange", 
+                 annotation_text=f"VaR 95%: ${mc_result['var_95']:,.0f}")
+    fig.add_vline(x=0, line_dash="solid", line_color="red", 
+                 annotation_text="손익 분기점")
+    
+    fig.update_layout(
+        title=f"Monte Carlo 시뮬레이션 결과 ({mc_result['num_simulations']:,}회)",
+        xaxis_title="손익 (USD)",
+        yaxis_title="발생 횟수",
+        height=400,
+        showlegend=False
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # 상세 통계
+    with st.expander("📊 상세 통계"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            **기본 통계:**
+            - 평균: ${mc_result['mean_profit']:,.2f}
+            - 중간값: ${mc_result['median_profit']:,.2f}
+            - 표준편차: ${mc_result['std_dev']:,.2f}
+            - 25백분위수: ${mc_result['percentile_25']:,.2f}
+            - 75백분위수: ${mc_result['percentile_75']:,.2f}
+            """)
+        
+        with col2:
+            st.markdown(f"""
+            **승패 분석:**
+            - 승률: {mc_result['win_rate_actual']:.1f}%
+            - 승리: {mc_result['win_count']:,}회
+            - 패배: {mc_result['loss_count']:,}회
+            - 총수익: ${mc_result['total_profit']:,.2f}
+            - 총손실: ${mc_result['total_loss']:,.2f}
+            - Profit Factor: {mc_result['profit_factor']:.2f}
+            """)
+
+
+def render_strategy_comparison(comparison: dict, investment_amount: float):
+    """🏆 Position Sizing 전략 비교"""
+    st.markdown("<div class='section-title'>🏆 Position Sizing 전략 비교</div>", unsafe_allow_html=True)
+    
+    strategies = comparison['strategies']
+    recommended = comparison['recommended_strategy']
+    
+    # 비교 표
+    st.markdown("### 📊 4가지 전략 비교")
+    
+    data = []
+    for key, strategy in strategies.items():
+        is_recommended = (key == recommended)
+        emoji = "⭐" if is_recommended else ""
+        
+        data.append({
+            '전략': f"{emoji} {strategy['name']}",
+            '리스크 비율': f"{strategy['risk_pct']:.2f}%",
+            '포지션 크기': f"{strategy['position_size']:.6f}",
+            '포지션 가치': f"${strategy['position_value']:,.0f}",
+            '최대 손실': f"${strategy['max_loss']:,.0f}",
+            '최대 수익': f"${strategy['max_profit']:,.0f}",
+            '필요 증거금': f"${strategy['required_margin']:,.0f}"
+        })
+    
+    import pandas as pd
+    df_comparison = pd.DataFrame(data)
+    st.dataframe(df_comparison, use_container_width=True, hide_index=True)
+    
+    # 권장 전략
+    st.markdown("---")
+    recommended_strategy = strategies[recommended]
+    
+    st.success(f"""
+    ⭐ **권장 전략: {recommended_strategy['name']}**
+    
+    - 포지션 크기: **{recommended_strategy['position_size']:.6f} 코인**
+    - 리스크 비율: **{recommended_strategy['risk_pct']:.2f}%**
+    - 예상 손실: **${recommended_strategy['max_loss']:,.2f}**
+    - 예상 수익: **${recommended_strategy['max_profit']:,.2f}**
+    """)
+    
+    # 전략별 특징
+    with st.expander("📚 전략별 특징"):
+        st.markdown("""
+        **1️⃣ 고정 비율 (Fixed Fractional 2%)**
+        - 가장 단순하고 안정적
+        - 모든 거래에 동일한 리스크 적용
+        - 초보자에게 추천
+        
+        **2️⃣ Kelly Criterion (Half Kelly)**
+        - 수학적 최적화 기반
+        - AI 신뢰도와 RR Ratio를 고려
+        - 승률이 높을 때 포지션 확대
+        - 중급자 이상 추천
+        
+        **3️⃣ 변동성 조정 (Volatility Adjusted)**
+        - 시장 변동성에 따라 자동 조정
+        - 변동성 높을 때 포지션 축소
+        - 리스크 회피형 트레이더에게 적합
+        
+        **4️⃣ AI 신뢰도 기반**
+        - AI 예측 신뢰도를 직접 반영
+        - 신뢰도 높을 때 공격적
+        - AI 모델 성능을 신뢰하는 경우
+        """)
 
 
 def render_portfolio_backtest(price_data_df, symbol_name):
@@ -4583,7 +5257,62 @@ if bt:
         # [추가됨] 포지션 추천 렌더링 (매매 전략 직후)
         render_position_recommendation(position_recommendation)
         
+        # [추가됨] v2.8.0: 고급 리스크 관리 분석
+        st.markdown("---")
+        st.markdown("<div class='section-title'>🛡️ 고급 리스크 관리 분석</div>", unsafe_allow_html=True)
+        
+        # 1. Kelly Criterion 분석
+        kelly_result = calculate_kelly_criterion(
+            ai_confidence=ai_prediction['confidence'],
+            rr_ratio=rr_ratio,
+            kelly_fraction=0.5  # Half Kelly
+        )
+        render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
+        
+        # 2. Trailing Stop Loss 분석
+        st.markdown("---")
+        highest_price = df['High'].tail(20).max()  # 최근 20개 캠들 중 최고가
+        trailing_result = calculate_trailing_stop(
+            entry_price=entry_price,
+            current_price=current_price,
+            highest_price=max(entry_price, highest_price),
+            atr=atr,
+            atr_multiplier=stop_loss_k,
+            position_type='LONG',
+            min_profit_pct=0.01
+        )
+        render_trailing_stop_info(trailing_result, entry_price, current_price)
+        
+        # 3. Monte Carlo 시뮬레이션
+        st.markdown("---")
+        mc_result = monte_carlo_simulation(
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            position_size=position_size,
+            win_probability=ai_prediction['confidence'] / 100.0,
+            num_simulations=10000,
+            use_normal_distribution=True,
+            volatility=volatility
+        )
+        render_monte_carlo_results(mc_result, investment_amount)
+        
+        # 4. Position Sizing 전략 비교
+        st.markdown("---")
+        strategy_comparison = compare_position_sizing_strategies(
+            investment_amount=investment_amount,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ai_confidence=ai_prediction['confidence'],
+            volatility=volatility,
+            leverage=leverage_info['recommended'],
+            rr_ratio=rr_ratio
+        )
+        render_strategy_comparison(strategy_comparison, investment_amount)
+        
         # 매도 전략 (신규)
+        st.markdown("---")
         render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
