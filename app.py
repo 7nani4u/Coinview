@@ -5106,3 +5106,69 @@ if bt:
             st.code(str(e))
             import traceback
             st.code(traceback.format_exc())
+
+# === FIX: Canonical calculate_trailing_stop (overrides earlier duplicates) ===
+def calculate_trailing_stop(entry_price: float,
+                             current_price: float,
+                             highest_price: float,
+                             atr: float,
+                             atr_multiplier: float = 2.0,
+                             position_type: str = 'LONG',
+                             min_profit_pct: float = 0.01) -> dict:
+    """
+    Trailing Stop Loss 계산 (ATR 기반)
+    - 가격 상승 시 Stop Loss도 따라 상승
+    - 하락 시 Stop Loss 고정
+    - 이익 보호 + 추세 지속 허용
+    """
+    position_type = (position_type or 'LONG').upper()
+
+    # 방어적 가드: 0 나누기/이상치
+    if entry_price is None or current_price is None or atr is None:
+        raise ValueError("entry_price, current_price, atr는 None일 수 없습니다.")
+    if current_price <= 0 or entry_price <= 0:
+        raise ValueError("entry_price와 current_price는 0보다 커야 합니다.")
+    if atr < 0:
+        raise ValueError("atr는 0 이상이어야 합니다.")
+
+    if position_type == 'LONG':
+        initial_stop = entry_price - (atr * atr_multiplier)
+        trailing_stop = max(highest_price, entry_price) - (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 + min_profit_pct)
+
+        final_stop = max(initial_stop, trailing_stop)
+        if current_price > min_stop_with_profit:
+            final_stop = max(final_stop, min_stop_with_profit)
+        # 현재가의 95%를 넘지 않도록 클램프 (너무 타이트한 손절 방지)
+        final_stop = min(final_stop, current_price * 0.95)
+
+        locked_profit_pct = ((final_stop - entry_price) / entry_price) * 100 if final_stop > entry_price else 0.0
+        distance_from_current = ((current_price - final_stop) / current_price) * 100
+    else:  # SHORT
+        initial_stop = entry_price + (atr * atr_multiplier)
+        lowest_price = min(highest_price, entry_price)
+        trailing_stop = lowest_price + (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 - min_profit_pct)
+
+        final_stop = min(initial_stop, trailing_stop)
+        if current_price < min_stop_with_profit:
+            final_stop = min(final_stop, min_stop_with_profit)
+        # 현재가의 105%보다 아래로 떨어지지 않도록 클램프
+        final_stop = max(final_stop, current_price * 1.05)
+
+        locked_profit_pct = ((entry_price - final_stop) / entry_price) * 100 if final_stop < entry_price else 0.0
+        distance_from_current = ((final_stop - current_price) / current_price) * 100
+
+    moved = abs(trailing_stop - initial_stop) > (atr * 0.1)
+
+    return {
+        'initial_stop': round(initial_stop, 2),
+        'trailing_stop': round(trailing_stop, 2),
+        'final_stop': round(final_stop, 2),
+        'distance_from_current': round(distance_from_current, 2),
+        'moved': moved,
+        'locked_profit_pct': round(locked_profit_pct, 2),
+        'atr_used': atr,
+        'atr_multiplier': atr_multiplier,
+        'position_type': position_type
+    }
