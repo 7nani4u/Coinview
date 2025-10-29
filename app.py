@@ -1899,14 +1899,21 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
     maximum_leverage = max(recommended_leverage + 1, min(maximum_leverage, float(max_leverage)))
     maximum_leverage = round(maximum_leverage, 1)
     
-    # [추가됨] v2.3.0: 리스크 레벨 판단
+    # [수정됨] v2.9.0.2: 리스크 레벨 판단 로직 수정
+    # 리스크 점수 = 코인 리스크 * 변동성 * 100
     risk_score = crypto_factor * volatility * 100
-    if risk_score < 3:
-        risk_level = "중간"
+    
+    # 리스크 레벨 분류 (세분화)
+    if risk_score < 2:
+        risk_level = "매우 낮음"  # 안정적 (BTC + 낮은 변동성)
+    elif risk_score < 4:
+        risk_level = "낮음"  # 보수적
     elif risk_score < 6:
-        risk_level = "중간"
+        risk_level = "중간"  # 중립적
+    elif risk_score < 8:
+        risk_level = "높음"  # 공격적
     else:
-        risk_level = "중간"
+        risk_level = "매우 높음"  # 매우 위험 (알트코인 + 높은 변동성)
     
     return {
         'recommended': recommended_leverage,
