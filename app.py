@@ -1926,7 +1926,8 @@ def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: f
     if rr_ratio <= 0:
         return {'kelly_full': 0.0, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
                 'position_pct': 0.0, 'recommendation': 'NO TRADE',
-                'risk_category': 'INVALID', 'reason': 'RR Ratio가 0 이하입니다.'}
+                'risk_category': 'INVALID', 'reason': 'RR Ratio가 0 이하입니다.',
+                'win_rate_used': p, 'rr_ratio_used': rr_ratio, 'kelly_fraction_used': kelly_fraction}
     
     b = rr_ratio
     kelly_full = (b * p - q) / b
@@ -1935,7 +1936,8 @@ def calculate_kelly_criterion(ai_confidence: float, rr_ratio: float, win_rate: f
         return {'kelly_full': kelly_full, 'kelly_adjusted': 0.0, 'kelly_capped': 0.0,
                 'position_pct': 0.0, 'recommendation': 'NO TRADE',
                 'risk_category': 'NEGATIVE_EXPECTANCY',
-                'reason': f'기대값이 음수입니다 (p={p:.1%}, b={b:.2f})'}
+                'reason': f'기대값이 음수입니다 (p={p:.1%}, b={b:.2f})',
+                'win_rate_used': p, 'rr_ratio_used': b, 'kelly_fraction_used': kelly_fraction}
     
     kelly_adjusted = kelly_full * kelly_fraction
     kelly_capped = min(kelly_adjusted, max_position)
@@ -4290,15 +4292,18 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
             </div>
             """, unsafe_allow_html=True)
         
-        # 차이 분석
-        diff_pct = ((kelly_position_size - current_position_size) / current_position_size) * 100
-        if abs(diff_pct) > 10:
-            if diff_pct > 0:
-                st.info(f"📈 Kelly Criterion은 현재보다 **{diff_pct:.1f}% 더 큰** 포지션을 권장합니다. (AI 신뢰도가 높고 RR Ratio가 좋음)")
+        # 차이 분석 (0 나누기 보호)
+        if current_position_size > 0:
+            diff_pct = ((kelly_position_size - current_position_size) / current_position_size) * 100
+            if abs(diff_pct) > 10:
+                if diff_pct > 0:
+                    st.info(f"📈 Kelly Criterion은 현재보다 **{diff_pct:.1f}% 더 큰** 포지션을 권장합니다. (AI 신뢰도가 높고 RR Ratio가 좋음)")
+                else:
+                    st.warning(f"📉 Kelly Criterion은 현재보다 **{abs(diff_pct):.1f}% 더 작은** 포지션을 권장합니다. (AI 신뢰도가 낮거나 RR Ratio가 난조함)")
             else:
-                st.warning(f"📉 Kelly Criterion은 현재보다 **{abs(diff_pct):.1f}% 더 작은** 포지션을 권장합니다. (AI 신뢰도가 낮거나 RR Ratio가 난조함)")
+                st.success("✅ Kelly Criterion과 현재 전략이 유사합니다. (±10% 이내)")
         else:
-            st.success("✅ Kelly Criterion과 현재 전략이 유사합니다. (±10% 이내)")
+            st.warning("⚠️ 현재 포지션 크기가 0이어서 비교할 수 없습니다.")
     
     else:
         st.error(f"❌ {kelly_result['reason']}")
@@ -4306,11 +4311,16 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
     
     # 상세 정보
     with st.expander("📖 Kelly Criterion 상세 정보"):
+        # 안전하게 키 접근
+        win_rate_used = kelly_result.get('win_rate_used', 0.5)
+        rr_ratio_used = kelly_result.get('rr_ratio_used', 1.0)
+        kelly_fraction_used = kelly_result.get('kelly_fraction_used', 0.5)
+        
         st.markdown(f"""
         **입력 파라미터:**
-        - 승률 (Win Rate): {kelly_result['win_rate_used']:.1%}
-        - RR Ratio: {kelly_result['rr_ratio_used']:.2f}
-        - Kelly Fraction: {kelly_result['kelly_fraction_used']:.0%} (Half Kelly)
+        - 승률 (Win Rate): {win_rate_used:.1%}
+        - RR Ratio: {rr_ratio_used:.2f}
+        - Kelly Fraction: {kelly_fraction_used:.0%} (Half Kelly)
         
         **공식:**
         ```
@@ -4457,11 +4467,13 @@ def render_monte_carlo_results(mc_result: dict, investment_amount: float):
         )
     
     with col4:
-        pf_color = "green" if mc_result['profit_factor'] > 1.5 else "orange" if mc_result['profit_factor'] > 1.0 else "red"
+        pf = mc_result['profit_factor']
+        pf_display = "∞" if pf == float('inf') else f"{pf:.2f}"
+        pf_color = "green" if pf > 1.5 else "orange" if pf > 1.0 else "red"
         st.metric(
             label="Profit Factor",
-            value=f"{mc_result['profit_factor']:.2f}",
-            help="총수익 / 총손실 (기대값"
+            value=pf_display,
+            help="총수익 / 총손실 (기대값)"
         )
     
     # 리스크 분석
