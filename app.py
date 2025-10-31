@@ -9,6 +9,7 @@
 
 🟢 v2.8.0 신규 기능:
 1. Kelly Criterion: AI 신뢰도 기반 최적 Position Size
+2. Trailing Stop Loss: 동적 손절가 (ATR 기반)
 3. Monte Carlo 시뮬레이션: 확률적 손익 분석
 4. Position Sizing 전략 비교: 4가지 전략 성과 비교
 5. 포트폴리오 리스크 관리: 다중 포지션 통합 분석
@@ -2597,6 +2598,64 @@ def analyze_comprehensive_market(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def calculate_trailing_stop(entry_price: float, current_price: float, highest_price: float,
+                            atr: float, atr_multiplier: float = 2.0, position_type: str = 'LONG',
+                            min_profit_pct: float = 0.01) -> dict:
+    """
+    Trailing Stop Loss 계산 (ATR 기반)
+    - 가격 상승 시 Stop Loss도 따라 상승
+    - 하락 시 Stop Loss 고정
+    - 이익 보호 + 추세 지속 허용
+    """
+    position_type = position_type.upper()
+    
+    if position_type == 'LONG':
+        initial_stop = entry_price - (atr * atr_multiplier)
+        trailing_stop = highest_price - (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 + min_profit_pct)
+        
+        final_stop = max(initial_stop, trailing_stop)
+        if current_price > min_stop_with_profit:
+            final_stop = max(final_stop, min_stop_with_profit)
+        if final_stop > current_price * 0.95:
+            final_stop = current_price * 0.95
+        
+        locked_profit_pct = ((final_stop - entry_price) / entry_price) * 100 if final_stop > entry_price else 0.0
+        distance_from_current = ((current_price - final_stop) / current_price) * 100
+    else:  # SHORT
+        initial_stop = entry_price + (atr * atr_multiplier)
+        lowest_price = highest_price
+        trailing_stop = lowest_price + (atr * atr_multiplier)
+        min_stop_with_profit = entry_price * (1 - min_profit_pct)
+        
+        final_stop = min(initial_stop, trailing_stop)
+        if current_price < min_stop_with_profit:
+            final_stop = min(final_stop, min_stop_with_profit)
+        if final_stop < current_price * 1.05:
+            final_stop = current_price * 1.05
+        
+        locked_profit_pct = ((entry_price - final_stop) / entry_price) * 100 if final_stop < entry_price else 0.0
+        distance_from_current = ((final_stop - current_price) / current_price) * 100
+    
+    moved = abs(trailing_stop - initial_stop) > (atr * 0.1)
+    
+    return {
+        'initial_stop': round(initial_stop, 2),
+        'trailing_stop': round(trailing_stop, 2),
+        'final_stop': round(final_stop, 2),
+        'distance_from_current': round(distance_from_current, 2),
+        'moved': moved,
+        'locked_profit_pct': round(locked_profit_pct, 2),
+        'atr_used': atr,
+        'atr_multiplier': atr_multiplier,
+        'position_type': position_type
+    }
+
+
+
+
+# [v2.9.0] Monte Carlo simulation removed
+
 def compare_position_sizing_strategies(investment_amount: float, entry_price: float,
                                       stop_loss: float, take_profit: float,
                                       ai_confidence: float, volatility: float,
@@ -4663,6 +4722,107 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
         """)
 
 
+def render_trailing_stop_info(trailing_result: dict, entry_price: float, current_price: float):
+    """📍 Trailing Stop Loss 정보 표시"""
+    st.markdown("<div class='section-title'>📍 Trailing Stop Loss 분석</div>", unsafe_allow_html=True)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="초기 손절가",
+            value=f"${trailing_result['initial_stop']:,.2f}",
+            help="진입 시점의 고정 손절가"
+        )
+    
+    with col2:
+        movement_delta = trailing_result['trailing_stop'] - trailing_result['initial_stop']
+        st.metric(
+            label="Trailing 손절가",
+            value=f"${trailing_result['trailing_stop']:,.2f}",
+            delta=f"${movement_delta:,.2f}" if trailing_result['moved'] else "0",
+            help="최고가 기준 동적 조정"
+        )
+    
+    with col3:
+        st.metric(
+            label="최종 손절가",
+            value=f"${trailing_result['final_stop']:,.2f}",
+            delta=f"{trailing_result['distance_from_current']:.2f}%",
+            help="현재가 대비 거리"
+        )
+    
+    with col4:
+        if trailing_result['locked_profit_pct'] > 0:
+            st.metric(
+                label="확정 수익",
+                value=f"+{trailing_result['locked_profit_pct']:.2f}%",
+                help="손절가가 진입가 위로 올라가 수익 확정"
+            )
+        else:
+            st.metric(
+                label="확정 수익",
+                value="아직 없음",
+                help="손절가가 아직 진입가 아래"
+            )
+    
+    # Trailing Stop 설명
+    st.markdown("---")
+    
+    if trailing_result['moved']:
+        st.success("✅ Trailing Stop이 활성화되었습니다!")
+        st.info(f"""
+        📍 **Trailing Stop 동작 원리:**
+        
+        1. 초기 손절가: ${trailing_result['initial_stop']:,.2f} (진입 시 ATR 기반)
+        2. 가격이 상승하면 손절가도 따라 상승
+        3. 가격이 하락해도 손절가는 고정 (수익 보호)
+        4. 현재 손절가: ${trailing_result['final_stop']:,.2f}
+        
+        ✨ **장점:** 이익을 보호하면서 추세를 최대한 활용할 수 있습니다.
+        """)
+        
+        if trailing_result['locked_profit_pct'] > 0:
+            st.success(f"🎉 축하합니다! 현재 최소 **+{trailing_result['locked_profit_pct']:.2f}%**의 수익이 확정되었습니다.")
+    else:
+        st.info("📌 Trailing Stop이 아직 활성화되지 않았습니다. (가격이 충분히 상승하면 자동 활성화)")
+    
+    # 시각화
+    with st.expander("📈 Trailing Stop 시각화"):
+        fig = go.Figure()
+        
+        # 가격 범위
+        price_range = [entry_price * 0.95, current_price * 1.05]
+        
+        # 진입가
+        fig.add_hline(y=entry_price, line_dash="dash", line_color="blue", 
+                     annotation_text="진입가", annotation_position="right")
+        
+        # 현재가
+        fig.add_hline(y=current_price, line_dash="solid", line_color="green", 
+                     annotation_text="현재가", annotation_position="right")
+        
+        # 초기 손절가
+        fig.add_hline(y=trailing_result['initial_stop'], line_dash="dot", line_color="orange", 
+                     annotation_text="초기 Stop", annotation_position="left")
+        
+        # 최종 손절가
+        fig.add_hline(y=trailing_result['final_stop'], line_dash="solid", line_color="red", 
+                     annotation_text="Trailing Stop", annotation_position="left")
+        
+        fig.update_layout(
+            title="Trailing Stop Loss 시각화",
+            yaxis_title="가격 (USD)",
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+
+
+# [v2.9.0] Monte Carlo UI rendering removed
+
 def render_strategy_comparison(comparison: dict, investment_amount: float):
     """🏆 Position Sizing 전략 비교"""
     st.markdown("<div class='section-title'>🏆 Position Sizing 전략 비교</div>", unsafe_allow_html=True)
@@ -4808,227 +4968,7 @@ def render_technical_indicators(df: pd.DataFrame):
 # ────────────────────────────────────────────────────────────────────────
 # 메인 UI
 # ────────────────────────────────────────────────────────────────────────
-
-# ═══════════════════════════════════════════════════════════
-# 실시간 글로벌 데이터 UI 렌더링 함수 (v2.9.0)
-# ═══════════════════════════════════════════════════════════
-
-def render_news_analysis(news_analysis: Dict, news_data: Dict):
-    """뉴스 분석 결과 렌더링"""
-    st.markdown("### 📡 실시간 글로벌 뉴스 분석")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        sentiment = news_analysis['overall_sentiment']
-        emoji = "🟢" if sentiment == 'Bullish' else ("🔴" if sentiment == 'Bearish' else "🟡")
-        st.metric(
-            label="전체 센티먼트",
-            value=f"{emoji} {sentiment}",
-            help="뉴스 전체의 시장 심리"
-        )
-    
-    with col2:
-        confidence = news_analysis['confidence']
-        st.metric(
-            label="신뢰도",
-            value=f"{confidence:.1%}",
-            help="센티먼트 분석의 신뢰도"
-        )
-    
-    with col3:
-        impact = news_analysis['market_impact']
-        impact_emoji = {"High": "🔥", "Medium": "⚖️", "Low": "💤"}
-        st.metric(
-            label="시장 영향도",
-            value=f"{impact_emoji.get(impact, '')} {impact}",
-            help="뉴스가 시장에 미치는 영향의 크기"
-        )
-    
-    # 주요 뉴스 표시
-    if news_data.get('news'):
-        st.markdown("#### 📰 최근 주요 뉴스 (Top 3)")
-        for i, news in enumerate(news_data['news'][:3], 1):
-            sentiment_emoji = {
-                'positive': '👍',
-                'negative': '👎',
-                'neutral': '😐'
-            }
-            emoji = sentiment_emoji.get(news['sentiment'], '📰')
-            st.markdown(f"{emoji} **[{news['title']}]({news['url']})**")
-            st.caption(f"출처: {news['source']} | {news['published_at'][:10]}")
-    
-    st.markdown(f"**💡 추천:** {news_analysis['recommendation']}")
-
-
-def render_economic_indicators(fred_data: Dict):
-    """경제 지표 렌더링"""
-    st.markdown("### 🤖 실시간 경제 지표 (FRED)")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="최신 CPI",
-            value=f"{fred_data['latest_value']:.2f}",
-            help="미국 소비자물가지수 (Consumer Price Index)"
-        )
-    
-    with col2:
-        change_mom = fred_data['change_mom']
-        color = "🔴" if change_mom > 0 else "🔵"
-        st.metric(
-            label="MoM 변화",
-            value=f"{color} {change_mom:+.2f}%",
-            help="전월 대비 변화율 (Month-over-Month)"
-        )
-    
-    with col3:
-        change_yoy = fred_data['change_yoy']
-        color = "🔴" if change_yoy > 0 else "🔵"
-        st.metric(
-            label="YoY 변화",
-            value=f"{color} {change_yoy:+.2f}%",
-            help="전년 대비 변화율 (Year-over-Year)"
-        )
-    
-    with col4:
-        trend = fred_data['trend']
-        trend_emoji = {"Rising": "📈", "Falling": "📉", "Stable": "➡️"}
-        st.metric(
-            label="트렌드",
-            value=f"{trend_emoji.get(trend, '')} {trend}",
-            help="현재 경제 지표 추세"
-        )
-    
-    # 해석
-    if trend == 'Rising':
-        st.info("📊 인플레이션 상승 중 → 암호화폐 헤지 수요 증가 가능")
-    elif trend == 'Falling':
-        st.success("📊 인플레이션 하락 중 → 매크로 리스크 감소")
-    else:
-        st.info("📊 안정적인 경제 환경 유지")
-
-
-def render_onchain_metrics(dominance_data: Dict, kimchi_data: Dict, funding_data: Dict):
-    """온체인 메트릭 렌더링"""
-    st.markdown("### 📊 온체인 메트릭스")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("#### 🪙 BTC 도미넌스")
-        if dominance_data.get('status') == 'success':
-            dominance = dominance_data['dominance']
-            st.metric(
-                label="시가총액 점유율",
-                value=f"{dominance:.2f}%",
-                help="전체 암호화폐 시가총액 중 비트코인 비율"
-            )
-            
-            if dominance > 45:
-                st.success("✅ BTC 강세 → 안정적 시장")
-            elif dominance > 40:
-                st.info("⚖️ 균형 상태")
-            else:
-                st.warning("⚠️ 알트코인 시즌 → 변동성 주의")
-        else:
-            st.error("❌ 데이터 수집 실패")
-    
-    with col2:
-        st.markdown("#### 🇰🇷 김치 프리미엄")
-        if kimchi_data.get('status') == 'success':
-            premium = kimchi_data['premium']
-            st.metric(
-                label="한국 vs 글로벌",
-                value=f"{premium:+.2f}%",
-                help="한국 거래소와 글로벌 거래소의 가격 차이"
-            )
-            
-            if premium > 3:
-                st.success(f"✅ 긍정적 프리미엄 → 한국 투자 심리 좋음")
-            elif premium < -3:
-                st.error(f"⚠️ 네거티브 프리미엄 → 한국 투자 심리 악화")
-            else:
-                st.info("⚖️ 정상 범위")
-        else:
-            st.error("❌ 데이터 수집 실패")
-    
-    with col3:
-        st.markdown("#### 💰 펀딩비 (Funding Rate)")
-        if funding_data.get('status') == 'success':
-            funding = funding_data['funding_rate']
-            st.metric(
-                label="선물 펀딩비",
-                value=f"{funding:+.4f}%",
-                help="선물 시장의 롱/숏 균형 지표"
-            )
-            
-            if funding > 0.1:
-                st.warning("⚠️ 롱 과열 → 청산 리스크")
-            elif funding < -0.05:
-                st.info("💡 숏 우세 → 숏 스퀴즈 가능")
-            else:
-                st.success("✅ 균형 잡힌 상태")
-        else:
-            st.error("❌ 데이터 수집 실패")
-
-
-def render_comprehensive_analysis(analysis: Dict):
-    """종합 분석 결과 렌더링"""
-    st.markdown("### 🎯 종합 시장 분석")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        score = analysis['overall_score']
-        st.metric(
-            label="종합 점수",
-            value=f"{score:.0f}/100",
-            help="모든 지표를 종합한 시장 점수"
-        )
-        # 점수 바 표시
-        bar_length = int(score / 10)
-        bar = "█" * bar_length + "░" * (10 - bar_length)
-        st.text(bar)
-    
-    with col2:
-        recommendation = analysis['recommendation']
-        rec_emoji = {
-            "Strong Buy": "💪",
-            "Buy": "👍",
-            "Hold": "🤝",
-            "Sell": "👎",
-            "Strong Sell": "🚨"
-        }
-        rec_color = {
-            "Strong Buy": "success",
-            "Buy": "info",
-            "Hold": "warning",
-            "Sell": "warning",
-            "Strong Sell": "error"
-        }
-        
-        st.metric(
-            label="추천 등급",
-            value=f"{rec_emoji.get(recommendation, '')} {recommendation}",
-            help="종합 분석 기반 투자 추천"
-        )
-    
-    with col3:
-        risk_level = analysis['risk_level']
-        risk_emoji = {
-            "Low": "🟢",
-            "Medium": "🟡",
-            "High": "🟠",
-            "Very High": "🔴"
-        }
-        st.metric(
-            label="리스크 레벨",
-            value=f"{risk_emoji.get(risk_level, '')} {risk_level}",
-            help="현재 시장의 리스크 수준"
-        )
-    
+with st.sidebar:
     st.markdown("# 🚀 설정")
     st.markdown("---")
     
@@ -5591,8 +5531,24 @@ if bt:
         )
         render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
         
+        # 2. Trailing Stop Loss 분석
         st.markdown("---")
         highest_price = df['High'].tail(20).max()  # 최근 20개 캠들 중 최고가
+        trailing_result = calculate_trailing_stop(
+            entry_price=entry_price,
+            current_price=current_price,
+            highest_price=max(entry_price, highest_price),
+            atr=atr,
+            atr_multiplier=stop_loss_k,
+            position_type='LONG',
+            min_profit_pct=0.01
+        )
+        render_trailing_stop_info(trailing_result, entry_price, current_price)
+        
+        # 3. Monte Carlo 시뮬레이션
+        st.markdown("---")
+
+        # 3. 실시간 글로벌 데이터 통합 분석 (v2.9.0)
         st.markdown('---')
         st.markdown('<div class="section-title">🌐 실시간 글로벌 시장 데이터</div>', unsafe_allow_html=True)
         
@@ -5613,7 +5569,7 @@ if bt:
         
         with st.spinner('🌍 경제 지표 수집...'):
             fred_data = fetch_fred_economic_data('CPIAUCSL', fred_key, 12)
-        render_economic_indicators(fred_data)
+        render_macro_indicators(fred_data)
         st.markdown('---')
         
         with st.spinner('⛓️ 온체인 데이터 수집...'):
@@ -5702,3 +5658,234 @@ if bt:
 # v2.9.0: 실시간 데이터 UI 렌더링 함수들
 # ═══════════════════════════════════════════════════════════════
 
+def render_news_analysis(news_analysis: Dict, news_data: Dict):
+    """뉴스 분석 결과 렌더링"""
+    st.markdown("### 📡 실시간 글로벌 뉴스 분석")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        sentiment = news_analysis['overall_sentiment']
+        emoji = "🟢" if sentiment == 'Bullish' else ("🔴" if sentiment == 'Bearish' else "🟡")
+        st.metric(
+            label="전체 센티먼트",
+            value=f"{emoji} {sentiment}",
+            help="뉴스 전체의 시장 심리"
+        )
+    
+    with col2:
+        confidence = news_analysis['confidence']
+        st.metric(
+            label="신뢰도",
+            value=f"{confidence:.1%}",
+            help="센티먼트 분석의 신뢰도"
+        )
+    
+    with col3:
+        impact = news_analysis['market_impact']
+        impact_emoji = {"High": "🔥", "Medium": "⚖️", "Low": "💤"}
+        st.metric(
+            label="시장 영향도",
+            value=f"{impact_emoji.get(impact, '')} {impact}",
+            help="뉴스가 시장에 미치는 영향의 크기"
+        )
+    
+    # 주요 뉴스 표시
+    if news_data.get('news'):
+        st.markdown("#### 📰 최근 주요 뉴스 (Top 3)")
+        for i, news in enumerate(news_data['news'][:3], 1):
+            sentiment_emoji = {
+                'positive': '👍',
+                'negative': '👎',
+                'neutral': '😐'
+            }
+            emoji = sentiment_emoji.get(news['sentiment'], '📰')
+            st.markdown(f"{emoji} **[{news['title']}]({news['url']})**")
+            st.caption(f"출처: {news['source']} | {news['published_at'][:10]}")
+    
+    st.markdown(f"**💡 추천:** {news_analysis['recommendation']}")
+
+
+def render_economic_indicators(fred_data: Dict):
+    """경제 지표 렌더링"""
+    st.markdown("### 🤖 실시간 경제 지표 (FRED)")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            label="최신 CPI",
+            value=f"{fred_data['latest_value']:.2f}",
+            help="미국 소비자물가지수 (Consumer Price Index)"
+        )
+    
+    with col2:
+        change_mom = fred_data['change_mom']
+        color = "🔴" if change_mom > 0 else "🔵"
+        st.metric(
+            label="MoM 변화",
+            value=f"{color} {change_mom:+.2f}%",
+            help="전월 대비 변화율 (Month-over-Month)"
+        )
+    
+    with col3:
+        change_yoy = fred_data['change_yoy']
+        color = "🔴" if change_yoy > 0 else "🔵"
+        st.metric(
+            label="YoY 변화",
+            value=f"{color} {change_yoy:+.2f}%",
+            help="전년 대비 변화율 (Year-over-Year)"
+        )
+    
+    with col4:
+        trend = fred_data['trend']
+        trend_emoji = {"Rising": "📈", "Falling": "📉", "Stable": "➡️"}
+        st.metric(
+            label="트렌드",
+            value=f"{trend_emoji.get(trend, '')} {trend}",
+            help="현재 경제 지표 추세"
+        )
+    
+    # 해석
+    if trend == 'Rising':
+        st.info("📊 인플레이션 상승 중 → 암호화폐 헤지 수요 증가 가능")
+    elif trend == 'Falling':
+        st.success("📊 인플레이션 하락 중 → 매크로 리스크 감소")
+    else:
+        st.info("📊 안정적인 경제 환경 유지")
+
+
+def render_onchain_metrics(dominance_data: Dict, kimchi_data: Dict, funding_data: Dict):
+    """온체인 메트릭 렌더링"""
+    st.markdown("### 📊 온체인 메트릭스")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### 🪙 BTC 도미넌스")
+        if dominance_data.get('status') == 'success':
+            dominance = dominance_data['dominance']
+            st.metric(
+                label="시가총액 점유율",
+                value=f"{dominance:.2f}%",
+                help="전체 암호화폐 시가총액 중 비트코인 비율"
+            )
+            
+            if dominance > 45:
+                st.success("✅ BTC 강세 → 안정적 시장")
+            elif dominance > 40:
+                st.info("⚖️ 균형 상태")
+            else:
+                st.warning("⚠️ 알트코인 시즌 → 변동성 주의")
+        else:
+            st.error("❌ 데이터 수집 실패")
+    
+    with col2:
+        st.markdown("#### 🇰🇷 김치 프리미엄")
+        if kimchi_data.get('status') == 'success':
+            premium = kimchi_data['premium']
+            st.metric(
+                label="한국 vs 글로벌",
+                value=f"{premium:+.2f}%",
+                help="한국 거래소와 글로벌 거래소의 가격 차이"
+            )
+            
+            if premium > 3:
+                st.success(f"✅ 긍정적 프리미엄 → 한국 투자 심리 좋음")
+            elif premium < -3:
+                st.error(f"⚠️ 네거티브 프리미엄 → 한국 투자 심리 악화")
+            else:
+                st.info("⚖️ 정상 범위")
+        else:
+            st.error("❌ 데이터 수집 실패")
+    
+    with col3:
+        st.markdown("#### 💰 펀딩비 (Funding Rate)")
+        if funding_data.get('status') == 'success':
+            funding = funding_data['funding_rate']
+            st.metric(
+                label="선물 펀딩비",
+                value=f"{funding:+.4f}%",
+                help="선물 시장의 롱/숏 균형 지표"
+            )
+            
+            if funding > 0.1:
+                st.warning("⚠️ 롱 과열 → 청산 리스크")
+            elif funding < -0.05:
+                st.info("💡 숏 우세 → 숏 스퀴즈 가능")
+            else:
+                st.success("✅ 균형 잡힌 상태")
+        else:
+            st.error("❌ 데이터 수집 실패")
+
+
+def render_comprehensive_analysis(analysis: Dict):
+    """종합 분석 결과 렌더링"""
+    st.markdown("### 🎯 종합 시장 분석")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        score = analysis['overall_score']
+        st.metric(
+            label="종합 점수",
+            value=f"{score:.0f}/100",
+            help="모든 지표를 종합한 시장 점수"
+        )
+        # 점수 바 표시
+        bar_length = int(score / 10)
+        bar = "█" * bar_length + "░" * (10 - bar_length)
+        st.text(bar)
+    
+    with col2:
+        recommendation = analysis['recommendation']
+        rec_emoji = {
+            "Strong Buy": "💪",
+            "Buy": "👍",
+            "Hold": "🤝",
+            "Sell": "👎",
+            "Strong Sell": "🚨"
+        }
+        rec_color = {
+            "Strong Buy": "success",
+            "Buy": "info",
+            "Hold": "warning",
+            "Sell": "warning",
+            "Strong Sell": "error"
+        }
+        
+        st.metric(
+            label="추천 등급",
+            value=f"{rec_emoji.get(recommendation, '')} {recommendation}",
+            help="종합 분석 기반 투자 추천"
+        )
+    
+    with col3:
+        risk_level = analysis['risk_level']
+        risk_emoji = {
+            "Low": "🟢",
+            "Medium": "🟡",
+            "High": "🟠",
+            "Very High": "🔴"
+        }
+        st.metric(
+            label="리스크 레벨",
+            value=f"{risk_emoji.get(risk_level, '')} {risk_level}",
+            help="현재 시장의 리스크 수준"
+        )
+    
+    # 주요 분석 요인
+    st.markdown("#### 📋 주요 분석 요인")
+    for factor in analysis['key_factors']:
+        st.markdown(f"- {factor}")
+    
+    st.markdown(f"**신뢰도:** {analysis['confidence']:.1%}")
+    st.caption(f"분석 시간: {analysis['timestamp'][:19]}")
+    
+    # 추천에 따른 메시지
+    if recommendation in ["Strong Buy", "Buy"]:
+        st.success(f"💡 {analysis['summary']}")
+    elif recommendation == "Hold":
+        st.info(f"💡 {analysis['summary']}")
+    else:
+        st.warning(f"💡 {analysis['summary']}")
