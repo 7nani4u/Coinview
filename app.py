@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.4 ULTRA CLEAN (실시간 자동 분석)
+코인 AI 예측 시스템 - v2.9.4 FINAL (실시간 자동 분석)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -43,7 +43,7 @@
 - DeepSeek 스타일 백테스팅 (고R/R 전략 vs 일반 전략)
 - 중복 주석 정리 (-269 라인, 5.0% 감소)
 
-👍 v2.9.4 ULTRA CLEAN (실시간 자동 분석):
+🎯 v2.9.4 FINAL 실시간 자동 분석:
 - 종합 신호 점수 시스템: 패턴강도(40%) × 추세필터(40%) × 변동성필터(20%)
 - 실시간 매매 비율 & 기간별 수익률: 1주일, 1개월, 3개월 수익률 추적
 - ⭐ 실시간 자동 새로고침: 30초마다 가격 데이터 자동 업데이트
@@ -175,7 +175,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.4 ULTRA",
+    page_title="코인 AI 예측 시스템 v2.9.4 FINAL",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -5441,7 +5441,7 @@ if bt:
             st.plotly_chart(fig, use_container_width=True)
         
         # ═══════════════════════════════════════════════════════════════
-        # 🚀 v2.9.4 ULTRA: 실시간 분석 & 신호 점수 시스템
+        # 🚀 v2.9.4 FINAL: 실시간 분석 & 신호 점수 시스템
         # ═══════════════════════════════════════════════════════════════
         
         st.markdown("---")
@@ -5468,6 +5468,7 @@ if bt:
                 
             except Exception as e:
                 st.error(f"❌ 신호 점수 계산 오류: {str(e)}")
+                st.exception(e)
         
         # 탭 2: 실시간 시장 현황
         with analysis_tabs[1]:
@@ -5483,6 +5484,7 @@ if bt:
                 
             except Exception as e:
                 st.error(f"❌ 실시간 데이터 로드 오류: {str(e)}")
+                st.exception(e)
         
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
@@ -6474,6 +6476,12 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
             st.success("✅ DeepSeek 전략이 더 높은 수익률을 기록했습니다!")
         else:
             st.info("ℹ️ 일반 전략이 더 안정적인 수익률을 보였습니다.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 🚀 v2.9.4 신규 기능 함수들
+# ══════════════════════════════════════════════════════════════════════════════
+
 """
 v2.9.4 신규 기능
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
