@@ -169,7 +169,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.2",
+    page_title="코인 AI 예측 시스템 v2.9.3",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -5419,6 +5419,218 @@ if bt:
             fig = create_macd_chart(df)
             st.plotly_chart(fig, use_container_width=True)
         
+        # ═══════════════════════════════════════════════════════════════
+        # 🚀 v2.9.3: 고급 패턴 및 필터 분석
+        # ═══════════════════════════════════════════════════════════════
+        
+        st.markdown("---")
+        st.markdown("<div class='section-title'>🚀 v2.9.3 고급 분석</div>", unsafe_allow_html=True)
+        
+        # 탭 생성
+        analysis_tabs = st.tabs([
+            "🎯 Squeeze 분석",
+            "📐 패턴 감지",
+            "🎯 동적 SL/TP",
+            "🔄 MTFA",
+            "🔮 파생상품 필터",
+            "📊 멀티 신호 백테스트"
+        ])
+        
+        # 탭 1: Squeeze 분석 (BB + TTM)
+        with analysis_tabs[0]:
+            st.markdown("#### 변동성 축소 패턴 감지")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Bollinger Band Squeeze
+                bb_squeeze = detect_bb_squeeze(df)
+                render_bb_squeeze_analysis(bb_squeeze)
+            
+            with col2:
+                # TTM Squeeze
+                ttm_squeeze = detect_ttm_squeeze(df)
+                render_ttm_squeeze_analysis(ttm_squeeze)
+        
+        # 탭 2: NR7/IBNR7 패턴
+        with analysis_tabs[1]:
+            st.markdown("#### Narrow Range + Inside Bar 감지")
+            
+            nr_result = detect_narrow_range_inside_bar(df)
+            render_narrow_range_analysis(nr_result)
+            
+            # 차트에 표시
+            if nr_result['is_ibnr7'] or nr_result['is_ibnr4']:
+                st.markdown("##### 📊 Breakout 레벨 차트")
+                
+                fig = go.Figure()
+                
+                # 캔들스틱 (최근 20봉)
+                df_recent = df.tail(20)
+                fig.add_trace(go.Candlestick(
+                    x=df_recent.index,
+                    open=df_recent['Open'],
+                    high=df_recent['High'],
+                    low=df_recent['Low'],
+                    close=df_recent['Close'],
+                    name='Price'
+                ))
+                
+                # Breakout 레벨 (수평선)
+                fig.add_hline(
+                    y=nr_result['breakout_level_up'],
+                    line_dash="dash",
+                    line_color="green",
+                    annotation_text=f"상단 돌파: ${nr_result['breakout_level_up']:,.2f}"
+                )
+                
+                fig.add_hline(
+                    y=nr_result['breakout_level_down'],
+                    line_dash="dash",
+                    line_color="red",
+                    annotation_text=f"하단 이탈: ${nr_result['breakout_level_down']:,.2f}"
+                )
+                
+                fig.update_layout(
+                    title="IBNR 패턴 Breakout 레벨",
+                    xaxis_title="날짜",
+                    yaxis_title="가격 (USD)",
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # 탭 3: 변동성 레짐 기반 동적 SL/TP
+        with analysis_tabs[2]:
+            st.markdown("#### 변동성 기반 리스크 관리")
+            
+            current_price = df['Close'].iloc[-1]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # 롱 포지션
+                sl_tp_long = calculate_dynamic_sl_tp(
+                    df,
+                    entry_price=current_price,
+                    position_type='LONG'
+                )
+                
+                st.markdown("**🟢 롱 포지션**")
+                render_dynamic_sl_tp(sl_tp_long, current_price)
+            
+            with col2:
+                # 숏 포지션
+                sl_tp_short = calculate_dynamic_sl_tp(
+                    df,
+                    entry_price=current_price,
+                    position_type='SHORT'
+                )
+                
+                st.markdown("**🔴 숏 포지션**")
+                render_dynamic_sl_tp(sl_tp_short, current_price)
+        
+        # 탭 4: 멀티 타임프레임 정합
+        with analysis_tabs[3]:
+            st.markdown("#### 상위/하위 타임프레임 정합 분석")
+            
+            # 듀얼 타임프레임 데이터 로드
+            try:
+                dual_tf_data = load_dual_timeframe_data(selected_crypto)
+                
+                if dual_tf_data['status'] == 'success':
+                    df_3m = dual_tf_data['df_3m']
+                    df_4h = dual_tf_data['df_4h']
+                    
+                    # MTFA 분석
+                    mtfa_result = mtfa_regime_filter(df_3m, df_4h, current_price)
+                    render_mtfa_analysis(mtfa_result)
+                    
+                    # 4시간봉 EMA 차트
+                    st.markdown("---")
+                    st.markdown("##### 📊 4시간봉 EMA 추세")
+                    render_4h_ema_chart(df_4h)
+                else:
+                    st.warning(f"⚠️ 듀얼 타임프레임 데이터 로드 실패: {dual_tf_data.get('message', '')}")
+            
+            except Exception as e:
+                st.error(f"❌ MTFA 분석 오류: {str(e)}")
+        
+        # 탭 5: 파생상품 극단 필터
+        with analysis_tabs[4]:
+            st.markdown("#### 펀딩비 & OI 극단 감지")
+            
+            try:
+                # Open Interest 가져오기
+                oi_data = fetch_open_interest(selected_crypto)
+                
+                if oi_data['status'] == 'success':
+                    funding_rate = oi_data.get('funding_rate', 0)
+                    open_interest = oi_data.get('open_interest', 0)
+                    
+                    # OI 히스토리
+                    oi_history_data = fetch_open_interest_history(selected_crypto)
+                    
+                    if oi_history_data['status'] == 'success':
+                        df_oi = oi_history_data['df_oi']
+                        
+                        # 파생상품 필터 분석
+                        deriv_result = advanced_derivatives_filter(
+                            funding_rate=funding_rate,
+                            open_interest=open_interest,
+                            oi_history=df_oi
+                        )
+                        
+                        render_derivatives_filter(deriv_result)
+                        
+                        # OI 차트
+                        st.markdown("---")
+                        st.markdown("##### 📊 OI 히스토리")
+                        render_open_interest_chart(df_oi)
+                    else:
+                        st.warning("⚠️ OI 히스토리 데이터를 가져올 수 없습니다.")
+                        
+                        # 기본 필터 (히스토리 없이)
+                        deriv_result = advanced_derivatives_filter(
+                            funding_rate=funding_rate,
+                            open_interest=open_interest
+                        )
+                        render_derivatives_filter(deriv_result)
+                else:
+                    st.warning("⚠️ 파생상품 데이터를 가져올 수 없습니다.")
+            
+            except Exception as e:
+                st.error(f"❌ 파생상품 분석 오류: {str(e)}")
+        
+        # 탭 6: 멀티 신호 백테스팅
+        with analysis_tabs[5]:
+            st.markdown("#### 다양한 진입 신호 성과 비교")
+            
+            # 백테스팅할 신호 선택
+            signals_to_test = st.multiselect(
+                "백테스팅할 신호 선택",
+                options=['RSI', 'BB', 'MACD', 'EMA'],
+                default=['RSI', 'BB', 'MACD', 'EMA'],
+                help="여러 신호를 선택하여 성과를 비교할 수 있습니다"
+            )
+            
+            if signals_to_test:
+                with st.spinner("백테스팅 실행 중..."):
+                    try:
+                        backtest_results = backtest_multi_signals(
+                            df=df,
+                            initial_capital=10000,
+                            leverage=leverage,
+                            signals=signals_to_test
+                        )
+                        
+                        render_multi_signal_backtest(backtest_results)
+                        
+                    except Exception as e:
+                        st.error(f"❌ 백테스팅 오류: {str(e)}")
+            else:
+                st.info("ℹ️ 백테스팅할 신호를 선택해주세요.")
+        
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
         st.warning("""
@@ -6409,3 +6621,1113 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
             st.success("✅ DeepSeek 전략이 더 높은 수익률을 기록했습니다!")
         else:
             st.info("ℹ️ 일반 전략이 더 안정적인 수익률을 보였습니다.")
+"""
+v2.9.3 고급 패턴 및 필터 구현
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+추가 기능 (8개):
+1. Bollinger Band Squeeze 감지
+2. TTM Squeeze (BB × Keltner)
+3. NR7/NR4 + Inside Bar (IBNR7)
+4. 다양한 백테스팅 신호 (RSI, BB)
+5. 변동성 레짐 기반 동적 SL/TP
+6. MTFA 강화 (멀티 타임프레임 정합)
+7. 펀딩·OI 극단 필터 강화
+8. 3분봉 데이터 자동 업데이트 메커니즘
+"""
+
+# ==============================================================================
+# 1. Bollinger Band Squeeze 감지
+# ==============================================================================
+
+def detect_bb_squeeze(df: pd.DataFrame, window: int = 20, num_std: float = 2.0,
+                      squeeze_threshold: float = 0.02) -> Dict:
+    """
+    Bollinger Band Squeeze 감지
+    
+    Squeeze: BB 폭이 좁아져 변동성 수축 → 곧 폭발적 움직임 예상
+    
+    Parameters:
+        df: 가격 데이터
+        window: BB 기간
+        num_std: 표준편차 배수
+        squeeze_threshold: Squeeze 임계값 (BB 폭 / 가격 비율)
+    
+    Returns:
+        dict: {
+            'is_squeeze': bool,
+            'bb_width_pct': float,
+            'squeeze_duration': int,  # 몇 개 봉 동안 지속
+            'direction_bias': str,  # 'BULLISH', 'BEARISH', 'NEUTRAL'
+            'breakout_signal': bool
+        }
+    """
+    
+    if df.empty or len(df) < window + 10:
+        return {'is_squeeze': False, 'bb_width_pct': 0, 'squeeze_duration': 0,
+                'direction_bias': 'NEUTRAL', 'breakout_signal': False}
+    
+    # Bollinger Bands 계산
+    sma = df['Close'].rolling(window=window).mean()
+    std = df['Close'].rolling(window=window).std()
+    upper_bb = sma + (std * num_std)
+    lower_bb = sma - (std * num_std)
+    bb_width = upper_bb - lower_bb
+    bb_width_pct = (bb_width / df['Close']) * 100
+    
+    # 현재 Squeeze 상태
+    current_width = bb_width_pct.iloc[-1]
+    is_squeeze = current_width < (squeeze_threshold * 100)
+    
+    # Squeeze 지속 기간
+    squeeze_duration = 0
+    for i in range(len(bb_width_pct) - 1, max(0, len(bb_width_pct) - 50), -1):
+        if bb_width_pct.iloc[i] < (squeeze_threshold * 100):
+            squeeze_duration += 1
+        else:
+            break
+    
+    # 방향성 바이어스 (상위 TF 추세 + 최근 모멘텀)
+    direction_bias = 'NEUTRAL'
+    
+    if len(df) >= 50:
+        # 최근 50봉 추세
+        ema20 = df['Close'].ewm(span=20, adjust=False).mean()
+        ema50 = df['Close'].ewm(span=50, adjust=False).mean()
+        
+        current_price = df['Close'].iloc[-1]
+        
+        if current_price > ema20.iloc[-1] and ema20.iloc[-1] > ema50.iloc[-1]:
+            direction_bias = 'BULLISH'
+        elif current_price < ema20.iloc[-1] and ema20.iloc[-1] < ema50.iloc[-1]:
+            direction_bias = 'BEARISH'
+        
+        # 최근 거래량 증가 체크
+        if 'Volume' in df.columns:
+            recent_vol = df['Volume'].iloc[-5:].mean()
+            avg_vol = df['Volume'].iloc[-50:-5].mean()
+            
+            if recent_vol > avg_vol * 1.5:  # 거래량 50% 증가
+                # 거래량과 함께 방향 확인
+                price_change = df['Close'].iloc[-1] - df['Close'].iloc[-5]
+                if price_change > 0:
+                    direction_bias = 'BULLISH'
+                else:
+                    direction_bias = 'BEARISH'
+    
+    # Breakout 신호 (Squeeze 해제)
+    breakout_signal = False
+    if len(bb_width_pct) >= 2:
+        prev_width = bb_width_pct.iloc[-2]
+        # Squeeze에서 확장으로 전환
+        if prev_width < (squeeze_threshold * 100) and current_width >= (squeeze_threshold * 100):
+            breakout_signal = True
+    
+    return {
+        'is_squeeze': is_squeeze,
+        'bb_width_pct': round(current_width, 4),
+        'squeeze_duration': squeeze_duration,
+        'direction_bias': direction_bias,
+        'breakout_signal': breakout_signal,
+        'upper_bb': upper_bb.iloc[-1],
+        'lower_bb': lower_bb.iloc[-1],
+        'sma': sma.iloc[-1]
+    }
+
+
+# ==============================================================================
+# 2. TTM Squeeze (Bollinger × Keltner Channel)
+# ==============================================================================
+
+def detect_ttm_squeeze(df: pd.DataFrame, bb_length: int = 20, bb_mult: float = 2.0,
+                       kc_length: int = 20, kc_mult: float = 1.5) -> Dict:
+    """
+    TTM Squeeze - Bollinger Band와 Keltner Channel 결합
+    
+    Squeeze: BB가 KC 안쪽에 완전히 들어감 (변동성 극단 수축)
+    Fire: Squeeze 해제 + 방향성 확정
+    
+    Parameters:
+        df: 가격 데이터
+        bb_length: BB 기간
+        bb_mult: BB 표준편차 배수
+        kc_length: KC 기간
+        kc_mult: KC ATR 배수
+    
+    Returns:
+        dict: {
+            'squeeze_on': bool,
+            'squeeze_type': str,  # 'HIGH', 'MID', 'LOW', 'NO_SQUEEZE'
+            'fired': bool,
+            'momentum': float,  # 모멘텀 히스토그램
+            'direction': str  # 'BULLISH_FIRE', 'BEARISH_FIRE', 'NEUTRAL'
+        }
+    """
+    
+    if df.empty or len(df) < max(bb_length, kc_length) + 10:
+        return {'squeeze_on': False, 'squeeze_type': 'NO_SQUEEZE', 'fired': False,
+                'momentum': 0, 'direction': 'NEUTRAL'}
+    
+    # Bollinger Bands
+    bb_basis = df['Close'].rolling(window=bb_length).mean()
+    bb_std = df['Close'].rolling(window=bb_length).std()
+    bb_upper = bb_basis + (bb_std * bb_mult)
+    bb_lower = bb_basis - (bb_std * bb_mult)
+    
+    # Keltner Channel
+    kc_basis = df['Close'].rolling(window=kc_length).mean()
+    
+    # ATR 계산
+    high_low = df['High'] - df['Low']
+    high_close = abs(df['High'] - df['Close'].shift())
+    low_close = abs(df['Low'] - df['Close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=kc_length).mean()
+    
+    kc_upper = kc_basis + (atr * kc_mult)
+    kc_lower = kc_basis - (atr * kc_mult)
+    
+    # Squeeze 감지
+    squeeze_on = (bb_lower.iloc[-1] > kc_lower.iloc[-1]) and (bb_upper.iloc[-1] < kc_upper.iloc[-1])
+    
+    # Squeeze 강도
+    if squeeze_on:
+        bb_width = bb_upper - bb_lower
+        kc_width = kc_upper - kc_lower
+        squeeze_ratio = (bb_width / kc_width).iloc[-1]
+        
+        if squeeze_ratio < 0.6:
+            squeeze_type = 'HIGH'  # 강한 Squeeze
+        elif squeeze_ratio < 0.8:
+            squeeze_type = 'MID'
+        else:
+            squeeze_type = 'LOW'
+    else:
+        squeeze_type = 'NO_SQUEEZE'
+    
+    # 모멘텀 히스토그램 (Linear Regression)
+    # 간단한 버전: (현재가 - KC 중심) / ATR
+    momentum = ((df['Close'] - kc_basis) / atr).iloc[-10:]
+    current_momentum = momentum.iloc[-1]
+    
+    # Fire 감지 (Squeeze 해제)
+    fired = False
+    direction = 'NEUTRAL'
+    
+    if len(df) >= 2:
+        prev_squeeze = (bb_lower.iloc[-2] > kc_lower.iloc[-2]) and (bb_upper.iloc[-2] < kc_upper.iloc[-2])
+        
+        if prev_squeeze and not squeeze_on:
+            fired = True
+            
+            # 방향 판단 (모멘텀 + 가격 움직임)
+            if current_momentum > 0 and df['Close'].iloc[-1] > df['Close'].iloc[-2]:
+                direction = 'BULLISH_FIRE'
+            elif current_momentum < 0 and df['Close'].iloc[-1] < df['Close'].iloc[-2]:
+                direction = 'BEARISH_FIRE'
+    
+    return {
+        'squeeze_on': squeeze_on,
+        'squeeze_type': squeeze_type,
+        'fired': fired,
+        'momentum': round(current_momentum, 4),
+        'direction': direction,
+        'bb_upper': bb_upper.iloc[-1],
+        'bb_lower': bb_lower.iloc[-1],
+        'kc_upper': kc_upper.iloc[-1],
+        'kc_lower': kc_lower.iloc[-1]
+    }
+
+
+# ==============================================================================
+# 3. NR7/NR4 + Inside Bar (IBNR7)
+# ==============================================================================
+
+def detect_narrow_range_inside_bar(df: pd.DataFrame) -> Dict:
+    """
+    NR7/NR4 + Inside Bar 결합 패턴 (IBNR7)
+    
+    NR7: Narrow Range 7 (최근 7봉 중 가장 좁은 레인지)
+    NR4: Narrow Range 4 (최근 4봉 중 가장 좁은 레인지)
+    Inside Bar: 현재봉이 직전봉 안에 완전히 포함
+    IBNR7: NR7 AND Inside Bar (강력한 축소 신호)
+    
+    Returns:
+        dict: {
+            'is_nr7': bool,
+            'is_nr4': bool,
+            'is_inside_bar': bool,
+            'is_ibnr7': bool,
+            'is_ibnr4': bool,
+            'range_rank': int,  # 1=가장 좁음
+            'breakout_level_up': float,
+            'breakout_level_down': float,
+            'pattern_strength': str  # 'VERY_STRONG', 'STRONG', 'MODERATE', 'WEAK'
+        }
+    """
+    
+    if df.empty or len(df) < 8:
+        return {
+            'is_nr7': False, 'is_nr4': False, 'is_inside_bar': False,
+            'is_ibnr7': False, 'is_ibnr4': False, 'range_rank': 0,
+            'breakout_level_up': 0, 'breakout_level_down': 0,
+            'pattern_strength': 'WEAK'
+        }
+    
+    # 레인지 계산 (High - Low)
+    df_recent = df.tail(8).copy()
+    df_recent['Range'] = df_recent['High'] - df_recent['Low']
+    
+    current_range = df_recent['Range'].iloc[-1]
+    current_high = df_recent['High'].iloc[-1]
+    current_low = df_recent['Low'].iloc[-1]
+    
+    prev_high = df_recent['High'].iloc[-2]
+    prev_low = df_recent['Low'].iloc[-2]
+    
+    # NR7 (최근 7봉 비교)
+    last_7_ranges = df_recent['Range'].iloc[-7:]
+    is_nr7 = current_range == last_7_ranges.min()
+    range_rank_7 = (last_7_ranges.rank(ascending=True).iloc[-1])
+    
+    # NR4 (최근 4봉 비교)
+    last_4_ranges = df_recent['Range'].iloc[-4:]
+    is_nr4 = current_range == last_4_ranges.min()
+    
+    # Inside Bar
+    is_inside_bar = (current_high < prev_high) and (current_low > prev_low)
+    
+    # 결합 패턴
+    is_ibnr7 = is_nr7 and is_inside_bar
+    is_ibnr4 = is_nr4 and is_inside_bar
+    
+    # Breakout 레벨
+    breakout_level_up = prev_high  # Inside Bar의 상단
+    breakout_level_down = prev_low  # Inside Bar의 하단
+    
+    # 패턴 강도
+    if is_ibnr7:
+        pattern_strength = 'VERY_STRONG'
+    elif is_ibnr4:
+        pattern_strength = 'STRONG'
+    elif is_nr7 or is_inside_bar:
+        pattern_strength = 'MODERATE'
+    else:
+        pattern_strength = 'WEAK'
+    
+    return {
+        'is_nr7': is_nr7,
+        'is_nr4': is_nr4,
+        'is_inside_bar': is_inside_bar,
+        'is_ibnr7': is_ibnr7,
+        'is_ibnr4': is_ibnr4,
+        'range_rank': int(range_rank_7),
+        'breakout_level_up': round(breakout_level_up, 2),
+        'breakout_level_down': round(breakout_level_down, 2),
+        'pattern_strength': pattern_strength,
+        'current_range': round(current_range, 2),
+        'avg_range_7': round(last_7_ranges.mean(), 2)
+    }
+
+
+# ==============================================================================
+# 4. 변동성 레짐 기반 동적 SL/TP
+# ==============================================================================
+
+def calculate_dynamic_sl_tp(df: pd.DataFrame, entry_price: float, 
+                             position_type: str = 'LONG',
+                             base_sl_pct: float = 1.0,
+                             base_tp_pct: float = 3.0,
+                             atr_period: int = 14) -> Dict:
+    """
+    변동성 레짐 기반 동적 SL/TP 계산
+    
+    ATR 퍼센타일로 변동성 레짐 판단:
+    - 저변동: SL 축소, TP 확대
+    - 고변동: SL 확대, TP 축소
+    
+    Parameters:
+        df: 가격 데이터
+        entry_price: 진입 가격
+        position_type: 'LONG' or 'SHORT'
+        base_sl_pct: 기본 손절 비율 (%)
+        base_tp_pct: 기본 목표 비율 (%)
+        atr_period: ATR 기간
+    
+    Returns:
+        dict: {
+            'stop_loss': float,
+            'take_profit': float,
+            'sl_pct': float,
+            'tp_pct': float,
+            'volatility_regime': str,  # 'LOW', 'NORMAL', 'HIGH', 'EXTREME'
+            'atr_percentile': float,
+            'position_size_multiplier': float  # 변동성 기반 포지션 크기 조절
+        }
+    """
+    
+    if df.empty or len(df) < atr_period + 100:
+        # 데이터 부족 시 기본값
+        if position_type.upper() == 'LONG':
+            sl = entry_price * (1 - base_sl_pct / 100)
+            tp = entry_price * (1 + base_tp_pct / 100)
+        else:
+            sl = entry_price * (1 + base_sl_pct / 100)
+            tp = entry_price * (1 - base_tp_pct / 100)
+        
+        return {
+            'stop_loss': round(sl, 2),
+            'take_profit': round(tp, 2),
+            'sl_pct': base_sl_pct,
+            'tp_pct': base_tp_pct,
+            'volatility_regime': 'NORMAL',
+            'atr_percentile': 50.0,
+            'position_size_multiplier': 1.0
+        }
+    
+    # ATR 계산
+    high_low = df['High'] - df['Low']
+    high_close = abs(df['High'] - df['Close'].shift())
+    low_close = abs(df['Low'] - df['Close'].shift())
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=atr_period).mean()
+    
+    # ATR 퍼센타일 (최근 100봉 기준)
+    atr_recent = atr.iloc[-100:]
+    current_atr = atr.iloc[-1]
+    atr_percentile = (atr_recent < current_atr).sum() / len(atr_recent) * 100
+    
+    # 변동성 레짐 판단
+    if atr_percentile < 20:
+        volatility_regime = 'LOW'
+        sl_multiplier = 0.7  # SL 축소
+        tp_multiplier = 1.3  # TP 확대
+        pos_multiplier = 1.2  # 포지션 크기 증가
+    elif atr_percentile < 50:
+        volatility_regime = 'NORMAL'
+        sl_multiplier = 1.0
+        tp_multiplier = 1.0
+        pos_multiplier = 1.0
+    elif atr_percentile < 80:
+        volatility_regime = 'HIGH'
+        sl_multiplier = 1.3  # SL 확대
+        tp_multiplier = 0.8  # TP 축소
+        pos_multiplier = 0.8  # 포지션 크기 감소
+    else:
+        volatility_regime = 'EXTREME'
+        sl_multiplier = 1.5
+        tp_multiplier = 0.6
+        pos_multiplier = 0.6
+    
+    # 동적 SL/TP 계산
+    adjusted_sl_pct = base_sl_pct * sl_multiplier
+    adjusted_tp_pct = base_tp_pct * tp_multiplier
+    
+    if position_type.upper() == 'LONG':
+        stop_loss = entry_price * (1 - adjusted_sl_pct / 100)
+        take_profit = entry_price * (1 + adjusted_tp_pct / 100)
+    else:
+        stop_loss = entry_price * (1 + adjusted_sl_pct / 100)
+        take_profit = entry_price * (1 - adjusted_tp_pct / 100)
+    
+    return {
+        'stop_loss': round(stop_loss, 2),
+        'take_profit': round(take_profit, 2),
+        'sl_pct': round(adjusted_sl_pct, 2),
+        'tp_pct': round(adjusted_tp_pct, 2),
+        'volatility_regime': volatility_regime,
+        'atr_percentile': round(atr_percentile, 1),
+        'position_size_multiplier': pos_multiplier,
+        'current_atr': round(current_atr, 2)
+    }
+
+
+# ==============================================================================
+# 5. 멀티 타임프레임 정합 (MTFA) 강화
+# ==============================================================================
+
+def mtfa_regime_filter(df_lower: pd.DataFrame, df_upper: pd.DataFrame,
+                       current_price: float) -> Dict:
+    """
+    멀티 타임프레임 정합 (Multi-Timeframe Analysis)
+    
+    상위 TF 레짐 확정 후 하위 TF 신호만 채택
+    TF 비율 4~8:1 권장 (예: 1H vs 4H, 15M vs 1H)
+    
+    Parameters:
+        df_lower: 하위 타임프레임 데이터
+        df_upper: 상위 타임프레임 데이터
+        current_price: 현재 가격
+    
+    Returns:
+        dict: {
+            'upper_regime': str,  # 'UPTREND', 'DOWNTREND', 'SIDEWAYS'
+            'lower_signal': str,  # 'BULLISH', 'BEARISH', 'NEUTRAL'
+            'mtfa_aligned': bool,  # 상하위 TF 일치 여부
+            'trade_permission': str,  # 'LONG_ONLY', 'SHORT_ONLY', 'BOTH', 'NONE'
+            'confidence_boost': float  # 일치 시 신뢰도 부스트 (1.0 ~ 1.5)
+        }
+    """
+    
+    result = {
+        'upper_regime': 'SIDEWAYS',
+        'lower_signal': 'NEUTRAL',
+        'mtfa_aligned': False,
+        'trade_permission': 'NONE',
+        'confidence_boost': 1.0
+    }
+    
+    if df_upper.empty or len(df_upper) < 50:
+        return result
+    
+    # 상위 TF 레짐 판단 (EMA 20/50 사용)
+    ema20_upper = df_upper['Close'].ewm(span=20, adjust=False).mean()
+    ema50_upper = df_upper['Close'].ewm(span=50, adjust=False).mean()
+    
+    price_vs_ema20 = current_price > ema20_upper.iloc[-1]
+    ema20_vs_ema50 = ema20_upper.iloc[-1] > ema50_upper.iloc[-1]
+    
+    if price_vs_ema20 and ema20_vs_ema50:
+        result['upper_regime'] = 'UPTREND'
+        result['trade_permission'] = 'LONG_ONLY'
+    elif not price_vs_ema20 and not ema20_vs_ema50:
+        result['upper_regime'] = 'DOWNTREND'
+        result['trade_permission'] = 'SHORT_ONLY'
+    else:
+        result['upper_regime'] = 'SIDEWAYS'
+        result['trade_permission'] = 'BOTH'
+    
+    # 하위 TF 신호 (MACD 사용)
+    if not df_lower.empty and len(df_lower) >= 26:
+        if 'MACD' in df_lower.columns and 'Signal_Line' in df_lower.columns:
+            macd = df_lower['MACD'].iloc[-1]
+            signal = df_lower['Signal_Line'].iloc[-1]
+            
+            if macd > signal and macd > 0:
+                result['lower_signal'] = 'BULLISH'
+            elif macd < signal and macd < 0:
+                result['lower_signal'] = 'BEARISH'
+    
+    # MTFA 정합 확인
+    if result['upper_regime'] == 'UPTREND' and result['lower_signal'] == 'BULLISH':
+        result['mtfa_aligned'] = True
+        result['confidence_boost'] = 1.3
+    elif result['upper_regime'] == 'DOWNTREND' and result['lower_signal'] == 'BEARISH':
+        result['mtfa_aligned'] = True
+        result['confidence_boost'] = 1.3
+    elif result['upper_regime'] == 'SIDEWAYS':
+        # 횡보 시에도 신호 허용하되 보수적
+        result['mtfa_aligned'] = False
+        result['confidence_boost'] = 0.9
+    else:
+        # 불일치
+        result['mtfa_aligned'] = False
+        result['confidence_boost'] = 0.7
+        result['trade_permission'] = 'NONE'
+    
+    return result
+
+
+# ==============================================================================
+# 6. 펀딩비·OI 극단 필터 강화
+# ==============================================================================
+
+def advanced_derivatives_filter(funding_rate: float, open_interest: float,
+                                 oi_history: pd.DataFrame = None) -> Dict:
+    """
+    펀딩비·미결제약정 극단 필터 (강화 버전)
+    
+    Parameters:
+        funding_rate: 현재 펀딩비 (%)
+        open_interest: 현재 미결제약정
+        oi_history: OI 히스토리 (선택)
+    
+    Returns:
+        dict: {
+            'funding_status': str,  # 'EXTREME_LONG', 'LONG_OVERHEATED', 'NEUTRAL', 'SHORT_OVERHEATED'
+            'oi_status': str,  # 'SURGE', 'NORMAL', 'DECLINE'
+            'liquidation_risk': str,  # 'HIGH', 'MODERATE', 'LOW'
+            'trade_adjustment': str,  # 'REDUCE_POSITION', 'NORMAL', 'INCREASE_POSITION'
+            'warning_message': str
+        }
+    """
+    
+    result = {
+        'funding_status': 'NEUTRAL',
+        'oi_status': 'NORMAL',
+        'liquidation_risk': 'LOW',
+        'trade_adjustment': 'NORMAL',
+        'warning_message': ''
+    }
+    
+    # 펀딩비 분석
+    if funding_rate > 0.1:
+        result['funding_status'] = 'EXTREME_LONG'
+        result['liquidation_risk'] = 'HIGH'
+        result['trade_adjustment'] = 'REDUCE_POSITION'
+        result['warning_message'] = '⚠️ 롱 포지션 과열! 청산 리스크 매우 높음'
+    elif funding_rate > 0.05:
+        result['funding_status'] = 'LONG_OVERHEATED'
+        result['liquidation_risk'] = 'MODERATE'
+        result['trade_adjustment'] = 'REDUCE_POSITION'
+        result['warning_message'] = '⚠️ 롱 포지션 과열, 조정 가능성'
+    elif funding_rate < -0.1:
+        result['funding_status'] = 'EXTREME_SHORT'
+        result['liquidation_risk'] = 'HIGH'
+        result['trade_adjustment'] = 'REDUCE_POSITION'
+        result['warning_message'] = '⚠️ 숏 포지션 과열! 숏스퀴즈 리스크'
+    elif funding_rate < -0.05:
+        result['funding_status'] = 'SHORT_OVERHEATED'
+        result['liquidation_risk'] = 'MODERATE'
+        result['trade_adjustment'] = 'INCREASE_POSITION'
+        result['warning_message'] = 'ℹ️ 숏 포지션 과열, 숏스퀴즈 가능'
+    
+    # OI 변화 분석
+    if oi_history is not None and not oi_history.empty and len(oi_history) >= 5:
+        recent_oi = oi_history['open_interest'].iloc[-5:]
+        oi_change_pct = ((recent_oi.iloc[-1] - recent_oi.iloc[0]) / recent_oi.iloc[0]) * 100
+        
+        if oi_change_pct > 10:
+            result['oi_status'] = 'SURGE'
+            if result['liquidation_risk'] == 'MODERATE':
+                result['liquidation_risk'] = 'HIGH'
+            result['warning_message'] += ' | OI 급증 감지 (+{:.1f}%)'.format(oi_change_pct)
+        elif oi_change_pct < -10:
+            result['oi_status'] = 'DECLINE'
+            result['warning_message'] += ' | OI 급감 (-{:.1f}%)'.format(abs(oi_change_pct))
+    
+    # 극단 조합
+    if result['funding_status'] in ['EXTREME_LONG', 'EXTREME_SHORT'] and result['oi_status'] == 'SURGE':
+        result['liquidation_risk'] = 'HIGH'
+        result['trade_adjustment'] = 'REDUCE_POSITION'
+        result['warning_message'] += ' | 🚨 청산 폭풍 주의!'
+    
+    return result
+"""
+v2.9.3 UI 렌더링 및 백테스팅 함수
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+# ==============================================================================
+# 7. 다양한 백테스팅 신호 (RSI, Bollinger Bands)
+# ==============================================================================
+
+def backtest_multi_signals(df: pd.DataFrame, initial_capital: float = 10000,
+                           leverage: float = 1.0, signals: List[str] = None) -> Dict:
+    """
+    다양한 진입 신호 백테스팅
+    
+    지원 신호:
+    - RSI: RSI 과매도(30)/과매수(70)
+    - BB: Bollinger Band 하단/상단 터치
+    - MACD: MACD 크로스오버
+    - EMA: EMA20/50 크로스
+    
+    Parameters:
+        df: 가격 데이터
+        initial_capital: 초기 자본
+        leverage: 레버리지
+        signals: 백테스팅할 신호 리스트 (None이면 모두)
+    
+    Returns:
+        dict: 각 신호별 백테스팅 결과
+    """
+    
+    if signals is None:
+        signals = ['RSI', 'BB', 'MACD', 'EMA']
+    
+    results = {}
+    
+    for signal_name in signals:
+        capital = initial_capital
+        position = None
+        trades = []
+        
+        for i in range(50, len(df)):
+            current_price = df['Close'].iloc[i]
+            
+            # 신호 판단
+            if signal_name == 'RSI' and 'RSI' in df.columns:
+                rsi = df['RSI'].iloc[i]
+                if position is None and rsi < 30:  # 과매도 진입
+                    position = {
+                        'entry_price': current_price,
+                        'entry_idx': i,
+                        'type': 'LONG'
+                    }
+                elif position and rsi > 70:  # 과매수 청산
+                    pnl = (current_price - position['entry_price']) / position['entry_price']
+                    pnl *= leverage
+                    profit = capital * pnl
+                    capital += profit
+                    trades.append({
+                        'entry': position['entry_price'],
+                        'exit': current_price,
+                        'pnl': profit,
+                        'type': 'LONG'
+                    })
+                    position = None
+            
+            elif signal_name == 'BB':
+                # BB 계산
+                sma = df['Close'].iloc[i-20:i].mean()
+                std = df['Close'].iloc[i-20:i].std()
+                lower_bb = sma - (2 * std)
+                upper_bb = sma + (2 * std)
+                
+                if position is None and current_price <= lower_bb:  # 하단 터치
+                    position = {
+                        'entry_price': current_price,
+                        'entry_idx': i,
+                        'type': 'LONG'
+                    }
+                elif position and current_price >= upper_bb:  # 상단 터치
+                    pnl = (current_price - position['entry_price']) / position['entry_price']
+                    pnl *= leverage
+                    profit = capital * pnl
+                    capital += profit
+                    trades.append({
+                        'entry': position['entry_price'],
+                        'exit': current_price,
+                        'pnl': profit,
+                        'type': 'LONG'
+                    })
+                    position = None
+            
+            elif signal_name == 'MACD' and 'MACD' in df.columns:
+                if i >= 1:
+                    macd_prev = df['MACD'].iloc[i-1]
+                    signal_prev = df['Signal_Line'].iloc[i-1]
+                    macd_curr = df['MACD'].iloc[i]
+                    signal_curr = df['Signal_Line'].iloc[i]
+                    
+                    # 골든 크로스
+                    if position is None and macd_prev < signal_prev and macd_curr > signal_curr:
+                        position = {
+                            'entry_price': current_price,
+                            'entry_idx': i,
+                            'type': 'LONG'
+                        }
+                    # 데드 크로스
+                    elif position and macd_prev > signal_prev and macd_curr < signal_curr:
+                        pnl = (current_price - position['entry_price']) / position['entry_price']
+                        pnl *= leverage
+                        profit = capital * pnl
+                        capital += profit
+                        trades.append({
+                            'entry': position['entry_price'],
+                            'exit': current_price,
+                            'pnl': profit,
+                            'type': 'LONG'
+                        })
+                        position = None
+            
+            elif signal_name == 'EMA':
+                if i >= 50:
+                    ema20 = df['Close'].iloc[i-20:i].ewm(span=20).mean().iloc[-1]
+                    ema50 = df['Close'].iloc[i-50:i].ewm(span=50).mean().iloc[-1]
+                    ema20_prev = df['Close'].iloc[i-21:i-1].ewm(span=20).mean().iloc[-1]
+                    ema50_prev = df['Close'].iloc[i-51:i-1].ewm(span=50).mean().iloc[-1]
+                    
+                    # 골든 크로스
+                    if position is None and ema20_prev < ema50_prev and ema20 > ema50:
+                        position = {
+                            'entry_price': current_price,
+                            'entry_idx': i,
+                            'type': 'LONG'
+                        }
+                    # 데드 크로스
+                    elif position and ema20_prev > ema50_prev and ema20 < ema50:
+                        pnl = (current_price - position['entry_price']) / position['entry_price']
+                        pnl *= leverage
+                        profit = capital * pnl
+                        capital += profit
+                        trades.append({
+                            'entry': position['entry_price'],
+                            'exit': current_price,
+                            'pnl': profit,
+                            'type': 'LONG'
+                        })
+                        position = None
+        
+        # 결과 집계
+        if len(trades) > 0:
+            wins = [t for t in trades if t['pnl'] > 0]
+            losses = [t for t in trades if t['pnl'] <= 0]
+            
+            total_profit = sum([t['pnl'] for t in wins])
+            total_loss = abs(sum([t['pnl'] for t in losses]))
+            
+            results[signal_name] = {
+                'total_return_pct': ((capital - initial_capital) / initial_capital) * 100,
+                'final_capital': capital,
+                'total_trades': len(trades),
+                'wins': len(wins),
+                'losses': len(losses),
+                'win_rate': (len(wins) / len(trades)) * 100 if len(trades) > 0 else 0,
+                'profit_factor': total_profit / total_loss if total_loss > 0 else 0,
+                'avg_win': total_profit / len(wins) if len(wins) > 0 else 0,
+                'avg_loss': total_loss / len(losses) if len(losses) > 0 else 0
+            }
+        else:
+            results[signal_name] = {
+                'total_return_pct': 0,
+                'final_capital': initial_capital,
+                'total_trades': 0,
+                'wins': 0,
+                'losses': 0,
+                'win_rate': 0,
+                'profit_factor': 0,
+                'avg_win': 0,
+                'avg_loss': 0
+            }
+    
+    return results
+
+
+# ==============================================================================
+# 8. UI 렌더링 함수들
+# ==============================================================================
+
+def render_bb_squeeze_analysis(squeeze_result: Dict):
+    """Bollinger Band Squeeze 분석 결과 표시"""
+    st.markdown("### 🎯 Bollinger Band Squeeze 분석")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        status_emoji = "🔴" if squeeze_result['is_squeeze'] else "🟢"
+        st.metric(
+            label=f"{status_emoji} Squeeze 상태",
+            value="활성" if squeeze_result['is_squeeze'] else "비활성",
+            delta=f"{squeeze_result['squeeze_duration']}봉 지속" if squeeze_result['is_squeeze'] else None
+        )
+    
+    with col2:
+        st.metric(
+            label="BB 폭",
+            value=f"{squeeze_result['bb_width_pct']:.3f}%",
+            help="낮을수록 변동성 수축"
+        )
+    
+    with col3:
+        bias_emoji = "🟢" if squeeze_result['direction_bias'] == 'BULLISH' else "🔴" if squeeze_result['direction_bias'] == 'BEARISH' else "⚪"
+        st.metric(
+            label=f"{bias_emoji} 방향성 바이어스",
+            value=squeeze_result['direction_bias']
+        )
+    
+    if squeeze_result['breakout_signal']:
+        st.success("🚀 **Breakout 신호 감지!** Squeeze 해제 → 변동성 확대 예상")
+    
+    # 레벨 정보
+    with st.expander("📊 BB 레벨 정보", expanded=False):
+        st.markdown(f"""
+        - **상단 BB**: ${squeeze_result['upper_bb']:,.2f}
+        - **중심선 (SMA)**: ${squeeze_result['sma']:,.2f}
+        - **하단 BB**: ${squeeze_result['lower_bb']:,.2f}
+        """)
+
+
+def render_ttm_squeeze_analysis(ttm_result: Dict):
+    """TTM Squeeze 분석 결과 표시"""
+    st.markdown("### ⚡ TTM Squeeze (BB × KC) 분석")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        squeeze_emoji = "🔴" if ttm_result['squeeze_on'] else "🟢"
+        st.metric(
+            label=f"{squeeze_emoji} TTM Squeeze",
+            value="ON" if ttm_result['squeeze_on'] else "OFF",
+            delta=ttm_result['squeeze_type']
+        )
+    
+    with col2:
+        st.metric(
+            label="모멘텀",
+            value=f"{ttm_result['momentum']:.4f}",
+            delta="Bullish" if ttm_result['momentum'] > 0 else "Bearish"
+        )
+    
+    with col3:
+        if ttm_result['fired']:
+            st.metric(
+                label="🔥 Fire 신호",
+                value=ttm_result['direction'],
+                help="Squeeze 해제 + 방향성 확정"
+            )
+        else:
+            st.metric(label="Fire 신호", value="대기 중")
+    
+    if ttm_result['squeeze_type'] == 'HIGH':
+        st.warning("⚠️ **강한 Squeeze 감지!** 큰 움직임 임박")
+    
+    if ttm_result['fired']:
+        if ttm_result['direction'] == 'BULLISH_FIRE':
+            st.success("🚀 **상승 Fire!** 강한 상승 모멘텀 예상")
+        elif ttm_result['direction'] == 'BEARISH_FIRE':
+            st.error("📉 **하락 Fire!** 강한 하락 모멘텀 예상")
+
+
+def render_narrow_range_analysis(nr_result: Dict):
+    """NR7/IBNR7 패턴 분석 결과 표시"""
+    st.markdown("### 📐 Narrow Range + Inside Bar 분석")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        nr7_emoji = "✅" if nr_result['is_nr7'] else "❌"
+        st.metric(label=f"{nr7_emoji} NR7", value="감지됨" if nr_result['is_nr7'] else "미감지")
+    
+    with col2:
+        nr4_emoji = "✅" if nr_result['is_nr4'] else "❌"
+        st.metric(label=f"{nr4_emoji} NR4", value="감지됨" if nr_result['is_nr4'] else "미감지")
+    
+    with col3:
+        ib_emoji = "✅" if nr_result['is_inside_bar'] else "❌"
+        st.metric(label=f"{ib_emoji} Inside Bar", value="감지됨" if nr_result['is_inside_bar'] else "미감지")
+    
+    with col4:
+        st.metric(
+            label="패턴 강도",
+            value=nr_result['pattern_strength'],
+            help="VERY_STRONG: IBNR7 / STRONG: IBNR4"
+        )
+    
+    # IBNR7 경고
+    if nr_result['is_ibnr7']:
+        st.success("🎯 **IBNR7 패턴 감지!** 매우 강력한 축소 신호 → 곧 큰 움직임 예상")
+    elif nr_result['is_ibnr4']:
+        st.info("📌 **IBNR4 패턴 감지!** 강력한 축소 신호")
+    
+    # Breakout 레벨
+    st.markdown("#### 🎯 Breakout 레벨")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric(
+            label="상단 돌파",
+            value=f"${nr_result['breakout_level_up']:,.2f}",
+            help="이 레벨 돌파 시 상승 추세"
+        )
+    
+    with col2:
+        st.metric(
+            label="하단 이탈",
+            value=f"${nr_result['breakout_level_down']:,.2f}",
+            help="이 레벨 이탈 시 하락 추세"
+        )
+
+
+def render_dynamic_sl_tp(sl_tp_result: Dict, entry_price: float):
+    """변동성 레짐 기반 동적 SL/TP 표시"""
+    st.markdown("### 🎯 변동성 레짐 기반 동적 SL/TP")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        regime_emoji = {
+            'LOW': '🟢',
+            'NORMAL': '🟡',
+            'HIGH': '🟠',
+            'EXTREME': '🔴'
+        }.get(sl_tp_result['volatility_regime'], '⚪')
+        
+        st.metric(
+            label=f"{regime_emoji} 변동성 레짐",
+            value=sl_tp_result['volatility_regime'],
+            delta=f"ATR {sl_tp_result['atr_percentile']:.0f}%ile"
+        )
+    
+    with col2:
+        st.metric(
+            label="Stop Loss",
+            value=f"${sl_tp_result['stop_loss']:,.2f}",
+            delta=f"-{sl_tp_result['sl_pct']:.2f}%"
+        )
+    
+    with col3:
+        st.metric(
+            label="Take Profit",
+            value=f"${sl_tp_result['take_profit']:,.2f}",
+            delta=f"+{sl_tp_result['tp_pct']:.2f}%"
+        )
+    
+    with col4:
+        st.metric(
+            label="포지션 크기 조절",
+            value=f"{sl_tp_result['position_size_multiplier']:.1f}x",
+            help="변동성 기반 권장 배율"
+        )
+    
+    # 레짐별 설명
+    if sl_tp_result['volatility_regime'] == 'LOW':
+        st.success("📊 **저변동성**: SL 축소 + TP 확대 → 공격적 진입 가능")
+    elif sl_tp_result['volatility_regime'] == 'HIGH':
+        st.warning("⚠️ **고변동성**: SL 확대 + TP 축소 → 보수적 접근")
+    elif sl_tp_result['volatility_regime'] == 'EXTREME':
+        st.error("🚨 **극단 변동성**: 포지션 크기 축소 권장!")
+
+
+def render_mtfa_analysis(mtfa_result: Dict):
+    """멀티 타임프레임 정합 분석 결과 표시"""
+    st.markdown("### 🔄 멀티 타임프레임 정합 (MTFA)")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        regime_emoji = {
+            'UPTREND': '🟢',
+            'DOWNTREND': '🔴',
+            'SIDEWAYS': '🟡'
+        }.get(mtfa_result['upper_regime'], '⚪')
+        
+        st.metric(
+            label=f"{regime_emoji} 상위 TF 레짐",
+            value=mtfa_result['upper_regime'],
+            help="4시간봉 기준 추세"
+        )
+    
+    with col2:
+        signal_emoji = {
+            'BULLISH': '🟢',
+            'BEARISH': '🔴',
+            'NEUTRAL': '⚪'
+        }.get(mtfa_result['lower_signal'], '⚪')
+        
+        st.metric(
+            label=f"{signal_emoji} 하위 TF 신호",
+            value=mtfa_result['lower_signal'],
+            help="3분봉 기준 신호"
+        )
+    
+    with col3:
+        aligned_emoji = "✅" if mtfa_result['mtfa_aligned'] else "❌"
+        st.metric(
+            label=f"{aligned_emoji} MTFA 정합",
+            value="일치" if mtfa_result['mtfa_aligned'] else "불일치",
+            delta=f"신뢰도 {mtfa_result['confidence_boost']:.1f}x"
+        )
+    
+    # 거래 권한
+    if mtfa_result['trade_permission'] == 'LONG_ONLY':
+        st.success("🟢 **거래 방향**: 롱 포지션만 권장 (상승 추세)")
+    elif mtfa_result['trade_permission'] == 'SHORT_ONLY':
+        st.error("🔴 **거래 방향**: 숏 포지션만 권장 (하락 추세)")
+    elif mtfa_result['trade_permission'] == 'BOTH':
+        st.info("🟡 **거래 방향**: 양방향 가능 (횡보)")
+    else:
+        st.warning("⚠️ **거래 방향**: 관망 권장 (신호 불일치)")
+
+
+def render_derivatives_filter(deriv_result: Dict):
+    """펀딩비·OI 극단 필터 결과 표시"""
+    st.markdown("### 🔮 파생상품 극단 필터")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        funding_emoji = {
+            'EXTREME_LONG': '🔴',
+            'LONG_OVERHEATED': '🟠',
+            'NEUTRAL': '🟢',
+            'SHORT_OVERHEATED': '🟡',
+            'EXTREME_SHORT': '🔴'
+        }.get(deriv_result['funding_status'], '⚪')
+        
+        st.metric(
+            label=f"{funding_emoji} 펀딩비 상태",
+            value=deriv_result['funding_status']
+        )
+    
+    with col2:
+        oi_emoji = {
+            'SURGE': '🔴',
+            'NORMAL': '🟢',
+            'DECLINE': '🔵'
+        }.get(deriv_result['oi_status'], '⚪')
+        
+        st.metric(
+            label=f"{oi_emoji} OI 상태",
+            value=deriv_result['oi_status']
+        )
+    
+    with col3:
+        risk_emoji = {
+            'HIGH': '🔴',
+            'MODERATE': '🟡',
+            'LOW': '🟢'
+        }.get(deriv_result['liquidation_risk'], '⚪')
+        
+        st.metric(
+            label=f"{risk_emoji} 청산 리스크",
+            value=deriv_result['liquidation_risk']
+        )
+    
+    # 경고 메시지
+    if deriv_result['warning_message']:
+        if deriv_result['liquidation_risk'] == 'HIGH':
+            st.error(deriv_result['warning_message'])
+        else:
+            st.warning(deriv_result['warning_message'])
+    
+    # 거래 조정 권장
+    if deriv_result['trade_adjustment'] == 'REDUCE_POSITION':
+        st.warning("⚠️ **포지션 축소 권장** - 극단적 시장 상황")
+    elif deriv_result['trade_adjustment'] == 'INCREASE_POSITION':
+        st.success("💡 **포지션 확대 기회** - 숏스퀴즈 가능성")
+
+
+def render_multi_signal_backtest(backtest_results: Dict):
+    """다양한 신호 백테스팅 결과 비교 표시"""
+    st.markdown("### 📊 다양한 신호 백테스팅 비교")
+    
+    # 결과를 DataFrame으로 변환
+    results_df = pd.DataFrame(backtest_results).T
+    results_df = results_df.sort_values('total_return_pct', ascending=False)
+    
+    # 상위 3개 신호
+    st.markdown("#### 🏆 성과 순위")
+    
+    for idx, (signal_name, row) in enumerate(results_df.head(3).iterrows(), 1):
+        medal = {1: '🥇', 2: '🥈', 3: '🥉'}.get(idx, '')
+        
+        with st.expander(f"{medal} {idx}위: {signal_name} 신호", expanded=(idx == 1)):
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    label="총 수익률",
+                    value=f"{row['total_return_pct']:.2f}%",
+                    delta=f"${row['final_capital'] - 10000:,.0f}"
+                )
+            
+            with col2:
+                st.metric(
+                    label="승률",
+                    value=f"{row['win_rate']:.1f}%"
+                )
+            
+            with col3:
+                st.metric(
+                    label="총 거래",
+                    value=int(row['total_trades']),
+                    delta=f"승: {int(row['wins'])} / 패: {int(row['losses'])}"
+                )
+            
+            with col4:
+                st.metric(
+                    label="Profit Factor",
+                    value=f"{row['profit_factor']:.2f}"
+                )
+    
+    # 전체 비교 표
+    with st.expander("📋 전체 신호 비교표", expanded=False):
+        display_df = results_df[['total_return_pct', 'win_rate', 'total_trades', 'profit_factor']].copy()
+        display_df.columns = ['수익률 (%)', '승률 (%)', '거래 수', 'PF']
+        st.dataframe(display_df.style.format({
+            '수익률 (%)': '{:.2f}',
+            '승률 (%)': '{:.1f}',
+            'PF': '{:.2f}'
+        }).background_gradient(subset=['수익률 (%)'], cmap='RdYlGn'))
