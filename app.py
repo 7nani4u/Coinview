@@ -5029,22 +5029,6 @@ def render_comprehensive_analysis(analysis: Dict):
             help="현재 시장의 리스크 수준"
         )
     
-    # 주요 분석 요인
-    st.markdown("#### 📋 주요 분석 요인")
-    for factor in analysis['key_factors']:
-        st.markdown(f"- {factor}")
-    
-    st.markdown(f"**신뢰도:** {analysis['confidence']:.1%}")
-    st.caption(f"분석 시간: {analysis['timestamp'][:19]}")
-    
-    # 추천에 따른 메시지
-    if recommendation in ["Strong Buy", "Buy"]:
-        st.success(f"💡 {analysis['summary']}")
-    elif recommendation == "Hold":
-        st.info(f"💡 {analysis['summary']}")
-    else:
-        st.warning(f"⚠️ {analysis['summary']}")
-with st.sidebar:
     st.markdown("# 🚀 설정")
     st.markdown("---")
     
@@ -5718,4 +5702,3 @@ if bt:
 # v2.9.0: 실시간 데이터 UI 렌더링 함수들
 # ═══════════════════════════════════════════════════════════════
 
-        st.warning(f"💡 {analysis['summary']}")
