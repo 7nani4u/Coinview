@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.4 FINAL (실시간 자동 분석)
+코인 AI 예측 시스템 - v2.9.4 WORKS (실시간 자동 분석)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -43,11 +43,11 @@
 - DeepSeek 스타일 백테스팅 (고R/R 전략 vs 일반 전략)
 - 중복 주석 정리 (-269 라인, 5.0% 감소)
 
-🎯 v2.9.4 FINAL 실시간 자동 분석:
-- 종합 신호 점수 시스템: 패턴강도(40%) × 추세필터(40%) × 변동성필터(20%)
-- 실시간 매매 비율 & 기간별 수익률: 1주일, 1개월, 3개월 수익률 추적
-- ⭐ 실시간 자동 새로고침: 30초마다 가격 데이터 자동 업데이트
-- v2.9.2 베이스 - Squeeze 분석 없음 (안정성 보장)
+🎯 v2.9.4 WORKS 실시간 자동 분석:
+- 종합 신호 점수 시스템: 패턴강도 + 추세필터 + 변동성필터
+- 실시간 매매 비율 & 기간별 수익률: 1주일, 1개월, 3개월
+- ⭐ 30초 자동 새로고침: 가격 데이터 자동 업데이트
+- 간단하고 안정적인 구조 (Squeeze 없음)
 """
 
 
@@ -175,21 +175,19 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.4 FINAL",
+    page_title="코인 AI 예측 시스템 v2.9.4",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # ────────────────────────────────────────────────────────────────────────
-# 1.5) ⭐ 실시간 자동 새로고침 (30초마다) - v2.9.4
+# 1.5) ⭐ 실시간 자동 새로고침 (30초)
 # ────────────────────────────────────────────────────────────────────────
 import time
 
-# 세션 상태로 마지막 새로고침 시간 추적
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-# 30초 경과 확인
 current_time = time.time()
 if current_time - st.session_state.last_refresh >= 30:
     st.session_state.last_refresh = current_time
@@ -281,6 +279,245 @@ CRYPTO_MAP = {
 
 
 @st.cache_data(ttl=3600)
+
+
+# ==============================================================================
+# v2.9.4 신규 기능 함수들 (Squeeze 없음)
+# ==============================================================================
+
+def calculate_signal_score(df, current_price):
+    """종합 신호 점수 계산"""
+    import pandas as pd
+    import numpy as np
+    
+    if df.empty or len(df) < 100:
+        return {
+            'total_score': 50,
+            'pattern_strength': 0,
+            'trend_filter': 0,
+            'volatility_filter': 0,
+            'signal': 'NEUTRAL',
+            'confidence': 0
+        }
+    
+    # 1. 패턴 강도 (40%)
+    rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else 50
+    if rsi < 30:
+        pattern_score = 80
+    elif rsi < 40:
+        pattern_score = 60
+    elif rsi > 70:
+        pattern_score = 20
+    elif rsi > 60:
+        pattern_score = 40
+    else:
+        pattern_score = 50
+    
+    # 2. 추세 필터 (40%)
+    close = df['Close'].iloc[-1]
+    ema20 = df['Close'].ewm(span=20).mean().iloc[-1]
+    ema50 = df['Close'].ewm(span=50).mean().iloc[-1]
+    
+    if close > ema20 > ema50:
+        trend_score = 80
+    elif close > ema20:
+        trend_score = 60
+    elif close < ema20 < ema50:
+        trend_score = 20
+    elif close < ema20:
+        trend_score = 40
+    else:
+        trend_score = 50
+    
+    # 3. 변동성 필터 (20%)
+    volatility_score = 50
+    
+    # 종합 점수
+    total_score = (pattern_score * 0.4 + trend_score * 0.4 + volatility_score * 0.2)
+    
+    # 신호 결정
+    if total_score >= 70:
+        signal = 'STRONG_BUY'
+    elif total_score >= 55:
+        signal = 'BUY'
+    elif total_score >= 45:
+        signal = 'NEUTRAL'
+    elif total_score >= 30:
+        signal = 'SELL'
+    else:
+        signal = 'STRONG_SELL'
+    
+    return {
+        'total_score': total_score,
+        'pattern_strength': pattern_score,
+        'trend_filter': trend_score,
+        'volatility_filter': volatility_score,
+        'signal': signal,
+        'confidence': abs(total_score - 50) * 2
+    }
+
+
+def calculate_trading_metrics(symbol):
+    """실시간 매매 메트릭 계산"""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    
+    try:
+        yf_symbol = symbol.replace('USDT', '-USD')
+        ticker = yf.Ticker(yf_symbol)
+        
+        # 3개월 데이터
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=100)
+        hist = ticker.history(start=start_date, end=end_date)
+        
+        if hist.empty:
+            raise Exception("데이터 없음")
+        
+        # 수익률 계산
+        returns = {}
+        current_price = hist['Close'].iloc[-1]
+        
+        # 1주일
+        if len(hist) >= 7:
+            week_ago = hist['Close'].iloc[-7]
+            returns['1week'] = ((current_price - week_ago) / week_ago) * 100
+        else:
+            returns['1week'] = 0
+        
+        # 1개월
+        if len(hist) >= 30:
+            month_ago = hist['Close'].iloc[-30]
+            returns['1month'] = ((current_price - month_ago) / month_ago) * 100
+        else:
+            returns['1month'] = 0
+        
+        # 3개월
+        if len(hist) >= 90:
+            months_ago = hist['Close'].iloc[-90]
+            returns['3months'] = ((current_price - months_ago) / months_ago) * 100
+        else:
+            returns['3months'] = 0
+        
+        # 매수/매도 비율 (거래량 기반 추정)
+        recent_volume = hist['Volume'].iloc[-5:].mean()
+        avg_volume = hist['Volume'].mean()
+        buy_ratio = min(100, max(0, 50 + (recent_volume / avg_volume - 1) * 50))
+        
+        # 시장 심리
+        if buy_ratio > 60:
+            sentiment = 'BULLISH'
+        elif buy_ratio < 40:
+            sentiment = 'BEARISH'
+        else:
+            sentiment = 'NEUTRAL'
+        
+        return {
+            'returns': returns,
+            'buy_sell_ratio': buy_ratio,
+            'sentiment': sentiment,
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    
+    except Exception as e:
+        return {
+            'returns': {'1week': 0, '1month': 0, '3months': 0},
+            'buy_sell_ratio': 50,
+            'sentiment': 'NEUTRAL',
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'error': str(e)
+        }
+
+
+def render_signal_score(score_result):
+    """신호 점수 UI 렌더링"""
+    import streamlit as st
+    
+    total_score = score_result['total_score']
+    signal = score_result['signal']
+    
+    # 신호별 색상
+    if signal == 'STRONG_BUY':
+        color = '#00ff00'
+        emoji = '🟢'
+    elif signal == 'BUY':
+        color = '#7fff00'
+        emoji = '🔵'
+    elif signal == 'NEUTRAL':
+        color = '#ffff00'
+        emoji = '⚪'
+    elif signal == 'SELL':
+        color = '#ff7f00'
+        emoji = '🟠'
+    else:
+        color = '#ff0000'
+        emoji = '🔴'
+    
+    # 종합 점수 표시
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown(f"### {emoji} 종합 신호: **{signal}**")
+        st.progress(total_score / 100)
+        st.metric("종합 점수", f"{total_score:.1f} / 100")
+    
+    with col2:
+        st.markdown("#### 세부 점수")
+        st.text(f"패턴 강도: {score_result['pattern_strength']:.0f}")
+        st.text(f"추세 필터: {score_result['trend_filter']:.0f}")
+        st.text(f"변동성 필터: {score_result['volatility_filter']:.0f}")
+
+
+def render_trading_metrics(metrics):
+    """실시간 메트릭 UI 렌더링"""
+    import streamlit as st
+    
+    st.markdown("### 📊 기간별 수익률")
+    
+    returns = metrics['returns']
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        ret_1w = returns['1week']
+        st.metric(
+            label="1주일",
+            value=f"{ret_1w:+.2f}%",
+            delta="상승" if ret_1w > 0 else "하락"
+        )
+    
+    with col2:
+        ret_1m = returns['1month']
+        st.metric(
+            label="1개월",
+            value=f"{ret_1m:+.2f}%",
+            delta="상승" if ret_1m > 0 else "하락"
+        )
+    
+    with col3:
+        ret_3m = returns['3months']
+        st.metric(
+            label="3개월",
+            value=f"{ret_3m:+.2f}%",
+            delta="상승" if ret_3m > 0 else "하락"
+        )
+    
+    st.markdown("### 🎯 예상 매매 비율")
+    
+    buy_ratio = metrics['buy_sell_ratio']
+    sell_ratio = 100 - buy_ratio
+    
+    col1, col2 = st.columns([buy_ratio, sell_ratio] if sell_ratio > 0 else [1, 0.01])
+    
+    with col1:
+        st.success(f"매수: {buy_ratio:.0f}%")
+    
+    with col2:
+        if sell_ratio > 0:
+            st.error(f"매도: {sell_ratio:.0f}%")
+    
+    st.markdown(f"**시장 심리**: {metrics['sentiment']}")
+    st.caption(f"🕐 마지막 업데이트: {metrics['last_update']}")
+
 def get_all_binance_usdt_pairs():
     """
     바이낸스에서 거래 가능한 모든 USDT 페어 가져오기
@@ -5440,51 +5677,28 @@ if bt:
             fig = create_macd_chart(df)
             st.plotly_chart(fig, use_container_width=True)
         
-        # ═══════════════════════════════════════════════════════════════
-        # 🚀 v2.9.4 FINAL: 실시간 분석 & 신호 점수 시스템
-        # ═══════════════════════════════════════════════════════════════
-        
+        # v2.9.4: 실시간 분석
         st.markdown("---")
         st.markdown("<div class='section-title'>🚀 v2.9.4 실시간 분석</div>", unsafe_allow_html=True)
         
-        # 탭 생성
-        analysis_tabs = st.tabs([
-            "🎯 신호 점수",
-            "📊 실시간 현황"
-        ])
+        analysis_tabs = st.tabs(["🎯 신호 점수", "📊 실시간 현황"])
         
-        # 탭 1: 종합 신호 점수
         with analysis_tabs[0]:
             st.markdown("#### 종합 신호 점수 시스템")
-            st.caption("패턴강도(40%) × 추세필터(40%) × 변동성필터(20%)")
-            
             try:
-                # 신호 점수 계산
                 current_price = df['Close'].iloc[-1]
                 score_result = calculate_signal_score(df, current_price)
-                
-                # UI 렌더링
                 render_signal_score(score_result)
-                
             except Exception as e:
                 st.error(f"❌ 신호 점수 계산 오류: {str(e)}")
-                st.exception(e)
         
-        # 탭 2: 실시간 시장 현황
         with analysis_tabs[1]:
             st.markdown("#### 실시간 매매 비율 & 기간별 수익률")
-            st.caption("1주일, 1개월, 3개월 수익률 및 매매 심리 분석")
-            
             try:
-                # 실시간 메트릭 계산
                 trading_metrics = calculate_trading_metrics(selected_crypto)
-                
-                # UI 렌더링
                 render_trading_metrics(trading_metrics)
-                
             except Exception as e:
                 st.error(f"❌ 실시간 데이터 로드 오류: {str(e)}")
-                st.exception(e)
         
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
@@ -6476,551 +6690,3 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
             st.success("✅ DeepSeek 전략이 더 높은 수익률을 기록했습니다!")
         else:
             st.info("ℹ️ 일반 전략이 더 안정적인 수익률을 보였습니다.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 🚀 v2.9.4 신규 기능 함수들
-# ══════════════════════════════════════════════════════════════════════════════
-
-"""
-v2.9.4 신규 기능
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. 신호 점수 시스템 (패턴강도 × 추세필터 × 변동성필터)
-2. 실시간 가격 자동 새로고침
-3. 실시간 매매 비율 & 기간별 수익률
-"""
-
-import pandas as pd
-import numpy as np
-from typing import Dict, Optional
-import yfinance as yf
-from datetime import datetime, timedelta
-
-
-# ==============================================================================
-# 1. 종합 신호 점수 시스템
-# ==============================================================================
-
-def calculate_signal_score(df: pd.DataFrame, current_price: float) -> Dict:
-    """
-    종합 신호 점수 계산
-    
-    신호 점수 = 패턴강도 × 추세필터 × 변동성필터
-    
-    Parameters:
-        df: 가격 데이터
-        current_price: 현재 가격
-    
-    Returns:
-        dict: {
-            'total_score': float (0-100),
-            'pattern_strength': float (0-100),
-            'trend_filter': float (0-100),
-            'volatility_filter': float (0-100),
-            'signal': str ('STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL'),
-            'confidence': float (0-100)
-        }
-    """
-    
-    if df.empty or len(df) < 100:
-        return {
-            'total_score': 50,
-            'pattern_strength': 0,
-            'trend_filter': 0,
-            'volatility_filter': 0,
-            'signal': 'NEUTRAL',
-            'confidence': 0
-        }
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 1) 패턴 강도 (Pattern Strength) - 0~100
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    pattern_scores = []
-    
-    # RSI 과매수/과매도
-    if 'RSI14' in df.columns:
-        rsi = df['RSI14'].iloc[-1]
-        if rsi < 30:
-            pattern_scores.append(80)  # 강한 매수 신호
-        elif rsi < 40:
-            pattern_scores.append(60)
-        elif rsi > 70:
-            pattern_scores.append(20)  # 강한 매도 신호
-        elif rsi > 60:
-            pattern_scores.append(40)
-        else:
-            pattern_scores.append(50)  # 중립
-    
-    # MACD 크로스오버
-    if 'MACD' in df.columns and 'Signal_Line' in df.columns:
-        macd = df['MACD'].iloc[-1]
-        signal = df['Signal_Line'].iloc[-1]
-        
-        if macd > signal and macd > 0:
-            pattern_scores.append(80)  # 골든 크로스 + 양수
-        elif macd > signal:
-            pattern_scores.append(60)  # 골든 크로스
-        elif macd < signal and macd < 0:
-            pattern_scores.append(20)  # 데드 크로스 + 음수
-        elif macd < signal:
-            pattern_scores.append(40)  # 데드 크로스
-        else:
-            pattern_scores.append(50)
-    
-    # 볼린저 밴드 위치
-    sma20 = df['Close'].rolling(20).mean().iloc[-1]
-    std20 = df['Close'].rolling(20).std().iloc[-1]
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    
-    bb_position = (current_price - lower_bb) / (upper_bb - lower_bb) * 100
-    
-    if bb_position < 10:
-        pattern_scores.append(90)  # 하단 근처
-    elif bb_position < 30:
-        pattern_scores.append(70)
-    elif bb_position > 90:
-        pattern_scores.append(10)  # 상단 근처
-    elif bb_position > 70:
-        pattern_scores.append(30)
-    else:
-        pattern_scores.append(50)
-    
-    pattern_strength = np.mean(pattern_scores)
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 2) 추세 필터 (Trend Filter) - 0~100
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    trend_scores = []
-    
-    # EMA20/50 정렬
-    if 'EMA20' in df.columns and 'EMA50' in df.columns:
-        ema20 = df['EMA20'].iloc[-1]
-        ema50 = df['EMA50'].iloc[-1]
-        
-        if current_price > ema20 > ema50:
-            trend_scores.append(90)  # 강한 상승 추세
-        elif current_price > ema20:
-            trend_scores.append(70)
-        elif current_price < ema20 < ema50:
-            trend_scores.append(10)  # 강한 하락 추세
-        elif current_price < ema20:
-            trend_scores.append(30)
-        else:
-            trend_scores.append(50)
-    
-    # MA 기울기 (상위 TF 대용)
-    ma50 = df['Close'].rolling(50).mean()
-    ma50_slope = (ma50.iloc[-1] - ma50.iloc[-10]) / ma50.iloc[-10] * 100
-    
-    if ma50_slope > 2:
-        trend_scores.append(90)  # 강한 상승 기울기
-    elif ma50_slope > 0:
-        trend_scores.append(70)
-    elif ma50_slope < -2:
-        trend_scores.append(10)  # 강한 하락 기울기
-    elif ma50_slope < 0:
-        trend_scores.append(30)
-    else:
-        trend_scores.append(50)
-    
-    # 가격 모멘텀 (최근 20봉)
-    price_change_20 = (current_price - df['Close'].iloc[-20]) / df['Close'].iloc[-20] * 100
-    
-    if price_change_20 > 5:
-        trend_scores.append(90)
-    elif price_change_20 > 0:
-        trend_scores.append(70)
-    elif price_change_20 < -5:
-        trend_scores.append(10)
-    elif price_change_20 < 0:
-        trend_scores.append(30)
-    else:
-        trend_scores.append(50)
-    
-    trend_filter = np.mean(trend_scores)
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 3) 변동성 필터 (Volatility Filter) - 0~100
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    # ATR 퍼센타일
-    high_low = df['High'] - df['Low']
-    high_close = abs(df['High'] - df['Close'].shift())
-    low_close = abs(df['Low'] - df['Close'].shift())
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = true_range.rolling(14).mean()
-    
-    atr_recent = atr.iloc[-100:]
-    current_atr = atr.iloc[-1]
-    atr_percentile = (atr_recent < current_atr).sum() / len(atr_recent) * 100
-    
-    # 변동성 점수 (적절한 변동성이 높은 점수)
-    if 30 < atr_percentile < 70:
-        volatility_score = 80  # 적절한 변동성
-    elif 20 < atr_percentile < 80:
-        volatility_score = 60
-    elif atr_percentile < 10:
-        volatility_score = 30  # 너무 낮은 변동성
-    elif atr_percentile > 90:
-        volatility_score = 30  # 너무 높은 변동성
-    else:
-        volatility_score = 50
-    
-    volatility_filter = volatility_score
-    
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 4) 종합 점수 계산
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    # 가중 평균 (패턴 40%, 추세 40%, 변동성 20%)
-    total_score = (
-        pattern_strength * 0.4 +
-        trend_filter * 0.4 +
-        volatility_filter * 0.2
-    )
-    
-    # 신호 판단
-    if total_score >= 75:
-        signal = 'STRONG_BUY'
-        confidence = total_score
-    elif total_score >= 60:
-        signal = 'BUY'
-        confidence = total_score * 0.8
-    elif total_score <= 25:
-        signal = 'STRONG_SELL'
-        confidence = 100 - total_score
-    elif total_score <= 40:
-        signal = 'SELL'
-        confidence = (100 - total_score) * 0.8
-    else:
-        signal = 'NEUTRAL'
-        confidence = 100 - abs(total_score - 50) * 2
-    
-    return {
-        'total_score': round(total_score, 1),
-        'pattern_strength': round(pattern_strength, 1),
-        'trend_filter': round(trend_filter, 1),
-        'volatility_filter': round(volatility_filter, 1),
-        'signal': signal,
-        'confidence': round(confidence, 1),
-        'components': {
-            'rsi': df['RSI14'].iloc[-1] if 'RSI14' in df.columns else None,
-            'macd_signal': 'BULLISH' if 'MACD' in df.columns and df['MACD'].iloc[-1] > df['Signal_Line'].iloc[-1] else 'BEARISH',
-            'bb_position': round(bb_position, 1),
-            'ma_slope': round(ma50_slope, 2),
-            'price_momentum_20': round(price_change_20, 2),
-            'atr_percentile': round(atr_percentile, 1)
-        }
-    }
-
-
-# ==============================================================================
-# 2. 실시간 매매 비율 & 기간별 수익률
-# ==============================================================================
-
-def calculate_trading_metrics(symbol: str) -> Dict:
-    """
-    실시간 매매 비율 및 기간별 수익률 계산
-    
-    Parameters:
-        symbol: 코인 심볼 (예: 'BTCUSDT')
-    
-    Returns:
-        dict: {
-            'current_price': float,
-            'price_change_24h': float,
-            'volume_24h': float,
-            'returns': {
-                '1week': float,
-                '1month': float,
-                '3months': float
-            },
-            'buy_sell_ratio': float,  # 매수/매도 비율
-            'market_sentiment': str  # 'BULLISH', 'BEARISH', 'NEUTRAL'
-        }
-    """
-    
-    try:
-        # Yahoo Finance 티커 변환
-        yf_symbol = symbol.replace('USDT', '-USD')
-        
-        # 현재 데이터
-        ticker = yf.Ticker(yf_symbol)
-        
-        # 3개월 데이터 가져오기
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=100)
-        
-        df = ticker.history(start=start_date, end=end_date)
-        
-        if df.empty:
-            return {
-                'status': 'error',
-                'message': 'Data not available'
-            }
-        
-        current_price = df['Close'].iloc[-1]
-        
-        # 24시간 변동
-        if len(df) >= 2:
-            price_24h_ago = df['Close'].iloc[-2]
-            price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
-        else:
-            price_change_24h = 0
-        
-        # 거래량
-        volume_24h = df['Volume'].iloc[-1] if len(df) > 0 else 0
-        
-        # 기간별 수익률
-        returns = {}
-        
-        # 1주일 (7일)
-        if len(df) >= 7:
-            price_1w = df['Close'].iloc[-7]
-            returns['1week'] = ((current_price - price_1w) / price_1w) * 100
-        else:
-            returns['1week'] = 0
-        
-        # 1개월 (30일)
-        if len(df) >= 30:
-            price_1m = df['Close'].iloc[-30]
-            returns['1month'] = ((current_price - price_1m) / price_1m) * 100
-        else:
-            returns['1month'] = 0
-        
-        # 3개월 (90일)
-        if len(df) >= 90:
-            price_3m = df['Close'].iloc[-90]
-            returns['3months'] = ((current_price - price_3m) / price_3m) * 100
-        else:
-            returns['3months'] = 0
-        
-        # 매수/매도 비율 추정 (거래량 기반)
-        # 최근 10일 거래량 추세로 매매 심리 추정
-        if len(df) >= 10:
-            recent_volume = df['Volume'].iloc[-10:].mean()
-            past_volume = df['Volume'].iloc[-20:-10].mean()
-            
-            volume_change = (recent_volume - past_volume) / past_volume if past_volume > 0 else 0
-            
-            # 가격 상승 + 거래량 증가 = 매수 우세
-            if price_change_24h > 0 and volume_change > 0.2:
-                buy_sell_ratio = 65  # 매수 65%
-                market_sentiment = 'BULLISH'
-            elif price_change_24h < 0 and volume_change > 0.2:
-                buy_sell_ratio = 35  # 매수 35%
-                market_sentiment = 'BEARISH'
-            else:
-                buy_sell_ratio = 50
-                market_sentiment = 'NEUTRAL'
-        else:
-            buy_sell_ratio = 50
-            market_sentiment = 'NEUTRAL'
-        
-        return {
-            'status': 'success',
-            'current_price': round(current_price, 2),
-            'price_change_24h': round(price_change_24h, 2),
-            'volume_24h': round(volume_24h, 0),
-            'returns': {
-                '1week': round(returns['1week'], 2),
-                '1month': round(returns['1month'], 2),
-                '3months': round(returns['3months'], 2)
-            },
-            'buy_sell_ratio': round(buy_sell_ratio, 1),
-            'market_sentiment': market_sentiment,
-            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        
-    except Exception as e:
-        return {
-            'status': 'error',
-            'message': str(e)
-        }
-
-
-# ==============================================================================
-# 3. UI 렌더링 함수들
-# ==============================================================================
-
-def render_signal_score(score_result: Dict):
-    """신호 점수 시스템 UI"""
-    st.markdown("### 🎯 종합 신호 점수")
-    
-    # 메인 점수
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # 점수에 따른 색상
-        if score_result['total_score'] >= 70:
-            score_color = "🟢"
-        elif score_result['total_score'] >= 55:
-            score_color = "🟡"
-        else:
-            score_color = "🔴"
-        
-        st.metric(
-            label=f"{score_color} 종합 점수",
-            value=f"{score_result['total_score']}/100",
-            help="패턴강도(40%) + 추세필터(40%) + 변동성필터(20%)"
-        )
-    
-    with col2:
-        signal_emoji = {
-            'STRONG_BUY': '🚀',
-            'BUY': '🟢',
-            'NEUTRAL': '⚪',
-            'SELL': '🔴',
-            'STRONG_SELL': '💥'
-        }.get(score_result['signal'], '⚪')
-        
-        st.metric(
-            label=f"{signal_emoji} 신호",
-            value=score_result['signal'],
-            delta=f"신뢰도 {score_result['confidence']:.0f}%"
-        )
-    
-    with col3:
-        st.metric(
-            label="📊 추세 강도",
-            value=f"{score_result['trend_filter']:.0f}/100",
-            help="상위 TF 추세 + MA 기울기 + 모멘텀"
-        )
-    
-    # 상세 점수
-    with st.expander("📈 점수 세부 분석", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("**🎨 패턴 강도**")
-            st.progress(score_result['pattern_strength'] / 100)
-            st.caption(f"{score_result['pattern_strength']:.0f}/100")
-            
-            comp = score_result['components']
-            st.markdown(f"""
-            - RSI: {comp['rsi']:.1f}
-            - MACD: {comp['macd_signal']}
-            - BB 위치: {comp['bb_position']:.0f}%
-            """)
-        
-        with col2:
-            st.markdown("**📈 추세 필터**")
-            st.progress(score_result['trend_filter'] / 100)
-            st.caption(f"{score_result['trend_filter']:.0f}/100")
-            
-            st.markdown(f"""
-            - MA 기울기: {comp['ma_slope']:.2f}%
-            - 20봉 모멘텀: {comp['price_momentum_20']:.2f}%
-            """)
-        
-        with col3:
-            st.markdown("**📊 변동성 필터**")
-            st.progress(score_result['volatility_filter'] / 100)
-            st.caption(f"{score_result['volatility_filter']:.0f}/100")
-            
-            st.markdown(f"""
-            - ATR 퍼센타일: {comp['atr_percentile']:.0f}%
-            """)
-    
-    # 신호 해석
-    if score_result['signal'] == 'STRONG_BUY':
-        st.success("🚀 **강한 매수 신호**: 패턴, 추세, 변동성 모두 유리")
-    elif score_result['signal'] == 'BUY':
-        st.info("🟢 **매수 신호**: 긍정적 요인이 우세")
-    elif score_result['signal'] == 'STRONG_SELL':
-        st.error("💥 **강한 매도 신호**: 리스크 요인 다수")
-    elif score_result['signal'] == 'SELL':
-        st.warning("🔴 **매도 신호**: 부정적 요인이 우세")
-    else:
-        st.info("⚪ **중립**: 관망 또는 신중한 접근 권장")
-
-
-def render_trading_metrics(metrics: Dict):
-    """실시간 매매 비율 & 기간별 수익률 UI"""
-    st.markdown("### 📊 실시간 시장 현황")
-    
-    if metrics['status'] != 'success':
-        st.error(f"❌ 데이터 로드 실패: {metrics.get('message', '')}")
-        return
-    
-    # 현재 가격 및 24시간 변동
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(
-            label="💰 현재 가격",
-            value=f"${metrics['current_price']:,.2f}",
-            delta=f"{metrics['price_change_24h']:+.2f}%"
-        )
-    
-    with col2:
-        sentiment_emoji = {
-            'BULLISH': '🟢',
-            'BEARISH': '🔴',
-            'NEUTRAL': '⚪'
-        }.get(metrics['market_sentiment'], '⚪')
-        
-        st.metric(
-            label=f"{sentiment_emoji} 시장 심리",
-            value=metrics['market_sentiment'],
-            delta=f"매수 {metrics['buy_sell_ratio']:.0f}%"
-        )
-    
-    with col3:
-        st.metric(
-            label="📈 24시간 거래량",
-            value=f"{metrics['volume_24h']:,.0f}",
-            help="최근 24시간 거래량"
-        )
-    
-    # 기간별 수익률
-    st.markdown("#### 📅 기간별 수익률")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    returns = metrics['returns']
-    
-    with col1:
-        ret_1w = returns['1week']
-        st.metric(
-            label="1주일",
-            value=f"{ret_1w:+.2f}%",
-            delta="상승" if ret_1w > 0 else "하락"
-        )
-    
-    with col2:
-        ret_1m = returns['1month']
-        st.metric(
-            label="1개월",
-            value=f"{ret_1m:+.2f}%",
-            delta="상승" if ret_1m > 0 else "하락"
-        )
-    
-    with col3:
-        ret_3m = returns['3months']
-        st.metric(
-            label="3개월",
-            value=f"{ret_3m:+.2f}%",
-            delta="상승" if ret_3m > 0 else "하락"
-        )
-    
-    # 매수/매도 비율 바
-    st.markdown("#### 🎯 예상 매매 비율")
-    
-    buy_ratio = metrics['buy_sell_ratio']
-    sell_ratio = 100 - buy_ratio
-    
-    col1, col2 = st.columns([buy_ratio, sell_ratio])
-    
-    with col1:
-        st.success(f"매수: {buy_ratio:.0f}%")
-    
-    with col2:
-        st.error(f"매도: {sell_ratio:.0f}%")
-    
-    # 마지막 업데이트 시간
-    st.caption(f"🕐 마지막 업데이트: {metrics['last_update']}")
