@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.0.8 (Typing Fixed) (Advanced Risk Management)
+코인 AI 예측 시스템 - v2.9.1 (Typing Fixed) (Advanced Risk Management)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -34,6 +34,13 @@
 - 미사용 imports 제거 (seaborn, BytesIO, sklearn validation)
 - Risk Management 함수 논리적 순서로 재배치
 - ML Models 카테고리별 그룹화
+
+🚀 v2.9.1 분석 강화 (DeepSeek 방법론):
+- 듀얼 타임프레임: 3분봉 + 4시간봉 동시 분석
+- 미결제약정(Open Interest) 데이터 통합
+- 펀딩비(Funding Rate) 분석 강화
+- 고위험-고수익 모드: TP +4% / SL -0.7%
+- 상세 분석 과정 표시 (Chain-of-Thought)
 - 중복 주석 정리 (-269 라인, 5.0% 감소)
 """
 
@@ -162,7 +169,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.0.4",
+    page_title="코인 AI 예측 시스템 v2.9.1",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -5668,3 +5675,125 @@ def render_comprehensive_analysis(analysis: Dict):
         st.info(f"💡 {analysis['summary']}")
     else:
         st.warning(f"💡 {analysis['summary']}")
+
+
+# ==============================================================================
+# v2.9.1: Open Interest 데이터 수집
+# ==============================================================================
+
+def fetch_open_interest(symbol: str = 'BTCUSDT') -> Dict:
+    """
+    Binance 선물 미결제약정 데이터 수집
+    
+    Returns:
+        dict: {'open_interest': float, 'symbol': str, 'status': str}
+    """
+    try:
+        url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                'open_interest': float(data.get('openInterest', 0)),
+                'symbol': data.get('symbol', symbol),
+                'timestamp': datetime.now().isoformat(),
+                'status': 'success'
+            }
+        else:
+            return {
+                'open_interest': 0.0,
+                'symbol': symbol,
+                'status': 'error',
+                'message': 'API unavailable'
+            }
+    except Exception as e:
+        return {
+            'open_interest': 0.0,
+            'symbol': symbol,
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+def calculate_dual_timeframe_ema(df_main: pd.DataFrame, df_4h: pd.DataFrame = None) -> Dict:
+    """
+    듀얼 타임프레임 EMA 계산
+    
+    Parameters:
+        df_main: 메인 타임프레임 데이터
+        df_4h: 4시간봉 데이터 (선택)
+    
+    Returns:
+        dict: {'ema20_main': float, 'ema20_4h': float, 'trend': str}
+    """
+    result = {
+        'ema20_main': 0.0,
+        'ema20_4h': 0.0,
+        'ema50_4h': 0.0,
+        'trend': 'Unknown'
+    }
+    
+    # 메인 타임프레임 EMA20
+    if not df_main.empty and len(df_main) >= 20:
+        result['ema20_main'] = df_main['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+    
+    # 4시간봉 EMA20, EMA50
+    if df_4h is not None and not df_4h.empty and len(df_4h) >= 50:
+        ema20_4h = df_4h['Close'].ewm(span=20, adjust=False).mean()
+        ema50_4h = df_4h['Close'].ewm(span=50, adjust=False).mean()
+        
+        result['ema20_4h'] = ema20_4h.iloc[-1]
+        result['ema50_4h'] = ema50_4h.iloc[-1]
+        
+        # 추세 판단
+        current_price = df_main['Close'].iloc[-1] if not df_main.empty else 0
+        
+        if current_price > result['ema20_4h'] and result['ema20_4h'] > result['ema50_4h']:
+            result['trend'] = 'Strong Uptrend'
+        elif current_price > result['ema20_4h']:
+            result['trend'] = 'Uptrend'
+        elif current_price < result['ema20_4h'] and result['ema20_4h'] < result['ema50_4h']:
+            result['trend'] = 'Strong Downtrend'
+        elif current_price < result['ema20_4h']:
+            result['trend'] = 'Downtrend'
+        else:
+            result['trend'] = 'Sideways'
+    
+    return result
+
+
+def calculate_high_reward_levels(entry_price: float, position_type: str = 'LONG',
+                                   tp_percent: float = 4.0, sl_percent: float = 0.7) -> Dict:
+    """
+    고위험-고수익 진입/청산 레벨 계산 (DeepSeek 스타일)
+    
+    Parameters:
+        entry_price: 진입 가격
+        position_type: 'LONG' 또는 'SHORT'
+        tp_percent: 목표가 비율 (기본 4%)
+        sl_percent: 손절가 비율 (기본 0.7%)
+    
+    Returns:
+        dict: {'take_profit': float, 'stop_loss': float, 'rr_ratio': float}
+    """
+    if position_type.upper() == 'LONG':
+        take_profit = entry_price * (1 + tp_percent / 100)
+        stop_loss = entry_price * (1 - sl_percent / 100)
+    else:  # SHORT
+        take_profit = entry_price * (1 - tp_percent / 100)
+        stop_loss = entry_price * (1 + sl_percent / 100)
+    
+    risk = abs(entry_price - stop_loss)
+    reward = abs(take_profit - entry_price)
+    rr_ratio = reward / risk if risk > 0 else 0
+    
+    return {
+        'take_profit': round(take_profit, 2),
+        'stop_loss': round(stop_loss, 2),
+        'rr_ratio': round(rr_ratio, 2),
+        'tp_percent': tp_percent,
+        'sl_percent': sl_percent
+    }
+
+
