@@ -5628,6 +5628,7 @@ if bt:
             else:
                 st.info("ℹ️ 백테스팅할 신호를 선택해주세요.")
         
+        
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
         st.warning("""
