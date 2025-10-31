@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.0.4 (Typing Fixed) (Advanced Risk Management)
+코인 AI 예측 시스템 - v2.9.0.8 (Typing Fixed) (Advanced Risk Management)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -9,7 +9,6 @@
 
 🟢 v2.8.0 신규 기능:
 1. Kelly Criterion: AI 신뢰도 기반 최적 Position Size
-2. Trailing Stop Loss: 동적 손절가 (ATR 기반)
 3. Monte Carlo 시뮬레이션: 확률적 손익 분석
 4. Position Sizing 전략 비교: 4가지 전략 성과 비교
 5. 포트폴리오 리스크 관리: 다중 포지션 통합 분석
@@ -2598,61 +2597,6 @@ def analyze_comprehensive_market(
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def calculate_trailing_stop(entry_price: float, current_price: float, highest_price: float,
-                            atr: float, atr_multiplier: float = 2.0, position_type: str = 'LONG',
-                            min_profit_pct: float = 0.01) -> dict:
-    """
-    Trailing Stop Loss 계산 (ATR 기반)
-    - 가격 상승 시 Stop Loss도 따라 상승
-    - 하락 시 Stop Loss 고정
-    - 이익 보호 + 추세 지속 허용
-    """
-    position_type = position_type.upper()
-    
-    if position_type == 'LONG':
-        initial_stop = entry_price - (atr * atr_multiplier)
-        trailing_stop = highest_price - (atr * atr_multiplier)
-        min_stop_with_profit = entry_price * (1 + min_profit_pct)
-        
-        final_stop = max(initial_stop, trailing_stop)
-        if current_price > min_stop_with_profit:
-            final_stop = max(final_stop, min_stop_with_profit)
-        if final_stop > current_price * 0.95:
-            final_stop = current_price * 0.95
-        
-        locked_profit_pct = ((final_stop - entry_price) / entry_price) * 100 if final_stop > entry_price else 0.0
-        distance_from_current = ((current_price - final_stop) / current_price) * 100
-    else:  # SHORT
-        initial_stop = entry_price + (atr * atr_multiplier)
-        lowest_price = highest_price
-        trailing_stop = lowest_price + (atr * atr_multiplier)
-        min_stop_with_profit = entry_price * (1 - min_profit_pct)
-        
-        final_stop = min(initial_stop, trailing_stop)
-        if current_price < min_stop_with_profit:
-            final_stop = min(final_stop, min_stop_with_profit)
-        if final_stop < current_price * 1.05:
-            final_stop = current_price * 1.05
-        
-        locked_profit_pct = ((entry_price - final_stop) / entry_price) * 100 if final_stop < entry_price else 0.0
-        distance_from_current = ((final_stop - current_price) / current_price) * 100
-    
-    moved = abs(trailing_stop - initial_stop) > (atr * 0.1)
-    
-    return {
-        'initial_stop': round(initial_stop, 2),
-        'trailing_stop': round(trailing_stop, 2),
-        'final_stop': round(final_stop, 2),
-        'distance_from_current': round(distance_from_current, 2),
-        'moved': moved,
-        'locked_profit_pct': round(locked_profit_pct, 2),
-        'atr_used': atr,
-        'atr_multiplier': atr_multiplier,
-        'position_type': position_type
-    }
-
-
-
 
 # [v2.9.0] Monte Carlo simulation removed
 
@@ -4722,105 +4666,6 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
         """)
 
 
-def render_trailing_stop_info(trailing_result: dict, entry_price: float, current_price: float):
-    """📍 Trailing Stop Loss 정보 표시"""
-    st.markdown("<div class='section-title'>📍 Trailing Stop Loss 분석</div>", unsafe_allow_html=True)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="초기 손절가",
-            value=f"${trailing_result['initial_stop']:,.2f}",
-            help="진입 시점의 고정 손절가"
-        )
-    
-    with col2:
-        movement_delta = trailing_result['trailing_stop'] - trailing_result['initial_stop']
-        st.metric(
-            label="Trailing 손절가",
-            value=f"${trailing_result['trailing_stop']:,.2f}",
-            delta=f"${movement_delta:,.2f}" if trailing_result['moved'] else "0",
-            help="최고가 기준 동적 조정"
-        )
-    
-    with col3:
-        st.metric(
-            label="최종 손절가",
-            value=f"${trailing_result['final_stop']:,.2f}",
-            delta=f"{trailing_result['distance_from_current']:.2f}%",
-            help="현재가 대비 거리"
-        )
-    
-    with col4:
-        if trailing_result['locked_profit_pct'] > 0:
-            st.metric(
-                label="확정 수익",
-                value=f"+{trailing_result['locked_profit_pct']:.2f}%",
-                help="손절가가 진입가 위로 올라가 수익 확정"
-            )
-        else:
-            st.metric(
-                label="확정 수익",
-                value="아직 없음",
-                help="손절가가 아직 진입가 아래"
-            )
-    
-    # Trailing Stop 설명
-    st.markdown("---")
-    
-    if trailing_result['moved']:
-        st.success("✅ Trailing Stop이 활성화되었습니다!")
-        st.info(f"""
-        📍 **Trailing Stop 동작 원리:**
-        
-        1. 초기 손절가: ${trailing_result['initial_stop']:,.2f} (진입 시 ATR 기반)
-        2. 가격이 상승하면 손절가도 따라 상승
-        3. 가격이 하락해도 손절가는 고정 (수익 보호)
-        4. 현재 손절가: ${trailing_result['final_stop']:,.2f}
-        
-        ✨ **장점:** 이익을 보호하면서 추세를 최대한 활용할 수 있습니다.
-        """)
-        
-        if trailing_result['locked_profit_pct'] > 0:
-            st.success(f"🎉 축하합니다! 현재 최소 **+{trailing_result['locked_profit_pct']:.2f}%**의 수익이 확정되었습니다.")
-    else:
-        st.info("📌 Trailing Stop이 아직 활성화되지 않았습니다. (가격이 충분히 상승하면 자동 활성화)")
-    
-    # 시각화
-    with st.expander("📈 Trailing Stop 시각화"):
-        fig = go.Figure()
-        
-        # 가격 범위
-        price_range = [entry_price * 0.95, current_price * 1.05]
-        
-        # 진입가
-        fig.add_hline(y=entry_price, line_dash="dash", line_color="blue", 
-                     annotation_text="진입가", annotation_position="right")
-        
-        # 현재가
-        fig.add_hline(y=current_price, line_dash="solid", line_color="green", 
-                     annotation_text="현재가", annotation_position="right")
-        
-        # 초기 손절가
-        fig.add_hline(y=trailing_result['initial_stop'], line_dash="dot", line_color="orange", 
-                     annotation_text="초기 Stop", annotation_position="left")
-        
-        # 최종 손절가
-        fig.add_hline(y=trailing_result['final_stop'], line_dash="solid", line_color="red", 
-                     annotation_text="Trailing Stop", annotation_position="left")
-        
-        fig.update_layout(
-            title="Trailing Stop Loss 시각화",
-            yaxis_title="가격 (USD)",
-            height=400,
-            showlegend=False
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-
-
-
 # [v2.9.0] Monte Carlo UI rendering removed
 
 def render_strategy_comparison(comparison: dict, investment_amount: float):
@@ -5531,77 +5376,11 @@ if bt:
         )
         render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
         
-        # 2. Trailing Stop Loss 분석
-        st.markdown("---")
-        highest_price = df['High'].tail(20).max()  # 최근 20개 캠들 중 최고가
-        trailing_result = calculate_trailing_stop(
-            entry_price=entry_price,
-            current_price=current_price,
-            highest_price=max(entry_price, highest_price),
-            atr=atr,
-            atr_multiplier=stop_loss_k,
-            position_type='LONG',
-            min_profit_pct=0.01
-        )
-        render_trailing_stop_info(trailing_result, entry_price, current_price)
-        
         # 3. Monte Carlo 시뮬레이션
         st.markdown("---")
 
         # 3. 실시간 글로벌 데이터 통합 분석 (v2.9.0)
         st.markdown('---')
-        st.markdown('<div class="section-title">🌐 실시간 글로벌 시장 데이터</div>', unsafe_allow_html=True)
-        
-        # API 키 가져오기
-        cryptopanic_key = None
-        fred_key = None
-        try:
-            if hasattr(st, 'secrets'):
-                cryptopanic_key = st.secrets.get('CRYPTOPANIC_API_KEY')
-                fred_key = st.secrets.get('FRED_API_KEY')
-        except: pass
-        
-        with st.spinner('📡 실시간 뉴스 수집...'):
-            news_data = fetch_cryptopanic_news(selected_crypto.replace('-USDT',''), cryptopanic_key, 20)
-            news_analysis = analyze_news_sentiment_advanced(news_data)
-        render_news_analysis(news_data, news_analysis)
-        st.markdown('---')
-        
-        with st.spinner('🌍 경제 지표 수집...'):
-            fred_data = fetch_fred_economic_data('CPIAUCSL', fred_key, 12)
-        render_macro_indicators(fred_data)
-        st.markdown('---')
-        
-        with st.spinner('⛓️ 온체인 데이터 수집...'):
-            dominance_data = fetch_btc_dominance()
-            kimchi_data = fetch_kimchi_premium(selected_crypto.replace('-USDT',''))
-            funding_data = fetch_funding_rate(selected_crypto)
-        render_onchain_metrics(dominance_data, kimchi_data, funding_data)
-        st.markdown('---')
-        
-        comprehensive = analyze_comprehensive_market(
-            selected_crypto, news_data, fred_data, dominance_data,
-            kimchi_data, funding_data, current_price, ai_prediction['confidence']/100.0
-        )
-        render_comprehensive_analysis(comprehensive)
-        # [v2.9.0] Monte Carlo 시뮬레이션 완전 제거됨
-        
-        # 4. Position Sizing 전략 비교
-        st.markdown("---")
-        strategy_comparison = compare_position_sizing_strategies(
-            investment_amount=investment_amount,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            ai_confidence=ai_prediction['confidence'],
-            volatility=volatility,
-            leverage=leverage_info['recommended'],
-            rr_ratio=rr_ratio
-        )
-        render_strategy_comparison(strategy_comparison, investment_amount)
-        
-        # 매도 전략 (신규)
-        st.markdown("---")
         render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
