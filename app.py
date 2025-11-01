@@ -1,3 +1,10 @@
+
+# === Debug toggle (UX) ===
+try:
+    _dbg = st.sidebar.checkbox("🔧 디버그 모드", help="에러 상세 메시지 및 매핑 시도 과정을 표시합니다.")
+    st.session_state["debug"] = bool(_dbg)
+except Exception:
+    pass
 # -*- coding: utf-8 -*-
 """
 코인 AI 예측 시스템 - v2.9.12 (커스터마이즈 대시보드)
@@ -621,84 +628,242 @@ def render_trading_metrics(metrics):
 
 @st.cache_data(ttl=3600, show_spinner=False)  # 1시간 캐싱 (코인 목록은 자주 바뀔지 않음)
 @st.cache_data(ttl=3600)  # 1시간 캐싱
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_all_coins_from_coingecko():
     """
-    CoinGecko API를 사용하여 모든 암호화폐 목록 가져오기
-    
-    Returns:
-        list: [(display_name, coin_id, symbol), ...]
-        예: [('Bitcoin (BTC)', 'bitcoin', 'BTC'), ...]
+    CoinGecko API를 사용하여 암호화폐 목록 (최대 500개) 가져오기
+    - 상위 시총 500개(250 * 2페이지)를 우선 정렬 후, 나머지는 이름순
     """
     try:
         if not COINGECKO_AVAILABLE:
             st.warning("⚠️ pycoingecko가 설치되지 않았습니다. 기본 목록만 사용 가능합니다.")
             return []
-        
+
         cg = CoinGeckoAPI()
+        # 전체 리스트 → 표시명/ID/심볼로 1차 정규화
         coins_list = cg.get_coins_list()
-        
-        # 형식 변환: [(display_name, coin_id, symbol), ...]
         formatted_list = [
             (f"{coin['name']} ({coin['symbol'].upper()})", coin['id'], coin['symbol'].upper())
             for coin in coins_list
         ]
-        
-        # 시가총액 순으로 정렬하기 위해 markets API 사용 (상위 250개만)
+
+        # 시총 상위 500 (250 * 2페이지)
         try:
-            markets = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=250, page=1)
-            top_ids = [coin['id'] for coin in markets]
-            
-            # 상위 코인을 앞으로 정렬
+            markets1 = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=250, page=1)
+            markets2 = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=250, page=2)
+            top_ids = [c['id'] for c in (markets1 or [])] + [c['id'] for c in (markets2 or [])]
+
             top_coins = [item for item in formatted_list if item[1] in top_ids]
             other_coins = [item for item in formatted_list if item[1] not in top_ids]
-            
+
             # 상위 코인은 시총 순서 유지
             sorted_top = []
-            for coin_id in top_ids:
+            for cid in top_ids:
                 for item in top_coins:
-                    if item[1] == coin_id:
+                    if item[1] == cid:
                         sorted_top.append(item)
                         break
-            
-            # 나머지는 이름순
+
             other_coins.sort(key=lambda x: x[0])
-            
-            return sorted_top + other_coins
-        except:
-            # 시총 정렬 실패 시 이름순
+            combined = (sorted_top + other_coins)[:500]  # 하드 제한
+            return combined
+
+        except Exception:
+            # 시총 정렬 실패 시 이름순으로 500개 제한
             formatted_list.sort(key=lambda x: x[0])
-            return formatted_list
-            
+            return formatted_list[:500]
+
     except Exception as e:
         st.error(f"❌ CoinGecko API 오류: {e}")
         return []
+def _normalize_symbol(sym: str) -> str:
+    try:
+        s = (sym or "").strip().upper()
+        # remove spaces and dots commonly seen in CG symbols
+        s = s.replace(" ", "").replace(".", "").replace("_", "")
+        return s
+    except Exception:
+        return (sym or "").upper()
 
+def _validate_yf_symbol(yf_symbol: str) -> bool:
+    """
+    Light-weight validity check against yfinance:
+    - Try to fetch the last few days of daily data. If dataframe is empty, treat as invalid.
+    - Never raises to UI: return False on any error.
+    """
+    try:
+        import yfinance as yf
+        t = yf.Ticker(yf_symbol)
+        # small, cheap request
+        hist = t.history(period="5d", interval="1d")
+        return not hist.empty
+    except Exception:
+        return False
+
+def _candidate_iter(symbol_u: str, coin_id: str):
+    """Yield plausible Yahoo Finance crypto tickers in descending confidence order."""
+    # 1) direct USD
+    yield f"{symbol_u}-USD"
+    # 2) common quote variants
+    for q in ("-USDT", "-USDC", "-BTC"):
+        yield f"{symbol_u}{q}"
+    # 3) by CoinGecko id (tolerate hyphens)
+    cid = (coin_id or "").strip().upper().replace(" ", "").replace(".", "").replace("_", "")
+    cid = cid.replace("-", "")
+    if cid and cid != symbol_u:
+        yield f"{cid}-USD"
+        for q in ("-USDT", "-USDC"):
+            yield f"{cid}{q}"
+    # 4) fallbacks for wrapped/bridge tickers
+    if symbol_u.endswith("W") or symbol_u.startswith("W"):
+        base = symbol_u.replace("W", "")
+        yield f"{base}-USD"
+        yield f"{base}-USDT"
 
 def coingecko_to_yfinance_symbol(coin_symbol, coin_id):
     """
-    CoinGecko 심볼을 yfinance 티커로 변환
-    
-    Args:
-        coin_symbol: CoinGecko 심볼 (예: 'BTC', 'ETH')
-        coin_id: CoinGecko ID (예: 'bitcoin', 'ethereum')
-    
-    Returns:
-        str: yfinance 티커 (예: 'BTC-USD', 'ETH-USD')
-    """
-    # 대부분의 암호화폐는 SYMBOL-USD 형식
-    yf_symbol = f"{coin_symbol.upper()}-USD"
-    
-    # 특수 케이스 처리
-    special_cases = {
-        'MIOTA': 'IOTA-USD',  # IOTA는 yfinance에서 IOTA
-        'WBTC': 'WBTC-USD',   # Wrapped Bitcoin
-    }
-    
-    if coin_symbol.upper() in special_cases:
-        yf_symbol = special_cases[coin_symbol.upper()]
-    
-    return yf_symbol
+    CoinGecko 심볼/ID -> Yahoo Finance(yfinance) 티커 변환 (강화판)
 
+    설계 원칙:
+      - 심볼 정규화, 광범위 특수 매핑(30+), 단계적 후보 생성, yfinance로 실제 검증
+      - 실패 시 명확한 오류 메시지와 안전한 폴백('BTC-USD')
+    """
+    symbol_u = _normalize_symbol(coin_symbol)
+    coin_id = (coin_id or "").strip().lower()
+
+    # --- Special cases (30+), keyed by CG id or by normalized symbol ---
+    # 참고: 대부분은 "SYMBOL-USD" 규칙이나, IOTA/MIOTA 등 예외 존재
+    SPECIAL_BY_ID = {
+        # L1 Caps (대표 코인)
+        "bitcoin": "BTC-USD",
+        "ethereum": "ETH-USD",
+        "tether": "USDT-USD",
+        "binancecoin": "BNB-USD",
+        "ripple": "XRP-USD",
+        "solana": "SOL-USD",
+        "cardano": "ADA-USD",
+        "dogecoin": "DOGE-USD",
+        "tron": "TRX-USD",
+        "polkadot": "DOT-USD",
+        "litecoin": "LTC-USD",
+        "chainlink": "LINK-USD",
+        # L2/L3 & 예외
+        "iota": "IOTA-USD",                    # CG: symbol 'MIOTA' → YF: IOTA-USD
+        "wrapped-bitcoin": "WBTC-USD",
+        "bitcoin-cash": "BCH-USD",
+        "bitcoin-sv": "BSV-USD",
+        "aave": "AAVE-USD",
+        "maker": "MKR-USD",
+        "compound-governance-token": "COMP-USD",
+        "yearn-finance": "YFI-USD",
+        "synthetix-network-token": "SNX-USD",
+        "sushi": "SUSHI-USD",
+        "the-graph": "GRT-USD",
+        "vechain": "VET-USD",
+        "cosmos": "ATOM-USD",
+        "tezos": "XTZ-USD",
+        "near": "NEAR-USD",
+        "monero": "XMR-USD",
+        "stellar": "XLM-USD",
+        "eos": "EOS-USD",
+        "theta-token": "THETA-USD",
+        "algorand": "ALGO-USD",
+        "aptos": "APT-USD",
+        "hedera-hashgraph": "HBAR-USD",
+        "immutable-x": "IMX-USD",
+        "arbitrum": "ARB-USD",
+        "filecoin": "FIL-USD",
+        "audius": "AUDIO-USD",
+        "tezos": "XTZ-USD",
+        "zilliqa": "ZIL-USD",
+        "decentraland": "MANA-USD",
+        "the-sandbox": "SAND-USD",
+        "chiliz": "CHZ-USD",
+        "enjincoin": "ENJ-USD",
+        "bitcoin-gold": "BTG-USD",
+        "dash": "DASH-USD",
+        "tron": "TRX-USD",
+        "fantom": "FTM-USD",
+        "arweave": "AR-USD",
+        "mina-protocol": "MINA-USD",
+        "stacks": "STX-USD",
+        "optimism": "OP-USD",
+        "injective-protocol": "INJ-USD",
+        # 2024/2025 변경 이슈 예시 (확실하지 않음: 실행 시 검증)
+        "artificial-superintelligence-alliance": "ASI-USD",  # (구 FET 합병) [확실하지 않음]
+    }
+
+    SPECIAL_BY_SYMBOL = {
+        "MIOTA": "IOTA-USD",
+        "WBTC": "WBTC-USD",
+        "BSV": "BSV-USD",
+        "BCH": "BCH-USD",
+        "AAVE": "AAVE-USD",
+        "MKR": "MKR-USD",
+        "COMP": "COMP-USD",
+        "YFI": "YFI-USD",
+        "SNX": "SNX-USD",
+        "SUSHI": "SUSHI-USD",
+        "GRT": "GRT-USD",
+        "VET": "VET-USD",
+        "ATOM": "ATOM-USD",
+        "XTZ": "XTZ-USD",
+        "NEAR": "NEAR-USD",
+        "XMR": "XMR-USD",
+        "XLM": "XLM-USD",
+        "EOS": "EOS-USD",
+        "THETA": "THETA-USD",
+        "ALGO": "ALGO-USD",
+        "APT": "APT-USD",
+        "HBAR": "HBAR-USD",
+        "IMX": "IMX-USD",
+        "ARB": "ARB-USD",
+        "FIL": "FIL-USD",
+        "AUDIO": "AUDIO-USD",
+        "ZIL": "ZIL-USD",
+        "MANA": "MANA-USD",
+        "SAND": "SAND-USD",
+        "CHZ": "CHZ-USD",
+        "ENJ": "ENJ-USD",
+        "BTG": "BTG-USD",
+        "DASH": "DASH-USD",
+        "FTM": "FTM-USD",
+        "AR": "AR-USD",
+        "MINA": "MINA-USD",
+        "STX": "STX-USD",
+        "OP": "OP-USD",
+        "INJ": "INJ-USD",
+        "1INCH": "1INCH-USD",
+        "PEPE": "PEPE-USD",
+        "SHIB": "SHIB-USD",
+    }
+
+    # 1) Special by id first (가장 신뢰도 높음)
+    if coin_id in SPECIAL_BY_ID:
+        cand = SPECIAL_BY_ID[coin_id]
+        if _validate_yf_symbol(cand):
+            return cand
+
+    # 2) Special by symbol next
+    if symbol_u in SPECIAL_BY_SYMBOL:
+        cand = SPECIAL_BY_SYMBOL[symbol_u]
+        if _validate_yf_symbol(cand):
+            return cand
+
+    # 3) Heuristic candidates
+    for cand in _candidate_iter(symbol_u, coin_id):
+        if _validate_yf_symbol(cand):
+            return cand
+
+    # 4) Last resort
+    if _validate_yf_symbol("BTC-USD"):
+        if st.session_state.get("debug"):
+            st.info("⚠️ 매핑 실패로 'BTC-USD'로 폴백됨 (디버그 활성화 중).")
+        return "BTC-USD"
+
+    # 5) Fail hard (debug 에서만 상세)
+    raise ValueError(f"yfinance 심볼 매핑 실패: coin_symbol='{coin_symbol}', coin_id='{coin_id}'")
 
 
 # ============================================================================
@@ -8354,3 +8519,54 @@ def walk_forward_validation(df: pd.DataFrame,
         'results': results[-10:]  # 최근 10개만 반환
     }
 
+
+
+# ============================================================================
+# 통합 출력 시퀀스 (사용자 친화적 계층화)
+# ============================================================================
+def render_optimized_prediction_sequence(ctx):
+    """
+    출력 순서:
+      1) 📊 데이터 요약
+      2) 🤖 AI 예측 결과
+      3) 🎯 매매 전략
+      4) 🎲 리스크 분석 (Kelly Criterion)
+      5) 🕯️ 캔들스틱 패턴
+      6) 💰 매도 시점 예측
+      7) 📈 기술적 지표
+      8) ✅ 모델 검증 결과
+
+    ctx: dict-like, 아래 키 중 사용 가능한 항목만 전달하십시오.
+      - data_summary
+      - ai_prediction
+      - strategy
+      - risk_kelly
+      - candle_patterns
+      - sell_timing
+      - indicators
+      - model_validation
+    """
+    import streamlit as st
+
+    def _section(title, key):
+        st.markdown(f"### {title}")
+        val = ctx.get(key)
+        if val is None:
+            st.caption("알 수 없습니다")
+            return
+        # dict / df / str 등 유연 출력
+        if hasattr(val, "to_frame") or hasattr(val, "to_dict"):
+            st.write(val)
+        elif hasattr(val, "plot") and callable(val.plot):
+            st.pyplot(val.plot())
+        else:
+            st.write(val)
+
+    _section("📊 데이터 요약", "data_summary")
+    _section("🤖 AI 예측 결과", "ai_prediction")
+    _section("🎯 매매 전략", "strategy")
+    _section("🎲 리스크 분석 (Kelly Criterion)", "risk_kelly")
+    _section("🕯️ 캔들스틱 패턴", "candle_patterns")
+    _section("💰 매도 시점 예측", "sell_timing")
+    _section("📈 기술적 지표", "indicators")
+    _section("✅ 모델 검증 결과", "model_validation")
