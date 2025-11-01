@@ -5308,15 +5308,13 @@ with st.sidebar:
             st.session_state.selected_crypto = "BTCUSDT"
     
     else:  # "직접 입력"
-        # 직접 입력 세부 방식 선택
-        direct_input_method = st.radio(
-            "🔧 입력 세부 방식",
-            ["심볼 직접 입력", "바이낸스 전체 검색"],
-            horizontal=True,
-            key='direct_input_method'
-        )
+        st.info("💡 팁: 심볼(예: BTC, ETHUSDT) 또는 코인명(예: 비트코인, 이더리웄) 입력 가능")
         
-# 통합 검색 입력창
+        # 바이낸스 전체 코인 목록 로드 (캐싱됨)
+        with st.spinner("🔎 코인 목록 로딩 중..."):
+            all_pairs = get_all_binance_usdt_pairs()
+        
+        # 통합 검색 입력창
         search_input = st.text_input(
             "💎 코인 검색 또는 심볼 입력",
             key='unified_search_input',
