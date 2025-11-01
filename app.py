@@ -619,85 +619,101 @@ def render_trading_metrics(metrics):
     st.markdown(f"**시장 심리**: {metrics['sentiment']}")
     st.caption(f"🕐 마지막 업데이트: {metrics['last_update']}")
 
-@st.cache_data(ttl=3600, show_spinner=False)  # 1시간 캐싱 (코인 목록은 자주 바뀔지 않음)
-@st.cache_data(ttl=3600)  # 1시간 캐싱
-def get_all_coins_from_coingecko():
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_all_coins_from_coingecko(limit: int = 500):
     """
-    CoinGecko API를 사용하여 모든 암호화폐 목록 가져오기
-    
+    CoinGecko 상위 코인 목록을 최적화하여 가져옵니다 (기본 500개 제한).
+
     Returns:
-        list: [(display_name, coin_id, symbol), ...]
+        list[tuple[str, str, str]]: [(display_name, coin_id, symbol), ...]
         예: [('Bitcoin (BTC)', 'bitcoin', 'BTC'), ...]
     """
     try:
         if not COINGECKO_AVAILABLE:
-            st.warning("⚠️ pycoingecko가 설치되지 않았습니다. 기본 목록만 사용 가능합니다.")
+            st.warning("⚠️ pycoingecko 미설치: 기본 목록만 사용 가능합니다.")
             return []
-        
+
         cg = CoinGeckoAPI()
-        coins_list = cg.get_coins_list()
-        
+        per_page = min(250, max(1, limit))
+        page1 = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=per_page, page=1) or []
+        remaining = max(0, limit - per_page)
+        page2 = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=min(250, remaining), page=2) if remaining > 0 else []
+        markets = page1 + (page2 or [])
+
         # 형식 변환: [(display_name, coin_id, symbol), ...]
         formatted_list = [
-            (f"{coin['name']} ({coin['symbol'].upper()})", coin['id'], coin['symbol'].upper())
-            for coin in coins_list
+            (f"{coin['name']} ({str(coin.get('symbol','')).upper()})", coin['id'], str(coin.get('symbol','')).upper())
+            for coin in markets
+            if coin.get('id') and coin.get('symbol') and coin.get('name')
         ]
-        
-        # 시가총액 순으로 정렬하기 위해 markets API 사용 (상위 250개만)
-        try:
-            markets = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=250, page=1)
-            top_ids = [coin['id'] for coin in markets]
-            
-            # 상위 코인을 앞으로 정렬
-            top_coins = [item for item in formatted_list if item[1] in top_ids]
-            other_coins = [item for item in formatted_list if item[1] not in top_ids]
-            
-            # 상위 코인은 시총 순서 유지
-            sorted_top = []
-            for coin_id in top_ids:
-                for item in top_coins:
-                    if item[1] == coin_id:
-                        sorted_top.append(item)
-                        break
-            
-            # 나머지는 이름순
-            other_coins.sort(key=lambda x: x[0])
-            
-            return sorted_top + other_coins
-        except:
-            # 시총 정렬 실패 시 이름순
-            formatted_list.sort(key=lambda x: x[0])
-            return formatted_list
-            
+        return formatted_list
     except Exception as e:
-        st.error(f"❌ CoinGecko API 오류: {e}")
+        if st.session_state.get('debug_mode'):
+            st.exception(e)
+        st.error("❌ CoinGecko API 오류: 코인 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.")
         return []
 
 
-def coingecko_to_yfinance_symbol(coin_symbol, coin_id):
+def coingecko_to_yfinance_symbol(coin_symbol: str, coin_id: str) -> str:
     """
-    CoinGecko 심볼을 yfinance 티커로 변환
-    
-    Args:
-        coin_symbol: CoinGecko 심볼 (예: 'BTC', 'ETH')
-        coin_id: CoinGecko ID (예: 'bitcoin', 'ethereum')
-    
-    Returns:
-        str: yfinance 티커 (예: 'BTC-USD', 'ETH-USD')
+    CoinGecko 심볼/ID를 yfinance 티커로 변환 (강화된 정규화 + 특수 매핑 30+)
+
+    Rules:
+    - 기본: SYMBOL-USD
+    - 특수 케이스: 아래 매핑 우선 적용 (심볼/ID 둘 다 지원)
+    - 안전장치: 결과가 '-USD'로 끝나도록 강제
+    - 오류 처리: 입력 비정상 시 ValueError 발생
     """
-    # 대부분의 암호화폐는 SYMBOL-USD 형식
-    yf_symbol = f"{coin_symbol.upper()}-USD"
-    
-    # 특수 케이스 처리
+    if not coin_symbol and not coin_id:
+        raise ValueError("유효하지 않은 입력: coin_symbol 또는 coin_id가 필요합니다")
+
+    sym = (coin_symbol or "").strip().upper()
+    cid = (coin_id or "").strip().lower()
+
+    # 심볼/ID 기반 특수 매핑 (심볼 키와 ID 키 모두 허용)
     special_cases = {
-        'MIOTA': 'IOTA-USD',  # IOTA는 yfinance에서 IOTA
-        'WBTC': 'WBTC-USD',   # Wrapped Bitcoin
+        # 심볼 기반
+        'BTC': 'BTC-USD', 'ETH': 'ETH-USD', 'BNB': 'BNB-USD', 'XRP': 'XRP-USD',
+        'ADA': 'ADA-USD', 'DOGE': 'DOGE-USD', 'SOL': 'SOL-USD', 'DOT': 'DOT-USD',
+        'AVAX': 'AVAX-USD', 'TRX': 'TRX-USD', 'LINK': 'LINK-USD', 'ATOM': 'ATOM-USD',
+        'XLM': 'XLM-USD', 'ETC': 'ETC-USD', 'FIL': 'FIL-USD', 'NEAR': 'NEAR-USD',
+        'APT': 'APT-USD', 'ARB': 'ARB-USD', 'OP': 'OP-USD', 'MATIC': 'MATIC-USD',
+        'UNI': 'UNI-USD', 'LTC': 'LTC-USD', 'ICP': 'ICP-USD', 'SUI': 'SUI-USD',
+        'PEPE': 'PEPE-USD', 'SHIB': 'SHIB-USD', 'QNT': 'QNT-USD', 'ALGO': 'ALGO-USD',
+        'EGLD': 'EGLD-USD', 'AAVE': 'AAVE-USD', 'WBTC': 'WBTC-USD', 'BCH': 'BCH-USD',
+        'IOTA': 'IOTA-USD', 'MIOTA': 'IOTA-USD', 'XTZ': 'XTZ-USD', 'XMR': 'XMR-USD',
+        'EOS': 'EOS-USD', 'SAND': 'SAND-USD', 'MANA': 'MANA-USD', 'CRV': 'CRV-USD',
+        'COMP': 'COMP-USD', 'SUSHI': 'SUSHI-USD', 'YFI': 'YFI-USD', 'ZEC': 'ZEC-USD',
+        'DASH': 'DASH-USD', 'THETA': 'THETA-USD', 'FTM': 'FTM-USD', 'GRT': 'GRT-USD',
+        # ID 기반 (일부 코인의 ID가 심볼과 다름)
+        'matic-network': 'MATIC-USD', 'arbitrum': 'ARB-USD', 'optimism': 'OP-USD',
+        'aptos': 'APT-USD', 'elrond-erd-2': 'EGLD-USD', 'wrapped-bitcoin': 'WBTC-USD',
+        'bitcoin-cash': 'BCH-USD', 'internet-computer': 'ICP-USD', 'the-graph': 'GRT-USD',
+        'aave': 'AAVE-USD', 'uniswap': 'UNI-USD', 'chainlink': 'LINK-USD',
+        'stellar': 'XLM-USD', 'tezos': 'XTZ-USD', 'monero': 'XMR-USD', 'eos': 'EOS-USD',
+        'iota': 'IOTA-USD', 'ethereum-classic': 'ETC-USD', 'filecoin': 'FIL-USD',
+        'polkadot': 'DOT-USD', 'avalanche-2': 'AVAX-USD', 'near': 'NEAR-USD',
+        'solana': 'SOL-USD', 'tron': 'TRX-USD', 'shiba-inu': 'SHIB-USD', 'pepe': 'PEPE-USD'
     }
-    
-    if coin_symbol.upper() in special_cases:
-        yf_symbol = special_cases[coin_symbol.upper()]
-    
-    return yf_symbol
+
+    # 우선: ID 매핑 → 심볼 매핑 → 기본 규칙
+    if cid in special_cases:
+        out = special_cases[cid]
+    elif sym in special_cases:
+        out = special_cases[sym]
+    else:
+        # 일반 규칙: SYMBOL-USD
+        # 심볼 정규화 (공백/하이픈 제거 후 대문자)
+        norm = sym.replace(" ", "").replace("-", "")
+        if not norm:
+            raise ValueError("유효하지 않은 심볼입니다")
+        out = f"{norm}-USD"
+
+    # 안전장치: 접미사 보장
+    if not out.endswith("-USD"):
+        out = f"{out}-USD"
+
+    return out
 
 
 
@@ -5851,7 +5867,7 @@ def render_portfolio_backtest(price_data_df, symbol_name):
 
 def render_technical_indicators(df: pd.DataFrame):
     """기술적 지표"""
-    st.markdown("<div class='section-title'>📊 기술적 지표</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>📈 기술적 지표</div>", unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -5876,6 +5892,45 @@ def render_technical_indicators(df: pd.DataFrame):
         st.metric(label="MACD Histogram", value=f"{macd_hist:.2f}", delta=macd_signal)
 
 
+def render_optimized_prediction_sequence(
+    df: pd.DataFrame,
+    selected_crypto: str,
+    interval_name: str,
+    ai_prediction: dict,
+    current_price: float,
+    leverage_info: dict,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    position_size: float,
+    rr_ratio: float,
+    investment_amount: float,
+    kelly_result: dict,
+    patterns: list,
+    exit_strategy: dict,
+    cv_results: pd.DataFrame,
+):
+    """사용자 친화적 순서로 주요 결과를 한 번에 렌더링합니다."""
+    # 1) 데이터 요약
+    render_data_summary(df, selected_crypto, interval_name)
+    # 2) AI 예측 결과
+    render_ai_prediction(ai_prediction, current_price)
+    # 3) 매매 전략
+    render_trading_strategy(current_price, leverage_info, entry_price,
+                            stop_loss, take_profit, position_size,
+                            rr_ratio, investment_amount)
+    # 4) 리스크 분석 (Kelly)
+    render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
+    # 5) 캔들스틱 패턴
+    render_patterns(patterns)
+    # 6) 매도 시점 예측
+    render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
+    # 7) 기술적 지표
+    render_technical_indicators(df)
+    # 8) 모델 검증 결과
+    render_validation_results(cv_results)
+
+
 # ────────────────────────────────────────────────────────────────────────
 # 메인 UI
 # ────────────────────────────────────────────────────────────────────────
@@ -5885,6 +5940,13 @@ initialize_dashboard_settings()
 
 with st.sidebar:
     st.markdown("# 🚀 설정")
+    
+    # 디버깅 모드 옵션
+    st.session_state.debug_mode = st.checkbox(
+        "🐞 디버깅 모드",
+        value=st.session_state.get('debug_mode', False),
+        help="오류 상세 및 내부 로그를 표시합니다"
+    )
     
     # 대시보드 커스터마이징 설정
     with st.expander("🎨 대시보드 커스터마이징", expanded=False):
@@ -6085,23 +6147,24 @@ with st.sidebar:
             search_query = st.text_input(
                 "🔍 코인 검색 (이름 또는 심볼)",
                 key='coingecko_search',
-                placeholder="예: Bitcoin, BTC, Ethereum, ETH, Solana, SOL...",
-                help="코인 이름이나 심볼을 입력하여 검색"
+                placeholder="예: Bitcoin (BTC), Ethereum (ETH), Solana (SOL), IOTA (MIOTA), Bitcoin Cash (BCH), Aave (AAVE)",
+                help="코인 이름 또는 심볼을 입력하세요"
             )
             
-            # 검색 필터링
+            # 검색 필터링 (최대 200개로 제한하여 성능 최적화)
             if search_query:
-                search_lower = search_query.lower()
+                search_lower = search_query.lower().strip()
                 filtered_coins = [
                     coin for coin in all_coins
-                    if search_lower in coin[0].lower()  # display_name에서 검색
-                ]
+                    if search_lower in coin[0].lower()
+                ][:200]
             else:
                 # 검색어 없으면 상위 100개만 표시
                 filtered_coins = all_coins[:100]
             
             if filtered_coins:
-                st.caption(f"📊 검색 결과: {len(filtered_coins)}개 코인 {'(상위 100개)' if not search_query else ''}")
+                cap_text = "(상위 100개)" if not search_query else "(상위 200개)"
+                st.caption(f"📊 검색 결과: {len(filtered_coins)}개 코인 {cap_text}")
                 
                 # 현재 선택된 코인 찾기
                 current_index = 0
@@ -6506,20 +6569,12 @@ if bt:
         
         st.success("✅ 분석이 완료되었습니다!")
         
-        # 결과 출력
-        render_data_summary(df, selected_crypto, interval_name)
-        render_ai_forecast(future_df, hw_confidence)
-        render_patterns(patterns)
-        render_technical_indicators(df)
-        # render_validation_results(cv_results)  # 삭제됨
-        # [추가됨] v2.2.1: AI 예측에 필요한 변수 추출
+        # AI 예측 변수 추출 및 계산 (순서 재배치용)
         ema_short = df['EMA50'].iloc[-1]
         ema_long = df['EMA200'].iloc[-1]
         rsi = df['RSI14'].iloc[-1]
         macd = df['MACD'].iloc[-1]
         macd_signal = df['MACD_Signal'].iloc[-1]
-        
-        # [추가됨] AI 예측 실행
         ai_prediction = predict_trend_with_ai(
             df=df,
             current_price=current_price,
@@ -6530,10 +6585,34 @@ if bt:
             macd_signal=macd_signal
         )
         
-        # [추가됨] AI 예측 결과 렌더링 (데이터 분석 결과 다음)
-        render_ai_prediction(ai_prediction, current_price)
+        # Kelly Criterion 계산
+        kelly_result = calculate_kelly_criterion(
+            ai_confidence=ai_prediction['confidence'],
+            rr_ratio=rr_ratio,
+            kelly_fraction=0.5
+        )
         
-        # [추가됨] 포지션 추천 계산
+        # 최적 순서로 핵심 결과 렌더링
+        render_optimized_prediction_sequence(
+            df=df,
+            selected_crypto=selected_crypto,
+            interval_name=interval_name,
+            ai_prediction=ai_prediction,
+            current_price=current_price,
+            leverage_info=leverage_info,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            position_size=position_size,
+            rr_ratio=rr_ratio,
+            investment_amount=investment_amount,
+            kelly_result=kelly_result,
+            patterns=patterns,
+            exit_strategy=exit_strategy,
+            cv_results=cv_results,
+        )
+        
+        # 추가 정보 (선택): 포지션 추천 카드 및 예측 차트
         position_recommendation = recommend_position(
             ai_prediction=ai_prediction,
             current_price=current_price,
@@ -6541,32 +6620,7 @@ if bt:
             take_profit=take_profit,
             volatility=volatility
         )
-        
-        render_trading_strategy(current_price, leverage_info, entry_price,
-                               stop_loss, take_profit, position_size,
-                               rr_ratio, investment_amount)
-        
-        # [추가됨] 포지션 추천 렌더링 (매매 전략 직후)
         render_position_recommendation(position_recommendation)
-        
-        # [추가됨] v2.8.0: 고급 리스크 관리 분석
-        st.markdown("---")
-        st.markdown("<div class='section-title'>🛡️ 고급 리스크 관리 분석</div>", unsafe_allow_html=True)
-        
-        # 1. Kelly Criterion 분석
-        kelly_result = calculate_kelly_criterion(
-            ai_confidence=ai_prediction['confidence'],
-            rr_ratio=rr_ratio,
-            kelly_fraction=0.5  # Half Kelly
-        )
-        render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
-        
-        # 3. Monte Carlo 시뮬레이션
-        st.markdown("---")
-
-        # 3. 실시간 글로벌 데이터 통합 분석 (v2.9.0)
-        st.markdown('---')
-        render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
