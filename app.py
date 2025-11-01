@@ -271,6 +271,19 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
+
+# === Session State Guard ===
+def ensure_session_state():
+    defaults = {
+        "selected_crypto": "BTC-USD",
+        "debug": False,
+        "basic_list_select": 0
+    }
+    for k,v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+ensure_session_state()
     page_title="코인 AI 예측 시스템 v2.9.12",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -6223,7 +6236,7 @@ with st.sidebar:
             search_query = st.text_input(
                 "🔍 코인 검색 (이름 또는 심볼)",
                 key='coingecko_search',
-                placeholder="예: Bitcoin, BTC, Ethereum, ETH, Solana, SOL...",
+                placeholder="예: BTC, ETH, SOL 또는 'bitcoin', 'ethereum' (상위 500개 목록 검색)",
                 help="코인 이름이나 심볼을 입력하여 검색"
             )
             
@@ -6645,11 +6658,6 @@ if bt:
         st.success("✅ 분석이 완료되었습니다!")
         
         # 결과 출력
-        render_data_summary(df, selected_crypto, interval_name)
-        render_ai_forecast(future_df, hw_confidence)
-        render_patterns(patterns)
-        render_technical_indicators(df)
-        # render_validation_results(cv_results)  # 삭제됨
         # [추가됨] v2.2.1: AI 예측에 필요한 변수 추출
         ema_short = df['EMA50'].iloc[-1]
         ema_long = df['EMA200'].iloc[-1]
@@ -6669,8 +6677,21 @@ if bt:
         )
         
         # [추가됨] AI 예측 결과 렌더링 (데이터 분석 결과 다음)
-        render_ai_prediction(ai_prediction, current_price)
         
+        # === 통합 출력 순서 (요청 사양) ===
+        render_data_summary(df, selected_crypto, interval_name)
+        render_ai_prediction(ai_prediction, current_price)
+        render_ai_forecast(future_df, hw_confidence)
+        render_trading_strategy(current_price, leverage_info, entry_price,
+                               stop_loss, take_profit, position_size,
+                               rr_ratio, investment_amount)
+        render_position_recommendation(position_recommendation)
+        render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
+        render_patterns(patterns)
+        render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
+        render_technical_indicators(df)
+        render_validation_results(cv_results)
+        # === 통합 출력 순서 끝 ===
         # [추가됨] 포지션 추천 계산
         position_recommendation = recommend_position(
             ai_prediction=ai_prediction,
@@ -6678,16 +6699,7 @@ if bt:
             stop_loss=stop_loss,
             take_profit=take_profit,
             volatility=volatility
-        )
-        
-        render_trading_strategy(current_price, leverage_info, entry_price,
-                               stop_loss, take_profit, position_size,
-                               rr_ratio, investment_amount)
-        
-        # [추가됨] 포지션 추천 렌더링 (매매 전략 직후)
-        render_position_recommendation(position_recommendation)
-        
-        # [추가됨] v2.8.0: 고급 리스크 관리 분석
+        )        # [추가됨] 포지션 추천 렌더링 (매매 전략 직후)        # [추가됨] v2.8.0: 고급 리스크 관리 분석
         st.markdown("---")
         st.markdown("<div class='section-title'>🛡️ 고급 리스크 관리 분석</div>", unsafe_allow_html=True)
         
@@ -6696,17 +6708,11 @@ if bt:
             ai_confidence=ai_prediction['confidence'],
             rr_ratio=rr_ratio,
             kelly_fraction=0.5  # Half Kelly
-        )
-        render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
-        
-        # 3. Monte Carlo 시뮬레이션
+        )        # 3. Monte Carlo 시뮬레이션
         st.markdown("---")
 
         # 3. 실시간 글로벌 데이터 통합 분석 (v2.9.0)
-        st.markdown('---')
-        render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
-        
-        # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
+        st.markdown('---')        # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
         st.markdown("<div class='section-title'>🎯 포트폴리오 분석 (선택 기간별 투자 성과 종합 분석)</div>", unsafe_allow_html=True)
         
