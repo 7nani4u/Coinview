@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.4 WORKS (실시간 자동 분석)
+코인 AI 예측 시스템 - v2.9.9 (CoinGecko 통합)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -48,6 +48,13 @@
 - 실시간 매매 비율 & 기간별 수익률: 1주일, 1개월, 3개월
 - ⭐ 30초 자동 새로고침: 가격 데이터 자동 업데이트
 - 간단하고 안정적인 구조 (Squeeze 없음)
+
+🚀 v2.9.9 CoinGecko 통합 (2025-11-01):
+- ✅ CoinGecko API 통합: 19,344개 암호화폐 지원
+- ✅ Binance API 제거: 의존성 제거
+- ✅ 입력 방식 단순화: "기본 목록" + "직접 입력" (2개만)
+- ✅ 자동 심볼 변환: CoinGecko ID → yfinance 심볼
+- ✅ 검색 성능 개선: 1시간 캐싱
 """
 
 
@@ -148,6 +155,16 @@ except ImportError:
         pass
 
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+# v2.9.9: CoinGecko API
+try:
+    from pycoingecko import CoinGeckoAPI
+    COINGECKO_AVAILABLE = True
+except ImportError:
+    COINGECKO_AVAILABLE = False
+    class CoinGeckoAPI:
+        pass
+
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
@@ -578,154 +595,87 @@ def render_trading_metrics(metrics):
     st.caption(f"🕐 마지막 업데이트: {metrics['last_update']}")
 
 @st.cache_data(ttl=3600, show_spinner=False)  # 1시간 캐싱 (코인 목록은 자주 바뀔지 않음)
-def get_all_binance_usdt_pairs():
+@st.cache_data(ttl=3600)  # 1시간 캐싱
+def get_all_coins_from_coingecko():
     """
-    바이낸스에서 거래 가능한 모든 USDT 페어 가져오기
+    CoinGecko API를 사용하여 모든 암호화폐 목록 가져오기
     
     Returns:
-    --------
-    list : USDT 페어 리스트 [("비트코인 (BTC)", "BTCUSDT"), ...]
+        list: [(display_name, coin_id, symbol), ...]
+        예: [('Bitcoin (BTC)', 'bitcoin', 'BTC'), ...]
     """
     try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        if not COINGECKO_AVAILABLE:
+            st.warning("⚠️ pycoingecko가 설치되지 않았습니다. 기본 목록만 사용 가능합니다.")
+            return []
         
-        data = response.json()
-        usdt_pairs = []
+        cg = CoinGeckoAPI()
+        coins_list = cg.get_coins_list()
         
-        for symbol_info in data['symbols']:
-            symbol = symbol_info['symbol']
-            status = symbol_info['status']
-            
-            # USDT 페어이고 거래 가능한 것만 필터링
-            if symbol.endswith('USDT') and status == 'TRADING':
-                base_asset = symbol_info['baseAsset']
-                
-                # 한글 이름 매핑 (주요 코인)
-                korean_names = {
-                    'BTC': '비트코인',
-                    'ETH': '이더리움',
-                    'BNB': '바이낸스코인',
-                    'XRP': '리플',
-                    'ADA': '카다노',
-                    'SOL': '솔라나',
-                    'DOGE': '도지코인',
-                    'DOT': '폴카닷',
-                    'MATIC': '폴리곤',
-                    'SHIB': '시바이누',
-                    'AVAX': '아발란체',
-                    'UNI': '유니스왑',
-                    'LINK': '체인링크',
-                    'ATOM': '코스모스',
-                    'LTC': '라이트코인',
-                    'ETC': '이더리움클래식',
-                    'XLM': '스텔라루멘',
-                    'NEAR': '니어프로토콜',
-                    'APT': '앱토스',
-                    'FIL': '파일코인',
-                    'ARB': '아비트럼',
-                    'OP': '옵티미즘',
-                    'SUI': '수이',
-                    'TRX': '트론',
-                    'BCH': '비트코인캐시',
-                    'ALGO': '알고랜드',
-                    'VET': '비체인',
-                    'ICP': '인터넷컴퓨터',
-                    'FTM': '팬텀',
-                    'XMR': '모네로',
-                    'SAND': '샌드박스',
-                    'MANA': '디센트럴랜드',
-                    'AXS': '액시인피니티',
-                    'THETA': '쎄타',
-                    'XTZ': '테조스',
-                    'AAVE': '에이브',
-                    'GRT': '더그래프',
-                    'EOS': '이오스',
-                    'MKR': '메이커',
-                    'RUNE': '토르체인',
-                    'KSM': '쿠사마',
-                    'CAKE': '팬케이크스왑',
-                    'CRV': '커브',
-                    'WAVES': '웨이브',
-                    'ZEC': '지캐시',
-                    'DASH': '대시',
-                    'COMP': '컴파운드',
-                    'YFI': '연파이낸스',
-                    'SNX': '신세틱스',
-                    'BAT': '베이직어텐션토큰',
-                    'ENJ': '엔진코인',
-                    'SUSHI': '스시스왑',
-                    '1INCH': '원인치',
-                    'CHZ': '칠리즈',
-                    'HBAR': '헤데라',
-                    'HOT': '홀로체인',
-                    'ZIL': '질리카',
-                    'ONT': '온톨로지',
-                    'ICX': '아이콘',
-                    'QNT': '퀀트',
-                    'LRC': '루프링',
-                    'CELO': '셀로',
-                    'ANKR': '앵커',
-                    'KAVA': '카바',
-                    'BAND': '밴드프로토콜',
-                    'SC': '시아코인',
-                    'RVN': '레이븐코인',
-                    'ZEN': '호라이즌',
-                    'IOST': '아이오스트',
-                    'CVC': '시빅',
-                    'STORJ': '스토리지',
-                    'DYDX': '디와이디엑스',
-                    'GMX': '지엠엑스',
-                    'LDO': '리도',
-                    'BLUR': '블러',
-                    'PEPE': '페페',
-                    'FLOKI': '플로키',
-                    'INJ': '인젝티브',
-                    'STX': '스택스',
-                    'IMX': '이뮤터블엑스',
-                    'TIA': '셀레스티아',
-                    'SEI': '세이',
-                    'PYTH': '피스네트워크',
-                    'JUP': '주피터',
-                    'WIF': '도그위프햇',
-                    'BONK': '봉크',
-                    'STRK': '스타크넷',
-                    'WLD': '월드코인',
-                    'FET': '페치AI',
-                    'AGIX': '싱귤래리티넷',
-                    'RNDR': '렌더토큰',
-                    'GRT': '더그래프',
-                    'OCEAN': '오션프로토콜'
-                }
-                
-                if base_asset in korean_names:
-                    display_name = f"{korean_names[base_asset]} ({base_asset})"
-                else:
-                    display_name = base_asset
-                
-                usdt_pairs.append((display_name, symbol))
-        
-        # 심볼 알파벳 순서로 정렬
-        usdt_pairs.sort(key=lambda x: x[1])
-        
-        return usdt_pairs
-    
-    except Exception as e:
-        st.warning(f"⚠️ 바이낸스 API 오류: {e}")
-        # 실패 시 기본 목록 반환
-        return [
-            ("비트코인 (BTC)", "BTCUSDT"),
-            ("이더리움 (ETH)", "ETHUSDT"),
-            ("리플 (XRP)", "XRPUSDT"),
-            ("도지코인 (DOGE)", "DOGEUSDT"),
-            ("카다노 (ADA)", "ADAUSDT"),
-            ("솔라나 (SOL)", "SOLUSDT")
+        # 형식 변환: [(display_name, coin_id, symbol), ...]
+        formatted_list = [
+            (f"{coin['name']} ({coin['symbol'].upper()})", coin['id'], coin['symbol'].upper())
+            for coin in coins_list
         ]
+        
+        # 시가총액 순으로 정렬하기 위해 markets API 사용 (상위 250개만)
+        try:
+            markets = cg.get_coins_markets(vs_currency='usd', order='market_cap_desc', per_page=250, page=1)
+            top_ids = [coin['id'] for coin in markets]
+            
+            # 상위 코인을 앞으로 정렬
+            top_coins = [item for item in formatted_list if item[1] in top_ids]
+            other_coins = [item for item in formatted_list if item[1] not in top_ids]
+            
+            # 상위 코인은 시총 순서 유지
+            sorted_top = []
+            for coin_id in top_ids:
+                for item in top_coins:
+                    if item[1] == coin_id:
+                        sorted_top.append(item)
+                        break
+            
+            # 나머지는 이름순
+            other_coins.sort(key=lambda x: x[0])
+            
+            return sorted_top + other_coins
+        except:
+            # 시총 정렬 실패 시 이름순
+            formatted_list.sort(key=lambda x: x[0])
+            return formatted_list
+            
+    except Exception as e:
+        st.error(f"❌ CoinGecko API 오류: {e}")
+        return []
 
-# ════════════════════════════════════════════════════════════════════════════
-# v2.6.0: 고급 분석 기능
-# ════════════════════════════════════════════════════════════════════════════
+
+def coingecko_to_yfinance_symbol(coin_symbol, coin_id):
+    """
+    CoinGecko 심볼을 yfinance 티커로 변환
+    
+    Args:
+        coin_symbol: CoinGecko 심볼 (예: 'BTC', 'ETH')
+        coin_id: CoinGecko ID (예: 'bitcoin', 'ethereum')
+    
+    Returns:
+        str: yfinance 티커 (예: 'BTC-USD', 'ETH-USD')
+    """
+    # 대부분의 암호화폐는 SYMBOL-USD 형식
+    yf_symbol = f"{coin_symbol.upper()}-USD"
+    
+    # 특수 케이스 처리
+    special_cases = {
+        'MIOTA': 'IOTA-USD',  # IOTA는 yfinance에서 IOTA
+        'WBTC': 'WBTC-USD',   # Wrapped Bitcoin
+    }
+    
+    if coin_symbol.upper() in special_cases:
+        yf_symbol = special_cases[coin_symbol.upper()]
+    
+    return yf_symbol
+
+
+
 
 @st.cache_data(ttl=3600)
 def get_fear_greed_index(limit=30):
@@ -2644,15 +2594,23 @@ def fetch_btc_dominance() -> Dict:
 
 def fetch_kimchi_premium(symbol: str = 'BTC') -> Dict:
     """
-    김치 프리미엄 계산 (한국 거래소 vs 글로벌 거래소)
+    김치 프리미엄 계산 (Upbit vs Yahoo Finance)
     
-    Returns:
-    --------
+    v2.9.9: Binance API 제거, Yahoo Finance 글로벌 가격 사용
+    
+    Parameters
+    ----------
+    symbol : str
+        암호화폐 심볼 (예: 'BTC', 'ETH')
+    
+    Returns
+    -------
     dict : {
-        'premium': float (percentage),
+        'premium': float,
         'korea_price': float,
         'global_price': float,
-        'signal': str
+        'signal': str,
+        'status': str
     }
     """
     try:
@@ -2660,25 +2618,31 @@ def fetch_kimchi_premium(symbol: str = 'BTC') -> Dict:
         upbit_url = f"https://api.upbit.com/v1/ticker?markets=KRW-{symbol}"
         upbit_response = requests.get(upbit_url, timeout=10)
         
-        # Binance (글로벌) 가격
-        binance_url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-        binance_response = requests.get(binance_url, timeout=10)
+        if upbit_response.status_code != 200:
+            return {'premium': 0, 'korea_price': 0, 'global_price': 0, 'signal': 'API Error', 'status': 'error'}
         
-        # USD/KRW 환율 (고정값 또는 API에서 가져오기)
-        usd_krw = 1320  # 대략적인 환율
+        # Yahoo Finance (글로벌) 가격
+        yf_symbol = f"{symbol}-USD"
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            global_price = ticker.info.get('regularMarketPrice', 0)
+            if global_price == 0:
+                hist = ticker.history(period='1d')
+                if not hist.empty:
+                    global_price = hist['Close'].iloc[-1]
+        except:
+            return {'premium': 0, 'korea_price': 0, 'global_price': 0, 'signal': 'Yahoo API Error', 'status': 'error'}
         
-        if upbit_response.status_code == 200 and binance_response.status_code == 200:
+        if global_price > 0:
             upbit_data = upbit_response.json()[0]
-            binance_data = binance_response.json()
+            usd_krw = 1300
             
-            korea_price = upbit_data['trade_price']  # KRW
-            global_price_usd = float(binance_data['price'])  # USD
-            global_price_krw = global_price_usd * usd_krw
+            korea_price_krw = upbit_data['trade_price']
+            global_price_usd = global_price
             
-            # 프리미엄 계산
-            premium = ((korea_price / global_price_krw) - 1) * 100
+            korea_price_usd = korea_price_krw / usd_krw
+            premium = ((korea_price_usd - global_price_usd) / global_price_usd) * 100
             
-            # 시그널
             if premium > 5:
                 signal = 'High Premium (Bullish KR Market)'
             elif premium < -5:
@@ -2688,16 +2652,16 @@ def fetch_kimchi_premium(symbol: str = 'BTC') -> Dict:
             
             return {
                 'premium': premium,
-                'korea_price': korea_price,
-                'global_price': global_price_krw,
+                'korea_price': korea_price_krw,
+                'global_price': global_price_usd,
                 'usd_krw_rate': usd_krw,
                 'signal': signal,
                 'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
-        else:
-            return {'premium': 0, 'korea_price': 0, 'global_price': 0, 'signal': 'Unknown', 'status': 'error'}
-    
+        
+        return {'premium': 0, 'korea_price': 0, 'global_price': 0, 'signal': 'No Price Data', 'status': 'error'}
+        
     except Exception as e:
         return {'premium': 0, 'korea_price': 0, 'global_price': 0, 'signal': 'Unknown', 'error': str(e), 'status': 'error'}
 
@@ -2706,44 +2670,19 @@ def fetch_funding_rate(symbol: str = 'BTCUSDT') -> Dict:
     """
     Binance 선물 펀딩비 수집
     
-    Returns:
-    --------
-    dict : {
-        'funding_rate': float,
-        'next_funding_time': str,
-        'signal': str
-    }
-    """
-    try:
-        url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={symbol}&limit=1"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if len(data) > 0:
-                latest = data[0]
-                funding_rate = float(latest['fundingRate']) * 100  # Percentage
-                
-                # 시그널
-                if funding_rate > 0.05:
-                    signal = 'High Positive (Overleveraged Long)'
-                elif funding_rate < -0.05:
-                    signal = 'Negative (Short Dominance)'
-                else:
-                    signal = 'Neutral'
-                
-                return {
-                    'funding_rate': funding_rate,
-                    'funding_time': latest['fundingTime'],
-                    'signal': signal,
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'success'
-                }
-        
-        return {'funding_rate': 0, 'funding_time': '', 'signal': 'Unknown', 'status': 'error'}
+    v2.9.9: Binance API 제거됨 - 펀딩비 기능 비활성화
+    추후 대체 API 추가 예정 (CoinGlass, Coingecko Pro 등)
     
-    except Exception as e:
-        return {'funding_rate': 0, 'funding_time': '', 'signal': 'Unknown', 'error': str(e), 'status': 'error'}
+    Returns:
+        dict: {'funding_rate': 0.0, 'next_funding_time': None}
+    """
+    # v2.9.9: Binance API 사용 중단
+    return {
+        'funding_rate': 0.0,
+        'next_funding_time': None,
+        'status': 'disabled'
+    }
+
 
 
 def fetch_liquidation_data(symbol: str = 'BTCUSDT', period: str = '24h') -> Dict:
@@ -5230,13 +5169,13 @@ with st.sidebar:
     
     # 세션 상태 초기화 (코인 선택 유지용)
     if 'selected_crypto' not in st.session_state:
-        st.session_state.selected_crypto = "BTCUSDT"
+        st.session_state.selected_crypto = "BTC-USD"
     if 'coin_input_method' not in st.session_state:
         st.session_state.coin_input_method = "기본 목록"
     
     coin_input_method = st.radio(
         "🔧 입력 방식",
-        ["기본 목록", "전체 코인 검색 (바이낸스)", "직접 입력"],
+        ["기본 목록", "직접 입력"],  # v2.9.9: 2개만 유지
         horizontal=True,
         key='coin_input_method'
     )
@@ -5256,138 +5195,78 @@ with st.sidebar:
         crypto_choice = st.selectbox(
             "💎 암호화폐",
             crypto_list,
-            index=current_index
+            index=current_index,
+            key="basic_list_select"
         )
         st.session_state.selected_crypto = CRYPTO_MAP[crypto_choice]
     
-    elif coin_input_method == "전체 코인 검색 (바이낸스)":
-        with st.spinner("🔎 바이낸스에서 코인 목록을 불러오는 중..."):
-            all_pairs = get_all_binance_usdt_pairs()
+    else:  # "직접 입력" (CoinGecko 통합)
+        st.info("💡 **CoinGecko 검색**: 19,000개 이상의 암호화폐 지원")
         
-        search_query = st.text_input(
-            "🔍 코인 검색",
-            value="",
-            placeholder="코인 이름 또는 심볼 입력 (예: BTC, 비트코인, SOL)"
-        )
+        # CoinGecko 코인 목록 로드 (1시간 캐싱)
+        with st.spinner("🔎 CoinGecko에서 코인 목록 로딩 중..."):
+            all_coins = get_all_coins_from_coingecko()
         
-        if search_query:
-            search_upper = search_query.upper()
-            filtered_pairs = [
-                pair for pair in all_pairs 
-                if search_upper in pair[0].upper() or search_upper in pair[1].upper()
-            ]
+        if not all_coins:
+            st.error("❌ CoinGecko API 로드 실패. 기본 목록을 사용하세요.")
+            st.session_state.selected_crypto = "BTC-USD"
         else:
-            filtered_pairs = all_pairs
-        
-        if filtered_pairs:
-            st.caption(f"📊 총 {len(filtered_pairs)}개 코인 표시 중 (Binance USDT 페어)")
-            
-            # 현재 선택된 코인의 인덱스 찾기
-            display_names = [pair[0] for pair in filtered_pairs]
-            current_index = 0
-            for idx, pair in enumerate(filtered_pairs):
-                if pair[1] == st.session_state.selected_crypto:
-                    current_index = idx
-                    break
-            
-            selected_display = st.selectbox(
-                "💎 코인 선택",
-                display_names,
-                index=current_index,
-                key="binance_coin_select"
+            # 검색 입력창
+            search_query = st.text_input(
+                "🔍 코인 검색 (이름 또는 심볼)",
+                key='coingecko_search',
+                placeholder="예: Bitcoin, BTC, Ethereum, ETH, Solana, SOL...",
+                help="코인 이름이나 심볼을 입력하여 검색"
             )
             
-            for pair in filtered_pairs:
-                if pair[0] == selected_display:
-                    st.session_state.selected_crypto = pair[1]
-                    break
-            
-            st.success(f"✅ 선택됨: **{st.session_state.selected_crypto}**")
-        else:
-            st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
-            st.session_state.selected_crypto = "BTCUSDT"
-    
-    else:  # "직접 입력"
-        st.info("💡 팁: 심볼(예: BTC, ETHUSDT) 또는 코인명(예: 비트코인, 이더리웄) 입력 가능")
-        
-        # 바이낸스 전체 코인 목록 로드 (캐싱됨)
-        with st.spinner("🔎 코인 목록 로딩 중..."):
-            all_pairs = get_all_binance_usdt_pairs()
-        
-        # 통합 검색 입력창
-        search_input = st.text_input(
-            "💎 코인 검색 또는 심볼 입력",
-            key='unified_search_input',
-            placeholder="예: BTC, 비트코인, ETHUSDT, 이더리웄",
-            help="심볼 또는 코인 이름을 입력하세요"
-        ).upper().strip()
-        
-        if search_input:
-            # 정확한 USDT 페어 심볼인지 확인
-            exact_match = None
-            if search_input.endswith("USDT"):
-                for pair in all_pairs:
-                    if pair[1] == search_input:
-                        exact_match = pair
-                        break
-            
-            # 정확한 매칭이 있으면 즉시 선택
-            if exact_match:
-                st.session_state.selected_crypto = exact_match[1]
-                st.success(f"✅ 선택됨: **{exact_match[0]}** ({exact_match[1]})")
-            
+            # 검색 필터링
+            if search_query:
+                search_lower = search_query.lower()
+                filtered_coins = [
+                    coin for coin in all_coins
+                    if search_lower in coin[0].lower()  # display_name에서 검색
+                ]
             else:
-                # USDT 없이 입력한 경우 자동 추가 시도
-                search_upper = search_input
-                if not search_input.endswith("USDT"):
-                    potential_symbol = search_input + "USDT"
-                    for pair in all_pairs:
-                        if pair[1] == potential_symbol:
-                            exact_match = pair
+                # 검색어 없으면 상위 100개만 표시
+                filtered_coins = all_coins[:100]
+            
+            if filtered_coins:
+                st.caption(f"📊 검색 결과: {len(filtered_coins)}개 코인 {'(상위 100개)' if not search_query else ''}")
+                
+                # 현재 선택된 코인 찾기
+                current_index = 0
+                if hasattr(st.session_state, 'selected_coingecko_coin'):
+                    for idx, coin in enumerate(filtered_coins):
+                        if coin[1] == st.session_state.selected_coingecko_coin:
+                            current_index = idx
                             break
                 
-                if exact_match:
-                    st.session_state.selected_crypto = exact_match[1]
-                    st.success(f"✅ 자동 매칭: **{exact_match[0]}** ({exact_match[1]})")
+                # 선택 박스
+                selected_display = st.selectbox(
+                    "💎 코인 선택",
+                    options=[coin[0] for coin in filtered_coins],
+                    index=current_index,
+                    key="coingecko_coin_select"
+                )
                 
-                else:
-                    # 검색 결과
-                    filtered_pairs = [
-                        pair for pair in all_pairs 
-                        if search_upper in pair[0].upper() or search_upper in pair[1].upper()
-                    ]
-                    
-                    if filtered_pairs:
-                        st.caption(f"📊 검색 결과: {len(filtered_pairs)}개 코인")
+                # 선택된 코인 정보 추출
+                for coin in filtered_coins:
+                    if coin[0] == selected_display:
+                        display_name, coin_id, coin_symbol = coin
+                        st.session_state.selected_coingecko_coin = coin_id
                         
-                        # 현재 선택 유지
-                        display_names = [pair[0] for pair in filtered_pairs]
-                        current_index = 0
-                        for idx, pair in enumerate(filtered_pairs):
-                            if pair[1] == st.session_state.selected_crypto:
-                                current_index = idx
-                                break
+                        # yfinance 심볼로 변환
+                        yf_symbol = coingecko_to_yfinance_symbol(coin_symbol, coin_id)
+                        st.session_state.selected_crypto = yf_symbol
                         
-                        selected_display = st.selectbox(
-                            "💎 검색 결과에서 선택",
-                            display_names,
-                            index=current_index,
-                            key="unified_search_select"
-                        )
-                        
-                        for pair in filtered_pairs:
-                            if pair[0] == selected_display:
-                                st.session_state.selected_crypto = pair[1]
-                                break
-                        
-                        st.success(f"✅ 선택됨: **{st.session_state.selected_crypto}**")
-                    
-                    else:
-                        st.warning(f"⚠️ '{search_input}'에 대한 검색 결과가 없습니다.")
+                        st.success(f"✅ 선택됨: **{display_name}** → `{yf_symbol}`")
+                        break
+            else:
+                st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
+                if not hasattr(st.session_state, 'selected_crypto'):
+                    st.session_state.selected_crypto = "BTC-USD"
+    
         
-        else:
-            # 입력 없을 때 현재 선택 표시
-            st.info(f"현재 선택: **{st.session_state.selected_crypto}**")
     
     # 이후 코드에서 사용할 변수
     selected_crypto = st.session_state.selected_crypto
@@ -6391,7 +6270,8 @@ def fetch_open_interest(symbol: str = 'BTCUSDT') -> Dict:
         dict: {'open_interest': float, 'symbol': str, 'status': str}
     """
     try:
-        url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
+        # v2.9.9: Binance API 제거됨
+        # url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
@@ -6570,7 +6450,8 @@ def fetch_open_interest_history(symbol: str = 'BTCUSDT', limit: int = 100):
         # 대신 현재 값만 반복 수집하여 로컬 저장 필요
         # 여기서는 더미 데이터로 시연
         
-        url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
+        # v2.9.9: Binance API 제거됨
+        # url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={symbol}"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:

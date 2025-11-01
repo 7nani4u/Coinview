@@ -7,6 +7,7 @@ numpy>=1.22,<3.0
 scipy>=1.8,<2.0
 statsmodels>=0.14,<0.15
 requests>=2.31,<3.0
+python-dateutil>=2.8.0
 pytz>=2024.1
 yfinance>=0.2.64,<0.3
 
@@ -118,6 +119,12 @@ lightgbm>=4.0.0,<5.0  ; python_version >= "3.8"
 # └───────────────────────────────────────────────────────────┘
 prophet>=1.1.5,<2.0  ; python_version >= "3.8"
 
+# === 선택사항 (고급 기능) ===
+# TradingView Screener (선택사항 - 고급 검색)
+# tradingview-screener>=2.5.0
+
+# === v2.9.9 신규 추가 (CoinGecko 통합) ===
+pycoingecko>=3.1.0
 
 # ── 참고 ─────────────────────────────────────────────────
 # - patsy: statsmodels 종속으로 자동 설치됨 (명시 불필요)
