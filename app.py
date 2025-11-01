@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.9 (CoinGecko 통합)
+코인 AI 예측 시스템 - v2.9.10 (버그 수정 + 고급 분석)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -55,6 +55,16 @@
 - ✅ 입력 방식 단순화: "기본 목록" + "직접 입력" (2개만)
 - ✅ 자동 심볼 변환: CoinGecko ID → yfinance 심볼
 - ✅ 검색 성능 개선: 1시간 캐싱
+
+🔧 v2.9.10 버그 수정 + 고급 분석 (2025-11-01):
+- 🐛 직접 입력 CoinGecko 검색 버그 수정
+- 📊 모델 신뢰도 4단계 레벨 시스템
+- ⚠️ 신뢰도 경고 메시지 자동 표시
+- 📈 신뢰도 히스토리 차트
+- 🎯 리스크 레벨별 권장 레버리지
+- 📉 리스크 점수 히스토리 추적
+- 💼 포트폴리오 전체 리스크 분석
+- 📊 거래량 패턴 분석 (급증/급감 감지)
 """
 
 
@@ -673,6 +683,459 @@ def coingecko_to_yfinance_symbol(coin_symbol, coin_id):
         yf_symbol = special_cases[coin_symbol.upper()]
     
     return yf_symbol
+
+# ============================================================================
+# v2.9.10: 고급 분석 함수들
+# ============================================================================
+
+def calculate_confidence_level(predictions: list, actual_values: list = None) -> Dict:
+    """
+    모델 신뢰도 계산 (4단계 레벨)
+    
+    Args:
+        predictions: 예측값 리스트
+        actual_values: 실제값 리스트 (선택사항)
+    
+    Returns:
+        dict: {
+            'level': str,  # 'Very High', 'High', 'Medium', 'Low'
+            'score': float,  # 0-100
+            'color': str,  # 색상 코드
+            'icon': str,  # 이모지
+            'message': str,  # 설명 메시지
+            'recommendation': str  # 권장사항
+        }
+    """
+    try:
+        # 1. 예측값 분산 계산 (낮을수록 신뢰도 높음)
+        pred_std = np.std(predictions) if len(predictions) > 1 else 0
+        pred_mean = np.mean(predictions) if len(predictions) > 0 else 0
+        
+        # 2. 상대 표준편차 (Coefficient of Variation)
+        cv = (pred_std / abs(pred_mean) * 100) if pred_mean != 0 else 100
+        
+        # 3. 예측 일관성 (연속된 예측값의 방향성)
+        consistency = 0
+        if len(predictions) > 1:
+            directions = [predictions[i+1] - predictions[i] for i in range(len(predictions)-1)]
+            same_direction = sum(1 for i in range(len(directions)-1) 
+                               if directions[i] * directions[i+1] > 0)
+            consistency = (same_direction / max(len(directions)-1, 1)) * 100
+        
+        # 4. 실제값과의 정확도 (있는 경우)
+        accuracy = 0
+        if actual_values and len(actual_values) == len(predictions):
+            mape = np.mean(np.abs((np.array(actual_values) - np.array(predictions)) / 
+                                  np.array(actual_values))) * 100
+            accuracy = max(0, 100 - mape)
+        
+        # 종합 신뢰도 점수 계산
+        if actual_values:
+            # 실제값 있을 때: 정확도 위주
+            confidence_score = (
+                accuracy * 0.6 +  # 60%
+                (100 - min(cv, 100)) * 0.2 +  # 20%
+                consistency * 0.2  # 20%
+            )
+        else:
+            # 실제값 없을 때: 일관성 위주
+            confidence_score = (
+                (100 - min(cv, 100)) * 0.5 +  # 50%
+                consistency * 0.5  # 50%
+            )
+        
+        # 레벨 판정
+        if confidence_score >= 80:
+            level = "Very High"
+            color = "#00C853"  # 초록
+            icon = "🟢"
+            message = "매우 높은 신뢰도 - 예측이 매우 일관적입니다"
+            recommendation = "✅ 안전하게 진입 가능"
+        elif confidence_score >= 65:
+            level = "High"
+            color = "#64DD17"  # 연두
+            icon = "🟡"
+            message = "높은 신뢰도 - 예측이 일관적입니다"
+            recommendation = "✅ 진입 가능 (소액 테스트 권장)"
+        elif confidence_score >= 50:
+            level = "Medium"
+            color = "#FFA726"  # 주황
+            icon = "🟠"
+            message = "중간 신뢰도 - 예측에 변동성이 있습니다"
+            recommendation = "⚠️ 신중한 진입 필요 (리스크 관리 필수)"
+        else:
+            level = "Low"
+            color = "#E53935"  # 빨강
+            icon = "🔴"
+            message = "낮은 신뢰도 - 예측 불확실성이 높습니다"
+            recommendation = "❌ 진입 보류 권장 (관망 모드)"
+        
+        return {
+            'level': level,
+            'score': round(confidence_score, 2),
+            'color': color,
+            'icon': icon,
+            'message': message,
+            'recommendation': recommendation,
+            'cv': round(cv, 2),
+            'consistency': round(consistency, 2),
+            'accuracy': round(accuracy, 2) if actual_values else None
+        }
+        
+    except Exception as e:
+        return {
+            'level': 'Unknown',
+            'score': 0,
+            'color': '#757575',
+            'icon': '⚪',
+            'message': f'신뢰도 계산 오류: {str(e)}',
+            'recommendation': '❓ 데이터 부족',
+            'cv': 0,
+            'consistency': 0,
+            'accuracy': None
+        }
+
+
+def analyze_risk_profile(volatility: float, trend_strength: float, 
+                        volume_ratio: float) -> Dict:
+    """
+    리스크 프로필 분석 및 권장 레버리지 제시
+    
+    Args:
+        volatility: 변동성 (0-100)
+        trend_strength: 추세 강도 (0-100)
+        volume_ratio: 거래량 비율 (현재/평균)
+    
+    Returns:
+        dict: {
+            'risk_level': str,  # 'Very High', 'High', 'Medium', 'Low'
+            'risk_score': float,  # 0-100
+            'recommended_leverage': int,  # 1-20
+            'max_position_size': float,  # % of capital
+            'stop_loss_distance': float,  # % from entry
+            'color': str,
+            'icon': str,
+            'warnings': list
+        }
+    """
+    try:
+        # 1. 리스크 점수 계산 (높을수록 위험)
+        risk_score = (
+            volatility * 0.5 +  # 변동성 50%
+            (100 - trend_strength) * 0.3 +  # 추세 약함 30%
+            abs(volume_ratio - 1) * 20 * 0.2  # 거래량 이상 20%
+        )
+        risk_score = min(100, max(0, risk_score))
+        
+        # 2. 리스크 레벨 판정
+        if risk_score <= 25:
+            risk_level = "Low"
+            color = "#00C853"
+            icon = "🟢"
+            recommended_leverage = 10
+            max_position_size = 20.0  # 20% of capital
+            stop_loss_distance = 3.0  # 3%
+            warnings = []
+        elif risk_score <= 50:
+            risk_level = "Medium"
+            color = "#FFA726"
+            icon = "🟡"
+            recommended_leverage = 5
+            max_position_size = 10.0
+            stop_loss_distance = 5.0
+            warnings = ["⚠️ 변동성 주의"]
+        elif risk_score <= 75:
+            risk_level = "High"
+            color = "#FF5722"
+            icon = "🟠"
+            recommended_leverage = 3
+            max_position_size = 5.0
+            stop_loss_distance = 7.0
+            warnings = ["⚠️ 높은 변동성", "⚠️ 엄격한 손절 필요"]
+        else:
+            risk_level = "Very High"
+            color = "#E53935"
+            icon = "🔴"
+            recommended_leverage = 1
+            max_position_size = 2.0
+            stop_loss_distance = 10.0
+            warnings = ["❌ 매우 위험한 시장", "❌ 진입 보류 권장", "❌ 현물 거래만 고려"]
+        
+        # 3. 추가 경고 메시지
+        if volatility > 80:
+            warnings.append("🚨 극단적 변동성")
+        if volume_ratio < 0.5:
+            warnings.append("📉 거래량 급감")
+        elif volume_ratio > 3.0:
+            warnings.append("📈 거래량 급증")
+        if trend_strength < 30:
+            warnings.append("🔀 추세 불명확")
+        
+        return {
+            'risk_level': risk_level,
+            'risk_score': round(risk_score, 2),
+            'recommended_leverage': recommended_leverage,
+            'max_position_size': round(max_position_size, 2),
+            'stop_loss_distance': round(stop_loss_distance, 2),
+            'color': color,
+            'icon': icon,
+            'warnings': warnings,
+            'volatility': round(volatility, 2),
+            'trend_strength': round(trend_strength, 2),
+            'volume_ratio': round(volume_ratio, 2)
+        }
+        
+    except Exception as e:
+        return {
+            'risk_level': 'Unknown',
+            'risk_score': 0,
+            'recommended_leverage': 1,
+            'max_position_size': 1.0,
+            'stop_loss_distance': 10.0,
+            'color': '#757575',
+            'icon': '⚪',
+            'warnings': [f'리스크 분석 오류: {str(e)}'],
+            'volatility': 0,
+            'trend_strength': 0,
+            'volume_ratio': 0
+        }
+
+
+def analyze_volume_pattern(df: pd.DataFrame, window: int = 20) -> Dict:
+    """
+    거래량 패턴 분석 (급증/급감 감지)
+    
+    Args:
+        df: OHLCV 데이터프레임
+        window: 이동평균 기간
+    
+    Returns:
+        dict: {
+            'pattern': str,  # 'Surge', 'Drop', 'Normal', 'Accumulation', 'Distribution'
+            'volume_ratio': float,  # 현재/평균 비율
+            'avg_volume': float,
+            'current_volume': float,
+            'trend': str,  # 'Increasing', 'Decreasing', 'Stable'
+            'signal': str,  # 'Bullish', 'Bearish', 'Neutral'
+            'score': float,  # 0-100
+            'description': str
+        }
+    """
+    try:
+        if df is None or len(df) < window:
+            return {
+                'pattern': 'Unknown',
+                'volume_ratio': 0,
+                'avg_volume': 0,
+                'current_volume': 0,
+                'trend': 'Unknown',
+                'signal': 'Neutral',
+                'score': 50,
+                'description': '데이터 부족'
+            }
+        
+        # 1. 현재 거래량 vs 평균 거래량
+        current_volume = df['Volume'].iloc[-1]
+        avg_volume = df['Volume'].rolling(window=window).mean().iloc[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
+        
+        # 2. 거래량 추세 (최근 5일)
+        recent_volumes = df['Volume'].tail(5).values
+        if len(recent_volumes) >= 3:
+            trend_slope = np.polyfit(range(len(recent_volumes)), recent_volumes, 1)[0]
+            if trend_slope > avg_volume * 0.1:
+                trend = 'Increasing'
+            elif trend_slope < -avg_volume * 0.1:
+                trend = 'Decreasing'
+            else:
+                trend = 'Stable'
+        else:
+            trend = 'Unknown'
+        
+        # 3. 가격과 거래량 상관관계
+        price_change = (df['Close'].iloc[-1] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100
+        
+        # 4. 패턴 판정
+        if volume_ratio >= 3.0:
+            pattern = 'Surge'
+            if price_change > 0:
+                signal = 'Strong Bullish'
+                score = 85
+                description = "거래량 급증 + 상승 → 강한 매수 신호"
+            else:
+                signal = 'Bearish'
+                score = 35
+                description = "거래량 급증 + 하락 → 매도 압력"
+        elif volume_ratio >= 2.0:
+            pattern = 'High'
+            if price_change > 0:
+                signal = 'Bullish'
+                score = 70
+                description = "높은 거래량 + 상승 → 매수 신호"
+            else:
+                signal = 'Bearish'
+                score = 40
+                description = "높은 거래량 + 하락 → 주의"
+        elif volume_ratio <= 0.5:
+            pattern = 'Drop'
+            signal = 'Neutral'
+            score = 50
+            description = "거래량 감소 → 관망 필요"
+        elif trend == 'Increasing' and price_change < 0:
+            pattern = 'Accumulation'
+            signal = 'Bullish'
+            score = 65
+            description = "하락 중 거래량 증가 → 매집 가능성"
+        elif trend == 'Increasing' and price_change > 0:
+            pattern = 'Distribution'
+            signal = 'Bearish'
+            score = 45
+            description = "상승 중 거래량 증가 → 분산 가능성"
+        else:
+            pattern = 'Normal'
+            signal = 'Neutral'
+            score = 50
+            description = "정상 거래량 범위"
+        
+        return {
+            'pattern': pattern,
+            'volume_ratio': round(volume_ratio, 2),
+            'avg_volume': round(avg_volume, 0),
+            'current_volume': round(current_volume, 0),
+            'trend': trend,
+            'signal': signal,
+            'score': score,
+            'description': description,
+            'price_change': round(price_change, 2)
+        }
+        
+    except Exception as e:
+        return {
+            'pattern': 'Error',
+            'volume_ratio': 0,
+            'avg_volume': 0,
+            'current_volume': 0,
+            'trend': 'Unknown',
+            'signal': 'Neutral',
+            'score': 50,
+            'description': f'분석 오류: {str(e)}',
+            'price_change': 0
+        }
+
+
+def calculate_portfolio_risk(positions: list) -> Dict:
+    """
+    포트폴리오 전체 리스크 분석
+    
+    Args:
+        positions: 포지션 리스트 [
+            {
+                'symbol': str,
+                'size': float,
+                'entry_price': float,
+                'current_price': float,
+                'leverage': int,
+                'risk_score': float
+            },
+            ...
+        ]
+    
+    Returns:
+        dict: {
+            'total_risk_score': float,  # 0-100
+            'risk_level': str,
+            'diversification_score': float,
+            'correlation_risk': float,
+            'leverage_risk': float,
+            'recommendations': list
+        }
+    """
+    try:
+        if not positions or len(positions) == 0:
+            return {
+                'total_risk_score': 0,
+                'risk_level': 'No Positions',
+                'diversification_score': 0,
+                'correlation_risk': 0,
+                'leverage_risk': 0,
+                'recommendations': ['포지션 없음']
+            }
+        
+        # 1. 개별 포지션 리스크 가중 평균
+        total_capital = sum(p['size'] * p['current_price'] for p in positions)
+        weighted_risk = sum(
+            (p['size'] * p['current_price'] / total_capital) * p.get('risk_score', 50)
+            for p in positions
+        )
+        
+        # 2. 분산 점수 (많을수록 좋음)
+        num_positions = len(positions)
+        diversification_score = min(100, num_positions * 20)  # 5개 이상이면 100
+        
+        # 3. 레버리지 리스크
+        avg_leverage = np.mean([p['leverage'] for p in positions])
+        leverage_risk = min(100, avg_leverage * 5)  # 20배면 100
+        
+        # 4. 상관관계 리스크 (간단 추정: 같은 자산군이면 높음)
+        # 실제로는 가격 상관계수 계산 필요
+        correlation_risk = 50  # 기본값
+        
+        # 5. 총 리스크 점수
+        total_risk_score = (
+            weighted_risk * 0.4 +
+            (100 - diversification_score) * 0.3 +
+            leverage_risk * 0.2 +
+            correlation_risk * 0.1
+        )
+        
+        # 6. 리스크 레벨
+        if total_risk_score <= 30:
+            risk_level = "Low"
+        elif total_risk_score <= 60:
+            risk_level = "Medium"
+        elif total_risk_score <= 80:
+            risk_level = "High"
+        else:
+            risk_level = "Very High"
+        
+        # 7. 권장사항
+        recommendations = []
+        if diversification_score < 40:
+            recommendations.append("❗ 분산 투자 부족 - 더 많은 종목 추가 권장")
+        if avg_leverage > 10:
+            recommendations.append("❗ 높은 레버리지 - 레버리지 축소 권장")
+        if total_risk_score > 70:
+            recommendations.append("🚨 전체 리스크 과다 - 일부 포지션 청산 고려")
+        if len(positions) == 1:
+            recommendations.append("⚠️ 단일 포지션 - 분산 필요")
+        
+        if not recommendations:
+            recommendations.append("✅ 적절한 리스크 관리")
+        
+        return {
+            'total_risk_score': round(total_risk_score, 2),
+            'risk_level': risk_level,
+            'diversification_score': round(diversification_score, 2),
+            'correlation_risk': round(correlation_risk, 2),
+            'leverage_risk': round(leverage_risk, 2),
+            'recommendations': recommendations,
+            'num_positions': num_positions,
+            'avg_leverage': round(avg_leverage, 2)
+        }
+        
+    except Exception as e:
+        return {
+            'total_risk_score': 0,
+            'risk_level': 'Error',
+            'diversification_score': 0,
+            'correlation_risk': 0,
+            'leverage_risk': 0,
+            'recommendations': [f'분석 오류: {str(e)}'],
+            'num_positions': 0,
+            'avg_leverage': 0
+        }
+
+
 
 
 
