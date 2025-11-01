@@ -5165,21 +5165,27 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
     current_status = exit_strategy['current_status']
     scenarios = exit_strategy['scenarios']
     
-    # 현재 상태와 권장사항을 함께 표시
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1.5])
+    # 현재 상태와 권장사항을 함께 표시 (최적화된 컬럼 비율)
+    col1, col2, col3, col4, col5 = st.columns([0.9, 1, 0.9, 0.8, 1.4])
     
     with col1:
-        st.metric(
-            label="진입가",
-            value=f"${entry_price:,.2f}"
-        )
+        st.markdown("""
+            <div style='text-align: left;'>
+                <p style='font-size: 0.875rem; color: rgb(49, 51, 63); margin-bottom: 0.25rem;'>진입가</p>
+                <p style='font-size: 1.5rem; font-weight: 600; margin: 0;'>${:,.2f}</p>
+            </div>
+        """.format(entry_price), unsafe_allow_html=True)
     
     with col2:
-        st.metric(
-            label="현재가",
-            value=f"${current_status['current_price']:,.2f}",
-            delta=f"{current_status['unrealized_pnl']:+.2f}%"
-        )
+        # 델타 색상
+        delta_color = '#09ab3b' if current_status['unrealized_pnl'] >= 0 else '#ff2b2b'
+        st.markdown("""
+            <div style='text-align: left;'>
+                <p style='font-size: 0.875rem; color: rgb(49, 51, 63); margin-bottom: 0.25rem;'>현재가</p>
+                <p style='font-size: 1.5rem; font-weight: 600; margin: 0;'>${:,.2f}</p>
+                <p style='font-size: 0.875rem; color: {}; margin-top: 0.25rem;'>{:+.2f}%</p>
+            </div>
+        """.format(current_status['current_price'], delta_color, current_status['unrealized_pnl']), unsafe_allow_html=True)
     
     with col3:
         # RSI 상태 한글 번역
@@ -5210,7 +5216,7 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         )
     
     with col5:
-        # 권장사항을 깨끗하게 표시
+        # 권장사항을 컴팩트하게 표시
         if current_status['recommendation']:
             # 색상 결정
             if '즉시' in current_status['recommendation']:
@@ -5224,9 +5230,9 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
                 bg_color = '#e3f2fd'
             
             st.markdown(f"""
-            <div style='background-color: {bg_color}; border-left: 3px solid {color}; padding: 8px 12px; border-radius: 5px; height: 100%;'>
-                <p style='font-size: 11px; color: #666; margin: 0 0 4px 0; font-weight: 600;'>💡 권장사항</p>
-                <p style='font-size: 13px; font-weight: bold; color: {color}; margin: 0; line-height: 1.3;'>{current_status['recommendation']}</p>
+            <div style='background-color: {bg_color}; border-left: 3px solid {color}; padding: 6px 10px; border-radius: 5px; display: inline-block; max-width: 100%;'>
+                <p style='font-size: 10px; color: #666; margin: 0 0 3px 0; font-weight: 600; white-space: nowrap;'>💡 권장사항</p>
+                <p style='font-size: 12px; font-weight: bold; color: {color}; margin: 0; line-height: 1.3; word-wrap: break-word;'>{current_status['recommendation']}</p>
             </div>
             """, unsafe_allow_html=True)
     
