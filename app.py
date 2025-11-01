@@ -151,17 +151,64 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# Keep-Alive 모듈 (선택적)
-try:
-    from keep_alive import keep_alive
-    # Keep-alive 서버 시작 (백그라운드)
-    keep_alive()
-except ImportError:
-    # keep_alive.py 파일이 없으면 무시
-    pass
-except Exception as e:
-    # Keep-alive 실패 시에도 앱은 정상 실행
-    pass  # 로그는 UI에서 표시
+# ═══════════════════════════════════════════════════════════════════════
+# Keep-Alive 시스템 - 절대 시계 기준 15분 간격 (00, 15, 30, 45분)
+# ═══════════════════════════════════════════════════════════════════════
+import datetime
+import threading
+import requests
+import os
+
+def get_next_keepalive_time():
+    '''다음 keep-alive 실행 시각 계산 (매시 00, 15, 30, 45분)'''
+    now = datetime.datetime.now()
+    minute = now.minute
+    
+    # 다음 15분 배수 시각 계산
+    if minute < 15:
+        next_minute = 15
+    elif minute < 30:
+        next_minute = 30
+    elif minute < 45:
+        next_minute = 45
+    else:
+        next_minute = 0
+    
+    # 다음 실행 시각 생성
+    if next_minute == 0:
+        # 다음 시간대의 00분
+        next_time = now.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1)
+    else:
+        next_time = now.replace(minute=next_minute, second=0, microsecond=0)
+    
+    return next_time
+
+def keepalive_scheduler():
+    '''절대 시계 기준 Keep-Alive 스케줄러'''
+    while True:
+        # 다음 실행 시각 계산
+        next_time = get_next_keepalive_time()
+        now = datetime.datetime.now()
+        
+        # 대기 시간 계산 (초 단위)
+        wait_seconds = (next_time - now).total_seconds()
+        
+        # 대기
+        if wait_seconds > 0:
+            threading.Event().wait(wait_seconds)
+        
+        # Keep-Alive 실행
+        try:
+            # 자기 자신에게 ping 요청 (Streamlit 앱 활성 상태 유지)
+            app_url = os.environ.get('REPL_SLUG')  # Replit 환경 변수
+            if app_url:
+                response = requests.get(f"https://{app_url}.repl.co", timeout=5)
+                print(f"[Keep-Alive] {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Status: {response.status_code}")
+            else:
+                # 로컬 환경에서는 단순 로그만
+                print(f"[Keep-Alive] {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Heartbeat")
+        except Exception as e:
+            print(f"[Keep-Alive] Error: {e}")
 
 # TA-Lib 선택적 임포트
 try:
@@ -179,6 +226,17 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Keep-Alive 스레드 시작 (백그라운드)
+if 'keepalive_started' not in st.session_state:
+    st.session_state.keepalive_started = True
+    
+    keepalive_thread = threading.Thread(target=keepalive_scheduler, daemon=True)
+    keepalive_thread.start()
+    
+    # 첫 실행 시각 표시 (디버깅용)
+    next_run = get_next_keepalive_time()
+    print(f"[Keep-Alive] Started - Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ────────────────────────────────────────────────────────────────────────
 # 1.5) ⭐ 실시간 자동 새로고침 (30초)
@@ -5157,32 +5215,48 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("## 2️⃣ 코인 선택")
     
+    # 세션 상태 초기화 (코인 선택 유지용)
+    if 'selected_crypto' not in st.session_state:
+        st.session_state.selected_crypto = "BTCUSDT"
+    if 'coin_input_method' not in st.session_state:
+        st.session_state.coin_input_method = "기본 목록"
+    
     coin_input_method = st.radio(
         "🔧 입력 방식",
         ["기본 목록", "전체 코인 검색 (바이낸스)", "직접 입력"],
-        horizontal=True
+        horizontal=True,
+        key='coin_input_method'
     )
     
     if coin_input_method == "기본 목록":
+        # 현재 선택된 코인에 해당하는 인덱스 찾기
+        crypto_list = list(CRYPTO_MAP.keys())
+        try:
+            current_index = 0
+            for idx, (name, symbol) in enumerate(CRYPTO_MAP.items()):
+                if symbol == st.session_state.selected_crypto:
+                    current_index = idx
+                    break
+        except:
+            current_index = 0
+        
         crypto_choice = st.selectbox(
             "💎 암호화폐",
-            list(CRYPTO_MAP.keys())
+            crypto_list,
+            index=current_index
         )
-        selected_crypto = CRYPTO_MAP[crypto_choice]
+        st.session_state.selected_crypto = CRYPTO_MAP[crypto_choice]
     
     elif coin_input_method == "전체 코인 검색 (바이낸스)":
-        # 바이낸스 모든 USDT 페어 가져오기
         with st.spinner("🔎 바이낸스에서 코인 목록을 불러오는 중..."):
             all_pairs = get_all_binance_usdt_pairs()
         
-        # 검색 기능 추가
         search_query = st.text_input(
             "🔍 코인 검색",
             value="",
             placeholder="코인 이름 또는 심볼 입력 (예: BTC, 비트코인, SOL)"
         )
         
-        # 검색 필터링
         if search_query:
             search_upper = search_query.upper()
             filtered_pairs = [
@@ -5193,32 +5267,37 @@ with st.sidebar:
             filtered_pairs = all_pairs
         
         if filtered_pairs:
-            # 매칭된 코인 수 표시
             st.caption(f"📊 총 {len(filtered_pairs)}개 코인 표시 중 (Binance USDT 페어)")
             
-            # selectbox로 선택
+            # 현재 선택된 코인의 인덱스 찾기
             display_names = [pair[0] for pair in filtered_pairs]
+            current_index = 0
+            for idx, pair in enumerate(filtered_pairs):
+                if pair[1] == st.session_state.selected_crypto:
+                    current_index = idx
+                    break
+            
             selected_display = st.selectbox(
                 "💎 코인 선택",
                 display_names,
+                index=current_index,
                 key="binance_coin_select"
             )
             
-            # 선택된 코인의 심볼 찾기
             for pair in filtered_pairs:
                 if pair[0] == selected_display:
-                    selected_crypto = pair[1]
+                    st.session_state.selected_crypto = pair[1]
                     break
             
-            st.success(f"✅ 선택됨: **{selected_crypto}**")
+            st.success(f"✅ 선택됨: **{st.session_state.selected_crypto}**")
         else:
             st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
-            selected_crypto = "BTCUSDT"
+            st.session_state.selected_crypto = "BTCUSDT"
     
     else:  # "직접 입력"
         custom_symbol = st.text_input(
             "💎 코인 심볼 입력",
-            value="BTCUSDT",
+            value=st.session_state.selected_crypto,
             help="예: BTCUSDT, ETHUSDT, BNBUSDT 등 (USDT 페어만 지원)"
         ).upper().strip()
         
@@ -5226,8 +5305,11 @@ with st.sidebar:
             st.warning("⚠️ USDT 페어만 지원됩니다. 심볼 끝에 'USDT'를 추가해주세요.")
             custom_symbol = custom_symbol + "USDT" if custom_symbol else "BTCUSDT"
         
-        selected_crypto = custom_symbol
-        st.info(f"선택된 코인: **{selected_crypto}** ({selected_crypto[:-4]}-USD)")
+        st.session_state.selected_crypto = custom_symbol
+        st.info(f"선택된 코인: **{st.session_state.selected_crypto}** ({st.session_state.selected_crypto[:-4]}-USD)")
+    
+    # 이후 코드에서 사용할 변수
+    selected_crypto = st.session_state.selected_crypto
     
     st.markdown("---")
     st.markdown("## 3️⃣ 분석 기간")
