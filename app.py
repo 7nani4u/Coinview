@@ -1,10 +1,4 @@
 
-# === Debug toggle (UX) ===
-try:
-    _dbg = st.sidebar.checkbox("🔧 디버그 모드", help="에러 상세 메시지 및 매핑 시도 과정을 표시합니다.")
-    st.session_state["debug"] = bool(_dbg)
-except Exception:
-    pass
 # -*- coding: utf-8 -*-
 """
 코인 AI 예측 시스템 - v2.9.12 (커스터마이즈 대시보드)
@@ -271,6 +265,10 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
+    page_title="코인 AI 예측 시스템 v2.9.12",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # === Session State Guard ===
 def ensure_session_state():
@@ -279,15 +277,19 @@ def ensure_session_state():
         "debug": False,
         "basic_list_select": 0
     }
-    for k,v in defaults.items():
+    for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 ensure_session_state()
-    page_title="코인 AI 예측 시스템 v2.9.12",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+
+# === Debug toggle (UX) ===
+try:
+    _dbg = st.sidebar.checkbox("🔧 디버그 모드", help="에러 상세 메시지 및 매핑 시도 과정을 표시합니다.")
+    st.session_state["debug"] = bool(_dbg)
+except Exception:
+    pass
+
 
 # Keep-Alive 스레드 시작 (백그라운드)
 if 'keepalive_started' not in st.session_state:
