@@ -4493,7 +4493,9 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
     config = get_ensemble_config(interval)
     models = {}
     
-    st.info(f"🤖 앙상블 모델 선택: {config['description']}")
+    # 임시 메시지 placeholder
+    ensemble_info = st.empty()
+    ensemble_info.info(f"🤖 앙상블 모델 선택: {config['description']}")
     
     progress_bar = st.progress(0)
     status_text = st.empty()  # 동적 상태 텍스트용
@@ -4605,13 +4607,17 @@ def train_ensemble_models(data, features_df, interval, forecast_days=3):
     progress_bar.empty()
     status_text.empty()
     
-    # 학습 결과 요약
+    # 학습 결과 요약 (임시 placeholder)
     successful_models = [k for k, v in models.items() if v is not None]
-    st.success(f"✅ 학습 완료: {len(successful_models)}/{total_models} 모델 성공")
-    if successful_models:
-        st.info(f"🎯 사용 가능 모델: {', '.join([m.upper() for m in successful_models])}")
+    success_msg = st.empty()
+    info_msg = st.empty()
     
-    return models, config
+    success_msg.success(f"✅ 학습 완료: {len(successful_models)}/{total_models} 모델 성공")
+    if successful_models:
+        info_msg.info(f"🎯 사용 가능 모델: {', '.join([m.upper() for m in successful_models])}")
+    
+    # 메시지를 models dict에 저장하여 나중에 정리할 수 있도록 함
+    return models, config, {'ensemble_info': ensemble_info, 'success_msg': success_msg, 'info_msg': info_msg}
 
 
 def predict_ensemble(models, config, data, features_df, forecast_days=3):
@@ -5204,17 +5210,25 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         )
     
     with col5:
-        # 권장사항을 metric 형태로 표시
+        # 권장사항을 깨끗하게 표시
         if current_status['recommendation']:
+            # 색상 결정
             if '즉시' in current_status['recommendation']:
-                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
-                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #dc3545; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
+                color = '#dc3545'
+                bg_color = '#f8d7da'
             elif '고려' in current_status['recommendation']:
-                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
-                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #ff9800; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
+                color = '#ff9800'
+                bg_color = '#fff3cd'
             else:
-                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
-                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #0288d1; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
+                color = '#0288d1'
+                bg_color = '#e3f2fd'
+            
+            st.markdown(f"""
+            <div style='background-color: {bg_color}; border-left: 3px solid {color}; padding: 8px 12px; border-radius: 5px; height: 100%;'>
+                <p style='font-size: 11px; color: #666; margin: 0 0 4px 0; font-weight: 600;'>💡 권장사항</p>
+                <p style='font-size: 13px; font-weight: bold; color: {color}; margin: 0; line-height: 1.3;'>{current_status['recommendation']}</p>
+            </div>
+            """, unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -6425,7 +6439,7 @@ if bt:
         # ═══════════════════════════════════════════════════════════════════
         try:
             # 앙상블 모델 학습
-            ensemble_models, ensemble_config = train_ensemble_models(
+            ensemble_models, ensemble_config, ensemble_placeholders = train_ensemble_models(
                 data=close_series,
                 features_df=df,
                 interval=interval,
@@ -6436,7 +6450,9 @@ if bt:
                 st.error("❌ 앙상블 모델 학습에 실패했습니다.")
                 st.stop()
             
-            st.success(f"✅ 앙상블 모델 학습 완료: {ensemble_config['description']}")
+            # 임시 성공 메시지 (곧 삭제됨)
+            final_success = st.empty()
+            final_success.success(f"✅ 앙상블 모델 학습 완료: {ensemble_config['description']}")
             
         except Exception as e:
             st.error(f"❌ 앙상블 모델 학습 중 오류: {e}")
@@ -6457,13 +6473,14 @@ if bt:
                 max_window=500  # 최신 500개 데이터만 사용 (성능 개선)
             )
             
-            # 계절성 정보 표시
+            # 계절성 정보 표시 (임시)
+            seasonality_msg = st.empty()
             if seasonality_info['detected']:
-                st.info(f"✅ 계절성 감지: 주기 {seasonality_info['period']}, "
+                seasonality_msg.info(f"✅ 계절성 감지: 주기 {seasonality_info['period']}, "
                        f"타입 {seasonality_info['type']}, "
                        f"학습 데이터: {window_size}개")
             else:
-                st.info(f"ℹ️ 비계절 모델 사용 (학습 데이터: {window_size}개)")
+                seasonality_msg.info(f"ℹ️ 비계절 모델 사용 (학습 데이터: {window_size}개)")
         
         except Exception as e:
             st.error(f"❌ 모델 학습 실패: {str(e)}")
@@ -6590,6 +6607,13 @@ if bt:
         
         progress_placeholder.empty()
         status_text.empty()
+        
+        # 모든 임시 학습 메시지 정리
+        ensemble_placeholders['ensemble_info'].empty()
+        ensemble_placeholders['success_msg'].empty()
+        ensemble_placeholders['info_msg'].empty()
+        final_success.empty()
+        seasonality_msg.empty()
         
         st.success("✅ 분석이 완료되었습니다!")
         
