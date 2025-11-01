@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.10 (버그 수정 + 고급 분석)
+코인 AI 예측 시스템 - v2.9.11 (대시보드 + 히스토리)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -65,6 +65,14 @@
 - 📉 리스크 점수 히스토리 추적
 - 💼 포트폴리오 전체 리스크 분석
 - 📊 거래량 패턴 분석 (급증/급감 감지)
+
+📊 v2.9.11 대시보드 + 히스토리 (2025-11-01):
+- 🗑️ 고급 다차원 분석 섹션 제거 (-272 lines)
+- 📈 신뢰도 히스토리 차트 추가 (Plotly)
+- 📉 리스크 점수 히스토리 추적
+- 🎯 통합 대시보드 UI
+- 📊 실시간 지표 카드
+- ⏱️ 타임라인 기반 추적
 """
 
 
@@ -683,6 +691,312 @@ def coingecko_to_yfinance_symbol(coin_symbol, coin_id):
         yf_symbol = special_cases[coin_symbol.upper()]
     
     return yf_symbol
+
+
+
+# ============================================================================
+# v2.9.11: 히스토리 추적 및 대시보드
+# ============================================================================
+
+def initialize_session_history():
+    """세션 상태에 히스토리 저장소 초기화"""
+    if 'confidence_history' not in st.session_state:
+        st.session_state.confidence_history = []
+    if 'risk_history' not in st.session_state:
+        st.session_state.risk_history = []
+    if 'prediction_history' not in st.session_state:
+        st.session_state.prediction_history = []
+    if 'volume_history' not in st.session_state:
+        st.session_state.volume_history = []
+
+
+def add_confidence_to_history(confidence_data: Dict, symbol: str):
+    """신뢰도 데이터를 히스토리에 추가"""
+    try:
+        if 'confidence_history' not in st.session_state:
+            st.session_state.confidence_history = []
+        
+        history_entry = {
+            'timestamp': datetime.now(),
+            'symbol': symbol,
+            'score': confidence_data.get('score', 0),
+            'level': confidence_data.get('level', 'Unknown'),
+            'cv': confidence_data.get('cv', 0),
+            'consistency': confidence_data.get('consistency', 0)
+        }
+        
+        st.session_state.confidence_history.append(history_entry)
+        
+        # 최대 100개까지만 유지
+        if len(st.session_state.confidence_history) > 100:
+            st.session_state.confidence_history = st.session_state.confidence_history[-100:]
+            
+    except Exception as e:
+        pass  # 조용히 실패
+
+
+def add_risk_to_history(risk_data: Dict, symbol: str):
+    """리스크 데이터를 히스토리에 추가"""
+    try:
+        if 'risk_history' not in st.session_state:
+            st.session_state.risk_history = []
+        
+        history_entry = {
+            'timestamp': datetime.now(),
+            'symbol': symbol,
+            'risk_score': risk_data.get('risk_score', 0),
+            'risk_level': risk_data.get('risk_level', 'Unknown'),
+            'recommended_leverage': risk_data.get('recommended_leverage', 1),
+            'volatility': risk_data.get('volatility', 0)
+        }
+        
+        st.session_state.risk_history.append(history_entry)
+        
+        # 최대 100개까지만 유지
+        if len(st.session_state.risk_history) > 100:
+            st.session_state.risk_history = st.session_state.risk_history[-100:]
+            
+    except Exception as e:
+        pass  # 조용히 실패
+
+
+def plot_confidence_history():
+    """신뢰도 히스토리 차트 (Plotly)"""
+    try:
+        if 'confidence_history' not in st.session_state or len(st.session_state.confidence_history) == 0:
+            st.info("📊 아직 신뢰도 히스토리가 없습니다. 분석을 실행하면 자동으로 추적됩니다.")
+            return
+        
+        history = st.session_state.confidence_history
+        df_history = pd.DataFrame(history)
+        
+        # Plotly 차트
+        fig = go.Figure()
+        
+        # 신뢰도 점수 라인
+        fig.add_trace(go.Scatter(
+            x=df_history['timestamp'],
+            y=df_history['score'],
+            mode='lines+markers',
+            name='신뢰도 점수',
+            line=dict(color='#00C853', width=2),
+            marker=dict(size=8),
+            hovertemplate='<b>%{y:.1f}%</b><br>%{x}<extra></extra>'
+        ))
+        
+        # 레벨별 색상 영역
+        fig.add_hrect(y0=80, y1=100, fillcolor='green', opacity=0.1, 
+                     annotation_text='Very High', annotation_position='top left')
+        fig.add_hrect(y0=65, y1=80, fillcolor='yellow', opacity=0.1,
+                     annotation_text='High', annotation_position='top left')
+        fig.add_hrect(y0=50, y1=65, fillcolor='orange', opacity=0.1,
+                     annotation_text='Medium', annotation_position='top left')
+        fig.add_hrect(y0=0, y1=50, fillcolor='red', opacity=0.1,
+                     annotation_text='Low', annotation_position='top left')
+        
+        fig.update_layout(
+            title='📈 신뢰도 히스토리',
+            xaxis_title='시간',
+            yaxis_title='신뢰도 점수 (%)',
+            hovermode='x unified',
+            height=400,
+            showlegend=True
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 통계 요약
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("평균 신뢰도", f"{df_history['score'].mean():.1f}%")
+        with col2:
+            st.metric("최고 신뢰도", f"{df_history['score'].max():.1f}%")
+        with col3:
+            st.metric("최저 신뢰도", f"{df_history['score'].min():.1f}%")
+            
+    except Exception as e:
+        st.error(f"히스토리 차트 오류: {e}")
+
+
+def plot_risk_history():
+    """리스크 히스토리 차트 (Plotly)"""
+    try:
+        if 'risk_history' not in st.session_state or len(st.session_state.risk_history) == 0:
+            st.info("📊 아직 리스크 히스토리가 없습니다. 분석을 실행하면 자동으로 추적됩니다.")
+            return
+        
+        history = st.session_state.risk_history
+        df_history = pd.DataFrame(history)
+        
+        # Plotly 차트
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('리스크 점수', '권장 레버리지'),
+            vertical_spacing=0.15,
+            row_heights=[0.6, 0.4]
+        )
+        
+        # 리스크 점수
+        fig.add_trace(
+            go.Scatter(
+                x=df_history['timestamp'],
+                y=df_history['risk_score'],
+                mode='lines+markers',
+                name='리스크 점수',
+                line=dict(color='#E53935', width=2),
+                marker=dict(size=8),
+                hovertemplate='<b>%{y:.1f}</b><br>%{x}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # 권장 레버리지
+        fig.add_trace(
+            go.Scatter(
+                x=df_history['timestamp'],
+                y=df_history['recommended_leverage'],
+                mode='lines+markers',
+                name='권장 레버리지',
+                line=dict(color='#1976D2', width=2),
+                marker=dict(size=8),
+                hovertemplate='<b>%{y}x</b><br>%{x}<extra></extra>'
+            ),
+            row=2, col=1
+        )
+        
+        # 리스크 레벨 영역
+        fig.add_hrect(y0=75, y1=100, fillcolor='red', opacity=0.1, row=1, col=1)
+        fig.add_hrect(y0=50, y1=75, fillcolor='orange', opacity=0.1, row=1, col=1)
+        fig.add_hrect(y0=25, y1=50, fillcolor='yellow', opacity=0.1, row=1, col=1)
+        fig.add_hrect(y0=0, y1=25, fillcolor='green', opacity=0.1, row=1, col=1)
+        
+        fig.update_layout(
+            title='📉 리스크 히스토리',
+            height=600,
+            hovermode='x unified',
+            showlegend=True
+        )
+        
+        fig.update_xaxes(title_text='시간', row=2, col=1)
+        fig.update_yaxes(title_text='리스크 점수', row=1, col=1)
+        fig.update_yaxes(title_text='레버리지 (x)', row=2, col=1)
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 통계 요약
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("평균 리스크", f"{df_history['risk_score'].mean():.1f}")
+        with col2:
+            st.metric("평균 레버리지", f"{df_history['recommended_leverage'].mean():.1f}x")
+        with col3:
+            current_risk = df_history.iloc[-1]['risk_level']
+            st.metric("현재 레벨", current_risk)
+            
+    except Exception as e:
+        st.error(f"히스토리 차트 오류: {e}")
+
+
+def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict, 
+                              volume_data: Dict, confidence_data: Dict = None):
+    """
+    통합 분석 대시보드
+    
+    Args:
+        symbol: 코인 심볼
+        predictions: 예측값 리스트
+        risk_data: 리스크 분석 결과
+        volume_data: 거래량 분석 결과
+        confidence_data: 신뢰도 분석 결과 (선택)
+    """
+    
+    st.markdown("---")
+    st.markdown("## 📊 통합 분석 대시보드")
+    
+    # 신뢰도 계산 (제공되지 않으면 자동 계산)
+    if confidence_data is None and predictions:
+        confidence_data = calculate_confidence_level(predictions)
+    
+    # 히스토리에 추가
+    if confidence_data:
+        add_confidence_to_history(confidence_data, symbol)
+    add_risk_to_history(risk_data, symbol)
+    
+    # 상단 지표 카드
+    st.markdown("### 🎯 핵심 지표")
+    cols = st.columns(4)
+    
+    with cols[0]:
+        if confidence_data:
+            st.metric(
+                "모델 신뢰도",
+                f"{confidence_data['score']:.1f}%",
+                delta=confidence_data['level'],
+                delta_color="normal" if confidence_data['score'] >= 65 else "inverse"
+            )
+            st.markdown(f"{confidence_data['icon']} {confidence_data['level']}")
+    
+    with cols[1]:
+        st.metric(
+            "리스크 레벨",
+            risk_data['risk_level'],
+            delta=f"{risk_data['risk_score']:.1f}",
+            delta_color="inverse" if risk_data['risk_score'] > 60 else "normal"
+        )
+        st.markdown(f"{risk_data['icon']} {risk_data['risk_level']}")
+    
+    with cols[2]:
+        st.metric(
+            "권장 레버리지",
+            f"{risk_data['recommended_leverage']}x",
+            delta=f"포지션 {risk_data['max_position_size']}%"
+        )
+    
+    with cols[3]:
+        st.metric(
+            "거래량 패턴",
+            volume_data['pattern'],
+            delta=f"{volume_data['volume_ratio']:.2f}x"
+        )
+        st.markdown(f"신호: {volume_data['signal']}")
+    
+    # 탭으로 상세 정보 구성
+    tabs = st.tabs(["📈 신뢰도 히스토리", "📉 리스크 히스토리", "⚠️ 경고 & 권장사항"])
+    
+    with tabs[0]:
+        plot_confidence_history()
+    
+    with tabs[1]:
+        plot_risk_history()
+    
+    with tabs[2]:
+        st.markdown("### ⚠️ 현재 경고사항")
+        
+        # 리스크 경고
+        if risk_data.get('warnings'):
+            for warning in risk_data['warnings']:
+                st.warning(warning)
+        
+        # 신뢰도 경고
+        if confidence_data and confidence_data['score'] < 50:
+            st.error(f"🔴 낮은 신뢰도: {confidence_data['recommendation']}")
+        
+        # 거래량 경고
+        if volume_data['volume_ratio'] > 3.0:
+            st.warning("📈 거래량 급증 감지!")
+        elif volume_data['volume_ratio'] < 0.5:
+            st.warning("📉 거래량 급감 감지!")
+        
+        st.markdown("---")
+        st.markdown("### ✅ 권장사항")
+        
+        if confidence_data:
+            st.info(f"**신뢰도**: {confidence_data['recommendation']}")
+        
+        st.info(f"**리스크**: 레버리지 {risk_data['recommended_leverage']}x 이하 사용")
+        st.info(f"**포지션**: 자본의 {risk_data['max_position_size']}% 이하")
+        st.info(f"**손절**: 진입가 대비 {risk_data['stop_loss_distance']}% 설정")
+        st.info(f"**거래량**: {volume_data['description']}")
 
 # ============================================================================
 # v2.9.10: 고급 분석 함수들
@@ -6212,257 +6526,7 @@ if bt:
                 render_trading_metrics(trading_metrics)
             except Exception as e:
                 st.error(f"❌ 실시간 데이터 로드 오류: {str(e)}")
-        
-        # ═══════════════════════════════════════════════════════════════
-        # 🔬 고급 다차원 분석 (v2.9.4 Advanced)
-        # ═══════════════════════════════════════════════════════════════
-        
-        st.markdown("---")
-        st.markdown("<div class='section-title'>🔬 고급 다차원 분석</div>", unsafe_allow_html=True)
-        st.caption("패턴(로컬) + 레짐(글로벌) + 컨텍스트(온체인/파생/시간)")
-        
-        advanced_tabs = st.tabs([
-            "🎯 통합 시그널",
-            "📊 패턴 분석",
-            "🌐 레짐 분류",
-            "📈 컨텍스트",
-            "✅ 검증"
-        ])
-        
-        # 탭 1: 통합 시그널
-        with advanced_tabs[0]:
-            st.markdown("### 🎯 다차원 통합 시그널")
-            st.info("ℹ️ 이벤트성 패턴(Squeeze/NR7/Inside Bar)은 방향성 필터와 결합하여 사용")
-            
-            try:
-                integrated = generate_integrated_signal(df, selected_crypto)
-                
-                signal = integrated['signal']
-                confidence = integrated['confidence']
-                
-                if signal == 'BUY':
-                    st.success(f"### 🟢 매수 시그널 (신뢰도: {confidence:.1f}%)")
-                elif signal == 'SELL':
-                    st.error(f"### 🔴 매도 시그널 (신뢰도: {confidence:.1f}%)")
-                elif signal == 'WAIT':
-                    st.warning(f"### ⏸️ 대기 (패턴 감지, 방향 불명확)")
-                else:
-                    st.info(f"### ⚪ 중립 (신뢰도: {confidence:.1f}%)")
-                
-                st.markdown("#### 📋 분석 근거")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("**방향성 필터**")
-                    directional = integrated['directional']
-                    st.metric("추세 점수", f"{directional['trend']:.0f}/100")
-                    st.metric("모멘텀 (RSI)", f"{directional['momentum']:.0f}")
-                    st.metric("방향", directional['direction'])
-                
-                with col2:
-                    st.markdown("**시장 레짐**")
-                    regime = integrated['market_regime']
-                    st.metric("레짐", regime['regime'])
-                    st.metric("신뢰도", f"{regime['confidence']:.0f}%")
-                    st.metric("변동성", f"{regime['volatility']:.2%}")
-                
-            except Exception as e:
-                st.error(f"❌ 통합 시그널 생성 오류: {str(e)}")
-                st.exception(e)
-        
-        # 탭 2: 패턴 분석
-        with advanced_tabs[1]:
-            st.markdown("### 📊 이벤트성 패턴 감지")
-            st.caption("⚠️ 주의: 이 패턴들은 확률 중립적이며 방향성 필터와 결합 필수")
-            
-            try:
-                squeeze = detect_squeeze_pattern(df)
-                with st.expander("🔹 Bollinger Band Squeeze", expanded=squeeze['detected']):
-                    if squeeze['detected']:
-                        st.success(f"✅ Squeeze 감지! (강도: {squeeze['strength']:.1f}%)")
-                        st.write(f"BB 폭: {squeeze['bb_width']:.2f}%")
-                        st.warning("⚠️ 방향 중립 - 방향성 필터 확인 필요")
-                    else:
-                        st.info("Squeeze 미감지")
-                
-                nr7 = detect_nr7_pattern(df)
-                with st.expander("🔹 NR7 (Narrowest Range 7)", expanded=nr7['detected']):
-                    if nr7['detected']:
-                        st.success(f"✅ NR7 패턴 감지! (강도: {nr7['strength']:.1f}%)")
-                        st.write(f"현재 Range: {nr7['range']:.2f}")
-                        st.write(f"평균 Range: {nr7['avg_range']:.2f}")
-                        st.warning("⚠️ 브레이크아웃 대기 - 방향 미정")
-                    else:
-                        st.info("NR7 미감지")
-                
-                inside = detect_inside_bar(df)
-                with st.expander("🔹 Inside Bar", expanded=inside['detected']):
-                    if inside['detected']:
-                        st.success(f"✅ Inside Bar 감지! (타이트함: {inside['tightness']:.1f}%)")
-                        st.warning("⚠️ 브레이크아웃 대기")
-                    else:
-                        st.info("Inside Bar 미감지")
-                
-                triangle = detect_triangle_convergence(df)
-                with st.expander("🔹 삼각 수렴 패턴", expanded=triangle['detected']):
-                    if triangle['detected']:
-                        st.success(f"✅ 삼각 수렴 감지! (강도: {triangle['strength']:.1f}%)")
-                        st.write(f"고점 추세: {triangle['high_trend']:.4f}")
-                        st.write(f"저점 추세: {triangle['low_trend']:.4f}")
-                    else:
-                        st.info("삼각 수렴 미감지")
-                
-            except Exception as e:
-                st.error(f"❌ 패턴 분석 오류: {str(e)}")
-        
-        # 탭 3: 레짐 분류
-        with advanced_tabs[2]:
-            st.markdown("### 🌐 시장 & 시간 레짐")
-            
-            try:
-                market_regime = classify_market_regime(df)
-                time_regime = calculate_time_regime(df)
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("#### 📈 시장 레짐")
-                    
-                    regime = market_regime['regime']
-                    if regime == 'TRENDING':
-                        st.success(f"✅ **추세장** (신뢰도: {market_regime['confidence']:.0f}%)")
-                        direction = "상승" if market_regime['trend_direction'] > 0 else "하락"
-                        st.write(f"방향: {direction}")
-                    elif regime == 'HIGH_VOLATILITY':
-                        st.warning(f"⚠️ **고변동성** (변동성: {market_regime['volatility']:.1%})")
-                    else:
-                        st.info(f"📊 **레인지장** (신뢰도: {market_regime['confidence']:.0f}%)")
-                    
-                    st.metric("ATR", f"{market_regime['atr']:.2f}")
-                
-                with col2:
-                    st.markdown("#### ⏰ 시간 레짐")
-                    
-                    session = time_regime['session']
-                    vol_mult = time_regime['volatility_multiplier']
-                    
-                    st.write(f"**세션**: {session}")
-                    st.write(f"**시간** (UTC): {time_regime['hour_utc']}시")
-                    st.metric("변동성 배수", f"{vol_mult:.1f}x")
-                    
-                    if vol_mult > 1.2:
-                        st.success("✅ 높은 활동성 기대")
-                    elif vol_mult < 0.8:
-                        st.info("ℹ️ 낮은 활동성 예상")
-                
-            except Exception as e:
-                st.error(f"❌ 레짐 분류 오류: {str(e)}")
-        
-        # 탭 4: 컨텍스트 분석
-        with advanced_tabs[3]:
-            st.markdown("### 📈 파생상품 & 주문흐름")
-            
-            try:
-                derivatives = analyze_derivatives_context(df)
-                order_flow = analyze_order_flow(df)
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("#### 📊 파생상품 지표")
-                    
-                    st.metric("펀딩비 (추정)", f"{derivatives['funding_rate']:.3f}%")
-                    st.metric("OI 변화", f"{derivatives['oi_change']:+.1f}%")
-                    st.metric("롱/숏 비율", f"{derivatives['long_short_ratio']:.0f}%")
-                    
-                    signal = derivatives['signal']
-                    if signal == 'OVERLEVERAGED_LONG':
-                        st.warning("⚠️ 롱 과열 - 조정 리스크")
-                    elif signal == 'OVERLEVERAGED_SHORT':
-                        st.warning("⚠️ 숏 과열 - 쇼트 스퀄즈 리스크")
-                    else:
-                        st.success("✅ 균형 상태")
-                
-                with col2:
-                    st.markdown("#### 📊 주문흐름 분석")
-                    
-                    st.metric("매수 압력", f"{order_flow['buy_pressure']:.0f}%")
-                    st.metric("매도 압력", f"{order_flow['sell_pressure']:.0f}%")
-                    
-                    imbalance = order_flow['imbalance']
-                    if imbalance > 10:
-                        st.success(f"✅ 매수 우세 ({imbalance:+.1f}%)")
-                    elif imbalance < -10:
-                        st.error(f"🔴 매도 우세 ({imbalance:+.1f}%)")
-                    else:
-                        st.info(f"⚪ 균형 ({imbalance:+.1f}%)")
-                    
-                    st.metric("강도", order_flow['strength'])
-                
-            except Exception as e:
-                st.error(f"❌ 컨텍스트 분석 오류: {str(e)}")
-        
-        # 탭 5: Walk-Forward 검증
-        with advanced_tabs[4]:
-            st.markdown("### ✅ Walk-Forward 검증")
-            st.caption("데이터 누수 & 스누핑 방지 검증")
-            
-            st.info("""
-            **검증 방법**:
-            1. 과거 데이터로 파라미터 최적화 (훈련)
-            2. 미래 데이터로 Out-of-Sample 테스트
-            3. 시간 순으로 앞으로 이동하며 반복
-            
-            ⚠️ **미래 데이터 절대 사용 금지**
-            """)
-            
-            if st.button("🔬 검증 시작", type="primary"):
-                with st.spinner("Walk-Forward 검증 진행 중..."):
-                    try:
-                        validation_result = walk_forward_validation(
-                            df,
-                            train_size=1000,
-                            test_size=100,
-                            step=50
-                        )
-                        
-                        if validation_result['status'] == 'COMPLETED':
-                            st.success("✅ 검증 완료!")
-                            
-                            accuracy = validation_result['accuracy']
-                            total = validation_result['total_signals']
-                            correct = validation_result['correct_signals']
-                            
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric("총 시그널", total)
-                            
-                            with col2:
-                                st.metric("정확한 시그널", correct)
-                            
-                            with col3:
-                                st.metric("정확도", f"{accuracy:.1f}%")
-                            
-                            if accuracy > 55:
-                                st.success("🎯 통계적으로 유의미한 성능")
-                            elif accuracy > 50:
-                                st.info("📊 약간의 예측력 있음")
-                            else:
-                                st.warning("⚠️ 예측력 부족 - 파라미터 재조정 필요")
-                            
-                            st.markdown("#### 최근 10개 시그널 결과")
-                            results_df = pd.DataFrame(validation_result['results'])
-                            st.dataframe(results_df)
-                        
-                        else:
-                            st.warning("데이터가 부족하여 검증을 수행할 수 없습니다.")
-                    
-                    except Exception as e:
-                        st.error(f"❌ 검증 오류: {str(e)}")
-                        st.exception(e)
-        
+    
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
         st.warning("""
@@ -6484,9 +6548,7 @@ if bt:
             st.code(traceback.format_exc())
 
 
-# ═══════════════════════════════════════════════════════════════
-# v2.9.0: 실시간 데이터 UI 렌더링 함수들
-# ═══════════════════════════════════════════════════════════════
+# ==================== 렌더링 헬퍼 함수 ====================
 
 def render_news_analysis(news_analysis: Dict, news_data: Dict):
     """뉴스 분석 결과 렌더링"""
