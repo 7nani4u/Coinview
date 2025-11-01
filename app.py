@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.11 (대시보드 + 히스토리)
+코인 AI 예측 시스템 - v2.9.12 (커스터마이즈 대시보드)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -72,6 +72,13 @@
 - 📉 리스크 점수 히스토리 추적
 - 🎯 통합 대시보드 UI
 - 📊 실시간 지표 카드
+
+🎨 v2.9.12 커스터마이즈 대시보드 (2025-11-01):
+- 🎭 레이아웃 선택: Standard/Compact/Detailed
+- 🎨 테마 선택: Default/Dark/Light/Colorful
+- 📦 위젯 추가/제거: 7개 위젯 개별 제어
+- 🔧 사이드바 설정 UI
+- 🎯 테마별 색상 자동 적용
 - ⏱️ 타임라인 기반 추적
 """
 
@@ -257,7 +264,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.4",
+    page_title="코인 AI 예측 시스템 v2.9.12",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -708,6 +715,24 @@ def initialize_session_history():
         st.session_state.prediction_history = []
     if 'volume_history' not in st.session_state:
         st.session_state.volume_history = []
+
+
+def initialize_dashboard_settings():
+    """대시보드 커스터마이징 설정 초기화"""
+    if 'dashboard_layout' not in st.session_state:
+        st.session_state.dashboard_layout = 'standard'  # standard, compact, detailed
+    if 'enabled_widgets' not in st.session_state:
+        st.session_state.enabled_widgets = {
+            'confidence': True,
+            'risk': True,
+            'volume': True,
+            'portfolio': True,
+            'history_chart': True,
+            'detailed_analysis': True,
+            'alerts': True
+        }
+    if 'dashboard_theme' not in st.session_state:
+        st.session_state.dashboard_theme = 'default'  # default, dark, light, colorful
 
 
 def add_confidence_to_history(confidence_data: Dict, symbol: str):
@@ -5854,8 +5879,76 @@ def render_technical_indicators(df: pd.DataFrame):
 # ────────────────────────────────────────────────────────────────────────
 # 메인 UI
 # ────────────────────────────────────────────────────────────────────────
+# 세션 상태 초기화
+initialize_session_history()
+initialize_dashboard_settings()
+
 with st.sidebar:
     st.markdown("# 🚀 설정")
+    
+    # 대시보드 커스터마이징 설정
+    with st.expander("🎨 대시보드 커스터마이징", expanded=False):
+        st.markdown("### 레이아웃 선택")
+        layout_option = st.radio(
+            "표시 방식",
+            ["Standard (표준)", "Compact (간결)", "Detailed (상세)"],
+            index=0,
+            help="대시보드의 표시 방식을 선택하세요"
+        )
+        if layout_option == "Standard (표준)":
+            st.session_state.dashboard_layout = 'standard'
+        elif layout_option == "Compact (간결)":
+            st.session_state.dashboard_layout = 'compact'
+        else:
+            st.session_state.dashboard_layout = 'detailed'
+        
+        st.markdown("### 위젯 설정")
+        st.session_state.enabled_widgets['confidence'] = st.checkbox(
+            "🎯 신뢰도 카드",
+            value=st.session_state.enabled_widgets.get('confidence', True)
+        )
+        st.session_state.enabled_widgets['risk'] = st.checkbox(
+            "⚠️ 리스크 카드",
+            value=st.session_state.enabled_widgets.get('risk', True)
+        )
+        st.session_state.enabled_widgets['volume'] = st.checkbox(
+            "📊 거래량 카드",
+            value=st.session_state.enabled_widgets.get('volume', True)
+        )
+        st.session_state.enabled_widgets['portfolio'] = st.checkbox(
+            "💼 포트폴리오 카드",
+            value=st.session_state.enabled_widgets.get('portfolio', True)
+        )
+        st.session_state.enabled_widgets['history_chart'] = st.checkbox(
+            "📈 히스토리 차트",
+            value=st.session_state.enabled_widgets.get('history_chart', True)
+        )
+        st.session_state.enabled_widgets['detailed_analysis'] = st.checkbox(
+            "🎯 상세 분석",
+            value=st.session_state.enabled_widgets.get('detailed_analysis', True)
+        )
+        st.session_state.enabled_widgets['alerts'] = st.checkbox(
+            "🔔 알림",
+            value=st.session_state.enabled_widgets.get('alerts', True)
+        )
+        
+        st.markdown("### 테마 선택")
+        theme_option = st.selectbox(
+            "색상 테마",
+            ["Default (기본)", "Dark (어두움)", "Light (밝음)", "Colorful (다채로움)"],
+            index=0,
+            help="대시보드의 색상 테마를 선택하세요"
+        )
+        if theme_option == "Default (기본)":
+            st.session_state.dashboard_theme = 'default'
+        elif theme_option == "Dark (어두움)":
+            st.session_state.dashboard_theme = 'dark'
+        elif theme_option == "Light (밝음)":
+            st.session_state.dashboard_theme = 'light'
+        else:
+            st.session_state.dashboard_theme = 'colorful'
+    
+    st.markdown("---")
     
     # 캐시 새로고침 버튼
     col1, col2 = st.columns([3, 1])
@@ -6550,6 +6643,292 @@ if bt:
 
 # ==================== 렌더링 헬퍼 함수 ====================
 
+def get_theme_colors():
+    """현재 선택된 테마의 색상을 반환"""
+    theme = st.session_state.get('dashboard_theme', 'default')
+    
+    themes = {
+        'default': {
+            'confidence_high': '#2ecc71',
+            'confidence_medium': '#f39c12',
+            'confidence_low': '#e67e22',
+            'confidence_very_low': '#e74c3c',
+            'risk_low': '#2ecc71',
+            'risk_medium': '#f39c12',
+            'risk_high': '#e74c3c',
+            'volume_surge': '#9b59b6',
+            'volume_high': '#3498db',
+            'volume_normal': '#95a5a6'
+        },
+        'dark': {
+            'confidence_high': '#27ae60',
+            'confidence_medium': '#d68910',
+            'confidence_low': '#ca6f1e',
+            'confidence_very_low': '#c0392b',
+            'risk_low': '#27ae60',
+            'risk_medium': '#d68910',
+            'risk_high': '#c0392b',
+            'volume_surge': '#7d3c98',
+            'volume_high': '#2874a6',
+            'volume_normal': '#717d7e'
+        },
+        'light': {
+            'confidence_high': '#52be80',
+            'confidence_medium': '#f5b041',
+            'confidence_low': '#ec7063',
+            'confidence_very_low': '#f1948a',
+            'risk_low': '#52be80',
+            'risk_medium': '#f5b041',
+            'risk_high': '#f1948a',
+            'volume_surge': '#af7ac5',
+            'volume_high': '#5dade2',
+            'volume_normal': '#aab7b8'
+        },
+        'colorful': {
+            'confidence_high': '#00d2ff',
+            'confidence_medium': '#ffd700',
+            'confidence_low': '#ff6b35',
+            'confidence_very_low': '#ff006e',
+            'risk_low': '#00f5d4',
+            'risk_medium': '#fee440',
+            'risk_high': '#f15bb5',
+            'volume_surge': '#9b5de5',
+            'volume_high': '#00bbf9',
+            'volume_normal': '#00f5d4'
+        }
+    }
+    
+    return themes.get(theme, themes['default'])
+
+
+def render_dashboard_metric_card(title: str, value: str, delta: str = None, emoji: str = "", help_text: str = ""):
+    """대시보드 메트릭 카드 렌더링"""
+    layout = st.session_state.get('dashboard_layout', 'standard')
+    colors = get_theme_colors()
+    
+    if layout == 'compact':
+        st.metric(
+            label=f"{emoji} {title}",
+            value=value,
+            delta=delta,
+            help=help_text
+        )
+    elif layout == 'detailed':
+        st.markdown(f"### {emoji} {title}")
+        st.markdown(f"<h2 style='text-align: center; margin: 0;'>{value}</h2>", unsafe_allow_html=True)
+        if delta:
+            st.markdown(f"<p style='text-align: center; color: {'green' if '+' in delta else 'red'};'>{delta}</p>", unsafe_allow_html=True)
+        if help_text:
+            st.info(help_text)
+    else:  # standard
+        st.metric(
+            label=f"{emoji} {title}",
+            value=value,
+            delta=delta,
+            help=help_text
+        )
+
+
+def render_confidence_history():
+    """신뢰도 히스토리 차트 렌더링"""
+    if 'confidence_history' not in st.session_state or not st.session_state.confidence_history:
+        st.info("📈 신뢰도 히스토리를 수집 중입니다...")
+        return
+    
+    history = st.session_state.confidence_history
+    colors = get_theme_colors()
+    
+    # 데이터 프레임 생성
+    df_history = pd.DataFrame(history)
+    df_history['timestamp'] = pd.to_datetime(df_history['timestamp'])
+    
+    # Plotly 차트
+    fig = go.Figure()
+    
+    # 라인 추가
+    fig.add_trace(go.Scatter(
+        x=df_history['timestamp'],
+        y=df_history['score'],
+        mode='lines+markers',
+        name='신뢰도',
+        line=dict(color=colors['confidence_high'], width=2),
+        marker=dict(size=8)
+    ))
+    
+    # 레이아웃 설정
+    fig.update_layout(
+        title="신뢰도 히스토리",
+        xaxis_title="시간",
+        yaxis_title="신뢰도 (%)",
+        hovermode='x unified',
+        template='plotly_white',
+        height=400
+    )
+    
+    # 색상 영역 추가
+    fig.add_hrect(y0=75, y1=100, fillcolor=colors['confidence_high'], opacity=0.1, line_width=0)
+    fig.add_hrect(y0=50, y1=75, fillcolor=colors['confidence_medium'], opacity=0.1, line_width=0)
+    fig.add_hrect(y0=25, y1=50, fillcolor=colors['confidence_low'], opacity=0.1, line_width=0)
+    fig.add_hrect(y0=0, y1=25, fillcolor=colors['confidence_very_low'], opacity=0.1, line_width=0)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_risk_history():
+    """리스크 히스토리 차트 렌더링"""
+    if 'risk_history' not in st.session_state or not st.session_state.risk_history:
+        st.info("📉 리스크 히스토리를 수집 중입니다...")
+        return
+    
+    history = st.session_state.risk_history
+    colors = get_theme_colors()
+    
+    # 데이터 프레임 생성
+    df_history = pd.DataFrame(history)
+    df_history['timestamp'] = pd.to_datetime(df_history['timestamp'])
+    
+    # Plotly 차트
+    fig = go.Figure()
+    
+    # 라인 추가
+    fig.add_trace(go.Scatter(
+        x=df_history['timestamp'],
+        y=df_history['risk_score'],
+        mode='lines+markers',
+        name='리스크 점수',
+        line=dict(color=colors['risk_high'], width=2),
+        marker=dict(size=8)
+    ))
+    
+    # 레이아웃 설정
+    fig.update_layout(
+        title="리스크 히스토리",
+        xaxis_title="시간",
+        yaxis_title="리스크 점수 (0-10)",
+        hovermode='x unified',
+        template='plotly_white',
+        height=400
+    )
+    
+    # 색상 영역 추가
+    fig.add_hrect(y0=0, y1=3, fillcolor=colors['risk_low'], opacity=0.1, line_width=0)
+    fig.add_hrect(y0=3, y1=6, fillcolor=colors['risk_medium'], opacity=0.1, line_width=0)
+    fig.add_hrect(y0=6, y1=10, fillcolor=colors['risk_high'], opacity=0.1, line_width=0)
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_advanced_metrics_dashboard(confidence_data: Dict, risk_data: Dict, volume_data: Dict, portfolio_data: Dict = None):
+    """고급 분석 대시보드 렌더링"""
+    st.markdown("### 📊 고급 분석 대시보드")
+    
+    layout = st.session_state.get('dashboard_layout', 'standard')
+    enabled_widgets = st.session_state.get('enabled_widgets', {})
+    
+    # 메트릭 카드 표시
+    if layout == 'compact':
+        cols = st.columns(4)
+    elif layout == 'detailed':
+        cols = st.columns(2)
+    else:  # standard
+        cols = st.columns(4)
+    
+    # 신뢰도 카드
+    if enabled_widgets.get('confidence', True):
+        with cols[0] if layout != 'detailed' else cols[0]:
+            confidence_score = confidence_data.get('score', 0)
+            confidence_level = confidence_data.get('level', 'Unknown')
+            render_dashboard_metric_card(
+                title="신뢰도 점수",
+                value=f"{confidence_score:.1f}%",
+                delta=None,
+                emoji="🎯",
+                help_text=f"레벨: {confidence_level}"
+            )
+    
+    # 리스크 카드
+    if enabled_widgets.get('risk', True):
+        with cols[1] if layout != 'detailed' else cols[1]:
+            risk_score = risk_data.get('risk_score', 0)
+            risk_level = risk_data.get('risk_level', 'Unknown')
+            recommended_lev = risk_data.get('recommended_leverage', 1)
+            render_dashboard_metric_card(
+                title="리스크 레벨",
+                value=f"{risk_score:.1f}/10",
+                delta=f"추천 레버리지: {recommended_lev}x",
+                emoji="⚠️",
+                help_text=f"레벨: {risk_level}"
+            )
+    
+    # 거래량 카드
+    if enabled_widgets.get('volume', True) and layout != 'detailed':
+        with cols[2]:
+            volume_pattern = volume_data.get('pattern', 'Normal')
+            volume_ratio = volume_data.get('ratio', 1.0)
+            render_dashboard_metric_card(
+                title="거래량 패턴",
+                value=volume_pattern,
+                delta=f"{volume_ratio:.1f}x 평균 대비",
+                emoji="📊",
+                help_text="거래량 패턴 분석"
+            )
+    
+    # 포트폴리오 카드
+    if enabled_widgets.get('portfolio', True) and portfolio_data and layout != 'detailed':
+        with cols[3]:
+            portfolio_risk = portfolio_data.get('weighted_risk', 0)
+            render_dashboard_metric_card(
+                title="포트폴리오",
+                value=f"{portfolio_risk:.1f}/10",
+                delta=None,
+                emoji="💼",
+                help_text="포트폴리오 리스크"
+            )
+    
+    # 상세 분석 탭
+    st.markdown("---")
+    analysis_tabs = st.tabs(["📈 히스토리", "🎯 상세 분석", "⚠️ 알림"])
+    
+    with analysis_tabs[0]:
+        if enabled_widgets.get('history_chart', True):
+            st.markdown("#### 신뢰도 히스토리")
+            render_confidence_history()
+            st.markdown("---")
+            st.markdown("#### 리스크 히스토리")
+            render_risk_history()
+    
+    with analysis_tabs[1]:
+        if enabled_widgets.get('detailed_analysis', True):
+            st.markdown("#### 신뢰도 구성 요소")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("CV (Coefficient of Variation)", f"{confidence_data.get('cv', 0):.2f}")
+            with col2:
+                st.metric("일관성", f"{confidence_data.get('consistency', 0):.1%}")
+            
+            st.markdown("#### 리스크 세부 정보")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("변동성", f"{risk_data.get('volatility_component', 0):.1f}")
+            with col2:
+                st.metric("추세 리스크", f"{risk_data.get('trend_risk', 0):.1f}")
+            with col3:
+                st.metric("거래량 리스크", f"{risk_data.get('volume_risk', 0):.1f}")
+    
+    with analysis_tabs[2]:
+        if enabled_widgets.get('alerts', True):
+            st.markdown("#### 경고 로그")
+            if 'risk_history' in st.session_state and st.session_state.risk_history:
+                recent_risks = st.session_state.risk_history[-5:]
+                for entry in reversed(recent_risks):
+                    if entry.get('risk_score', 0) > 7:
+                        st.warning(f"⚠️ {entry['timestamp'].strftime('%H:%M:%S')} - 고위험 감지: {entry['risk_score']:.1f}/10")
+                    elif entry.get('risk_score', 0) > 5:
+                        st.info(f"🟡 {entry['timestamp'].strftime('%H:%M:%S')} - 중위험: {entry['risk_score']:.1f}/10")
+            else:
+                st.info("🔔 아직 경고 내역이 없습니다.")
+
+
 def render_news_analysis(news_analysis: Dict, news_data: Dict):
     """뉴스 분석 결과 렌더링"""
     st.markdown("### 📡 실시간 글로벌 뉴스 분석")
@@ -6904,10 +7283,7 @@ def calculate_high_reward_levels(entry_price: float, position_type: str = 'LONG'
     }
 
 
-"""
-v2.9.2 신규 기능 구현
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
+
 
 # ==============================================================================
 # 1. 듀얼 타임프레임 데이터 자동 로드
@@ -7517,17 +7893,7 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
             st.success("✅ DeepSeek 전략이 더 높은 수익률을 기록했습니다!")
         else:
             st.info("ℹ️ 일반 전략이 더 안정적인 수익률을 보였습니다.")
-"""
-고급 다차원 분석 프레임워크
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-구조: 패턴(로컬) + 레짐(글로벌) + 컨텍스트(온체인/파생/시간)
-
-핵심 원칙:
-1. 데이터 누수 방지: 미래 데이터를 현재 결정에 사용 금지
-2. 데이터 스누핑 방지: Walk-forward 검증, Out-of-sample 테스트
-3. 이벤트성 패턴은 방향성 필터와 결합
-"""
 
 import pandas as pd
 import numpy as np
