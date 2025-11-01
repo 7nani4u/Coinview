@@ -5488,9 +5488,56 @@ def create_macd_chart(df: pd.DataFrame):
 
 def render_trading_strategy(current_price: float, leverage_info: dict, entry_price: float,
                            stop_loss: float, take_profit: float, position_size: float,
-                           rr_ratio: float, investment_amount: float):
+                           rr_ratio: float, investment_amount: float, position_rec: dict = None):
     """매매 전략 (v2.3.0: 레버리지 표시 개선)"""
     st.markdown("<div class='section-title'>🎯 매매 전략</div>", unsafe_allow_html=True)
+    
+    # 포지션 추천 카드 (맨 위에 표시)
+    if position_rec is not None:
+        position = position_rec['position']
+        if position == 'LONG':
+            bg_color = '#d4edda'
+            border_color = '#28a745'
+            icon = '📈'
+        elif position == 'SHORT':
+            bg_color = '#f8d7da'
+            border_color = '#dc3545'
+            icon = '📉'
+        else:
+            bg_color = '#fff3cd'
+            border_color = '#ffc107'
+            icon = '⏸️'
+        
+        st.markdown(f"""
+        <div style='background-color: {bg_color}; border-left: 5px solid {border_color}; 
+                    padding: 20px; border-radius: 10px; margin: 10px 0;'>
+            <h3 style='margin: 0; color: {border_color};'>{icon} {position_rec['recommendation_text']}</h3>
+            <p style='margin: 10px 0 0 0; color: #666;'>
+                <strong>추천 이유:</strong> {position_rec['reasoning']}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(label="포지션", value=position_rec['position_kr'])
+        with col2:
+            st.metric(label="확률", value=f"{position_rec['probability']:.0f}%")
+        with col3:
+            st.metric(label="리스크", value=position_rec['risk_kr'])
+        with col4:
+            if position != 'NEUTRAL':
+                st.metric(label="손익비", value=f"{position_rec['risk_reward_ratio']:.2f}")
+        
+        if position != 'NEUTRAL':
+            st.markdown("##### 💰 예상 손익")
+            col_profit, col_loss = st.columns(2)
+            with col_profit:
+                st.success(f"**목표 수익:** +{position_rec['potential_profit_pct']:.2f}%")
+            with col_loss:
+                st.error(f"**최대 손실:** -{position_rec['potential_loss_pct']:.2f}%")
+        
+        st.markdown("---")
     
     col1, col2, col3 = st.columns(3)
     
@@ -5909,16 +5956,27 @@ def render_optimized_prediction_sequence(
     patterns: list,
     exit_strategy: dict,
     cv_results: pd.DataFrame,
+    position_rec: dict = None,
+    volatility: float = 0.0
 ):
     """사용자 친화적 순서로 주요 결과를 한 번에 렌더링합니다."""
     # 1) 데이터 요약
     render_data_summary(df, selected_crypto, interval_name)
     # 2) AI 예측 결과
     render_ai_prediction(ai_prediction, current_price)
-    # 3) 매매 전략
+    # 3) 매매 전략 (포지션 추천 포함)
+    if position_rec is None:
+        # 포지션 추천 계산
+        position_rec = recommend_position(
+            ai_prediction=ai_prediction,
+            current_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            volatility=volatility
+        )
     render_trading_strategy(current_price, leverage_info, entry_price,
                             stop_loss, take_profit, position_size,
-                            rr_ratio, investment_amount)
+                            rr_ratio, investment_amount, position_rec)
     # 4) 리스크 분석 (Kelly)
     render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
     # 5) 캔들스틱 패턴
@@ -6592,7 +6650,7 @@ if bt:
             kelly_fraction=0.5
         )
         
-        # 최적 순서로 핵심 결과 렌더링
+        # 최적 순서로 핵심 결과 렌더링 (포지션 추천 포함)
         render_optimized_prediction_sequence(
             df=df,
             selected_crypto=selected_crypto,
@@ -6610,17 +6668,8 @@ if bt:
             patterns=patterns,
             exit_strategy=exit_strategy,
             cv_results=cv_results,
-        )
-        
-        # 추가 정보 (선택): 포지션 추천 카드 및 예측 차트
-        position_recommendation = recommend_position(
-            ai_prediction=ai_prediction,
-            current_price=current_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
             volatility=volatility
         )
-        render_position_recommendation(position_recommendation)
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
