@@ -5316,72 +5316,80 @@ with st.sidebar:
             key='direct_input_method'
         )
         
-        if direct_input_method == "심볼 직접 입력":
-            # 세션 상태에 입력 값 초기화
-            if 'custom_symbol_input' not in st.session_state:
-                st.session_state.custom_symbol_input = st.session_state.selected_crypto
-            
-            custom_symbol = st.text_input(
-                "💎 코인 심볼 입력",
-                key='custom_symbol_input',
-                help="예: BTCUSDT, ETHUSDT, BNBUSDT 등 (USDT 페어만 지원)"
-            ).upper().strip()
-            
-            if custom_symbol:
-                if not custom_symbol.endswith("USDT"):
-                    st.warning("⚠️ USDT 페어만 지원됩니다. 심볼 끝에 'USDT'를 추가해주세요.")
-                    custom_symbol = custom_symbol + "USDT" if custom_symbol else "BTCUSDT"
-                
-                st.session_state.selected_crypto = custom_symbol
-                st.info(f"선택된 코인: **{st.session_state.selected_crypto}** ({st.session_state.selected_crypto[:-4]}-USD)")
+# 통합 검색 입력창
+        search_input = st.text_input(
+            "💎 코인 검색 또는 심볼 입력",
+            key='unified_search_input',
+            placeholder="예: BTC, 비트코인, ETHUSDT, 이더리웄",
+            help="심볼 또는 코인 이름을 입력하세요"
+        ).upper().strip()
         
-        else:  # "바이낸스 전체 검색"
-            with st.spinner("🔎 바이낸스에서 코인 목록을 불러오는 중..."):
-                all_pairs = get_all_binance_usdt_pairs()
-            
-            search_query = st.text_input(
-                "🔍 코인 검색 (직접 입력 모드)",
-                value="",
-                placeholder="코인 이름 또는 심볼 입력 (예: BTC, 비트코인, SOL)",
-                key="direct_search_query"
-            )
-            
-            if search_query:
-                search_upper = search_query.upper()
-                filtered_pairs = [
-                    pair for pair in all_pairs 
-                    if search_upper in pair[0].upper() or search_upper in pair[1].upper()
-                ]
-            else:
-                filtered_pairs = all_pairs
-            
-            if filtered_pairs:
-                st.caption(f"📊 총 {len(filtered_pairs)}개 코인 표시 중 (Binance USDT 페어)")
-                
-                # 현재 선택된 코인의 인덱스 찾기
-                display_names = [pair[0] for pair in filtered_pairs]
-                current_index = 0
-                for idx, pair in enumerate(filtered_pairs):
-                    if pair[1] == st.session_state.selected_crypto:
-                        current_index = idx
+        if search_input:
+            # 정확한 USDT 페어 심볼인지 확인
+            exact_match = None
+            if search_input.endswith("USDT"):
+                for pair in all_pairs:
+                    if pair[1] == search_input:
+                        exact_match = pair
                         break
-                
-                selected_display = st.selectbox(
-                    "💎 코인 선택 (직접 입력 모드)",
-                    display_names,
-                    index=current_index,
-                    key="direct_binance_select"
-                )
-                
-                for pair in filtered_pairs:
-                    if pair[0] == selected_display:
-                        st.session_state.selected_crypto = pair[1]
-                        break
-                
-                st.success(f"✅ 선택됨: **{st.session_state.selected_crypto}**")
+            
+            # 정확한 매칭이 있으면 즉시 선택
+            if exact_match:
+                st.session_state.selected_crypto = exact_match[1]
+                st.success(f"✅ 선택됨: **{exact_match[0]}** ({exact_match[1]})")
+            
             else:
-                st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
-                st.session_state.selected_crypto = "BTCUSDT"
+                # USDT 없이 입력한 경우 자동 추가 시도
+                search_upper = search_input
+                if not search_input.endswith("USDT"):
+                    potential_symbol = search_input + "USDT"
+                    for pair in all_pairs:
+                        if pair[1] == potential_symbol:
+                            exact_match = pair
+                            break
+                
+                if exact_match:
+                    st.session_state.selected_crypto = exact_match[1]
+                    st.success(f"✅ 자동 매칭: **{exact_match[0]}** ({exact_match[1]})")
+                
+                else:
+                    # 검색 결과
+                    filtered_pairs = [
+                        pair for pair in all_pairs 
+                        if search_upper in pair[0].upper() or search_upper in pair[1].upper()
+                    ]
+                    
+                    if filtered_pairs:
+                        st.caption(f"📊 검색 결과: {len(filtered_pairs)}개 코인")
+                        
+                        # 현재 선택 유지
+                        display_names = [pair[0] for pair in filtered_pairs]
+                        current_index = 0
+                        for idx, pair in enumerate(filtered_pairs):
+                            if pair[1] == st.session_state.selected_crypto:
+                                current_index = idx
+                                break
+                        
+                        selected_display = st.selectbox(
+                            "💎 검색 결과에서 선택",
+                            display_names,
+                            index=current_index,
+                            key="unified_search_select"
+                        )
+                        
+                        for pair in filtered_pairs:
+                            if pair[0] == selected_display:
+                                st.session_state.selected_crypto = pair[1]
+                                break
+                        
+                        st.success(f"✅ 선택됨: **{st.session_state.selected_crypto}**")
+                    
+                    else:
+                        st.warning(f"⚠️ '{search_input}'에 대한 검색 결과가 없습니다.")
+        
+        else:
+            # 입력 없을 때 현재 선택 표시
+            st.info(f"현재 선택: **{st.session_state.selected_crypto}**")
     
     # 이후 코드에서 사용할 변수
     selected_crypto = st.session_state.selected_crypto
@@ -5456,12 +5464,20 @@ with st.sidebar:
     )
     st.session_state['forecast_days'] = forecast_days
 
+    # 세션 상태에 투자 금액 저장
+    if 'investment_amount' not in st.session_state:
+        st.session_state.investment_amount = 1000.0
+    
     investment_amount = st.number_input(
         "💰 투자 금액 (USDT)",
         min_value=1.0,
-        value=1000.0,
-        step=50.0
+        value=st.session_state.investment_amount,
+        step=50.0,
+        key='investment_amount_input'
     )
+    
+    # 값이 변경되면 세션 상태 업데이트
+    st.session_state.investment_amount = investment_amount
     
     risk_per_trade_pct = st.slider(
         "⚠️ 리스크 비율 (%)",
