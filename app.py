@@ -5159,8 +5159,8 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
     current_status = exit_strategy['current_status']
     scenarios = exit_strategy['scenarios']
     
-    # 현재 상태
-    col1, col2, col3, col4 = st.columns(4)
+    # 현재 상태와 권장사항을 함께 표시
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1.5])
     
     with col1:
         st.metric(
@@ -5203,14 +5203,18 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
             value=f"{trend_color} {trend_kr}"
         )
     
-    # 권장사항
-    if current_status['recommendation']:
-        if '즉시' in current_status['recommendation']:
-            st.error(current_status['recommendation'])
-        elif '고려' in current_status['recommendation']:
-            st.warning(current_status['recommendation'])
-        else:
-            st.info(current_status['recommendation'])
+    with col5:
+        # 권장사항을 metric 형태로 표시
+        if current_status['recommendation']:
+            if '즉시' in current_status['recommendation']:
+                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #dc3545; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
+            elif '고려' in current_status['recommendation']:
+                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #ff9800; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
+            else:
+                st.markdown("<p style='font-size: 12px; color: #666; margin-bottom: 2px;'>💡 권장사항</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='font-size: 14px; font-weight: bold; color: #0288d1; margin: 0;'>{current_status['recommendation']}</p>", unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -5264,42 +5268,7 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
             """, unsafe_allow_html=True)
 
 
-def render_validation_results(cv_results: pd.DataFrame):
-    """모델 검증"""
-    st.markdown("<div class='section-title'>✅ 모델 검증 (TimeSeriesSplit)</div>", unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([3, 2])
-    
-    with col1:
-        st.dataframe(
-            cv_results,
-            use_container_width=True,
-            hide_index=True
-        )
-    
-    with col2:
-        st.markdown("### 📊 검증 지표 설명")
-        st.markdown("""
-        - **Accuracy**: 방향성 예측 정확도
-        - **MASE**: 예측 오차 (1.0 미만이 우수)
-        - **Mean_Error**: 평균 절대 오차
-        - **Train/Test Size**: 학습/테스트 데이터 크기
-        """)
-        
-        try:
-            accuracies = []
-            for acc in cv_results['Accuracy']:
-                if isinstance(acc, str) and '%' in acc:
-                    accuracies.append(float(acc.replace('%', '')))
-            
-            if accuracies:
-                avg_accuracy = np.mean(accuracies)
-                st.metric(
-                    label="평균 방향성 정확도",
-                    value=f"{avg_accuracy:.2f}%"
-                )
-        except:
-            pass
+# 모델 검증 섹션 삭제됨 (사용자 요청)
 
 
 
@@ -5955,7 +5924,6 @@ def render_optimized_prediction_sequence(
     kelly_result: dict,
     patterns: list,
     exit_strategy: dict,
-    cv_results: pd.DataFrame,
     position_rec: dict = None,
     volatility: float = 0.0
 ):
@@ -5985,8 +5953,6 @@ def render_optimized_prediction_sequence(
     render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
     # 7) 기술적 지표
     render_technical_indicators(df)
-    # 8) 모델 검증 결과
-    render_validation_results(cv_results)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -6667,9 +6633,30 @@ if bt:
             kelly_result=kelly_result,
             patterns=patterns,
             exit_strategy=exit_strategy,
-            cv_results=cv_results,
             volatility=volatility
         )
+        
+        # 추가 분석: 실시간 시장 현황 (기술적 지표 이후)
+        st.markdown("---")
+        st.markdown("<div class='section-title'>📊 실시간 시장 분석</div>", unsafe_allow_html=True)
+        
+        analysis_tabs = st.tabs(["🎯 종합 신호", "📈 기간별 수익률"])
+        
+        with analysis_tabs[0]:
+            st.markdown("#### 종합 신호 점수 시스템")
+            try:
+                score_result = calculate_signal_score(df, current_price)
+                render_signal_score(score_result)
+            except Exception as e:
+                st.error(f"❌ 신호 점수 계산 오류: {str(e)}")
+        
+        with analysis_tabs[1]:
+            st.markdown("#### 실시간 매매 비율 & 기간별 수익률")
+            try:
+                trading_metrics = calculate_trading_metrics(selected_crypto)
+                render_trading_metrics(trading_metrics)
+            except Exception as e:
+                st.error(f"❌ 실시간 데이터 로드 오류: {str(e)}")
         
         # v2.6.0: 포트폴리오 분석 (선택한 코인에 대해 자동 실행)
         st.markdown("---")
@@ -6699,29 +6686,6 @@ if bt:
         with tab4:
             fig = create_macd_chart(df)
             st.plotly_chart(fig, use_container_width=True)
-        
-        # v2.9.4: 실시간 분석
-        st.markdown("---")
-        st.markdown("<div class='section-title'>🚀 v2.9.4 실시간 분석</div>", unsafe_allow_html=True)
-        
-        analysis_tabs = st.tabs(["🎯 신호 점수", "📊 실시간 현황"])
-        
-        with analysis_tabs[0]:
-            st.markdown("#### 종합 신호 점수 시스템")
-            try:
-                current_price = df['Close'].iloc[-1]
-                score_result = calculate_signal_score(df, current_price)
-                render_signal_score(score_result)
-            except Exception as e:
-                st.error(f"❌ 신호 점수 계산 오류: {str(e)}")
-        
-        with analysis_tabs[1]:
-            st.markdown("#### 실시간 매매 비율 & 기간별 수익률")
-            try:
-                trading_metrics = calculate_trading_metrics(selected_crypto)
-                render_trading_metrics(trading_metrics)
-            except Exception as e:
-                st.error(f"❌ 실시간 데이터 로드 오류: {str(e)}")
     
     except Exception as e:
         st.error(f"❌ 오류가 발생했습니다: {str(e)}")
