@@ -203,7 +203,7 @@ import os
 
 def get_next_keepalive_time():
     '''다음 keep-alive 실행 시각 계산 (매시 00, 15, 30, 45분)'''
-    now = datetime.datetime.datetime.now()
+    now = datetime.datetime.now()
     minute = now.minute
     
     # 다음 15분 배수 시각 계산
@@ -230,7 +230,7 @@ def keepalive_scheduler():
     while True:
         # 다음 실행 시각 계산
         next_time = get_next_keepalive_time()
-        now = datetime.datetime.datetime.now()
+        now = datetime.datetime.now()
         
         # 대기 시간 계산 (초 단위)
         wait_seconds = (next_time - now).total_seconds()
@@ -245,10 +245,10 @@ def keepalive_scheduler():
             app_url = os.environ.get('REPL_SLUG')  # Replit 환경 변수
             if app_url:
                 response = requests.get(f"https://{app_url}.repl.co", timeout=5)
-                print(f"[Keep-Alive] {datetime.datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Status: {response.status_code}")
+                print(f"[Keep-Alive] {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Status: {response.status_code}")
             else:
                 # 로컬 환경에서는 단순 로그만
-                print(f"[Keep-Alive] {datetime.datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Heartbeat")
+                print(f"[Keep-Alive] {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Heartbeat")
         except Exception as e:
             print(f"[Keep-Alive] Error: {e}")
 
@@ -468,7 +468,7 @@ def calculate_trading_metrics(symbol):
         ticker = yf.Ticker(yf_symbol)
         
         # 3개월 데이터
-        end_date = datetime.datetime.now()
+        end_date = datetime.now()
         start_date = end_date - timedelta(days=100)
         hist = ticker.history(start=start_date, end=end_date)
         
@@ -517,7 +517,7 @@ def calculate_trading_metrics(symbol):
             'returns': returns,
             'buy_sell_ratio': buy_ratio,
             'sentiment': sentiment,
-            'last_update': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     
     except Exception as e:
@@ -525,7 +525,7 @@ def calculate_trading_metrics(symbol):
             'returns': {'1week': 0, '1month': 0, '3months': 0},
             'buy_sell_ratio': 50,
             'sentiment': 'NEUTRAL',
-            'last_update': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'error': str(e)
         }
 
@@ -742,7 +742,7 @@ def add_confidence_to_history(confidence_data: Dict, symbol: str):
             st.session_state.confidence_history = []
         
         history_entry = {
-            'timestamp': datetime.datetime.now(),
+            'timestamp': datetime.now(),
             'symbol': symbol,
             'score': confidence_data.get('score', 0),
             'level': confidence_data.get('level', 'Unknown'),
@@ -767,7 +767,7 @@ def add_risk_to_history(risk_data: Dict, symbol: str):
             st.session_state.risk_history = []
         
         history_entry = {
-            'timestamp': datetime.datetime.now(),
+            'timestamp': datetime.now(),
             'symbol': symbol,
             'risk_score': risk_data.get('risk_score', 0),
             'risk_level': risk_data.get('risk_level', 'Unknown'),
@@ -925,6 +925,7 @@ def plot_risk_history():
 def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict, 
                               volume_data: Dict, confidence_data: Dict = None):
 
+
     """
     통합 분석 대시보드 (재배치 버전)
     - 순서: 헤더 → KPI 카드 → 레짐/리스크 게이트 → 근거 요약 → 거래비용(선택 입력) → 포트폴리오 리스크 → 히스토리(2탭) → 경고·권장
@@ -937,17 +938,17 @@ def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict,
     # 0) 방어적 가드 & 신뢰도 자동 산출 + 히스토리 적재
     # ─────────────────────────────────────────────────────────────────────────────
     if confidence_data is None and predictions:
-    try:
-        confidence_data = calculate_confidence_level(predictions)  # 존재 함수
-    except Exception:
-        confidence_data = None
+        try:
+            confidence_data = calculate_confidence_level(predictions)  # 존재 함수
+        except Exception:
+            confidence_data = None
 
     try:
-    add_risk_to_history(risk_data, symbol)
-    if confidence_data:
-        add_confidence_to_history(confidence_data, symbol)
+        add_risk_to_history(risk_data, symbol)
+        if confidence_data:
+            add_confidence_to_history(confidence_data, symbol)
     except Exception:
-    pass
+        pass
 
     # ─────────────────────────────────────────────────────────────────────────────
     # 1) 헤더(데이터/시장 상태 바)
@@ -957,46 +958,167 @@ def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict,
 
     col_h1, col_h2, col_h3, col_h4 = st.columns(4)
     with col_h1:
-    st.metric("심볼", symbol)
+        st.metric("심볼", symbol)
     with col_h2:
-    last_conf = None
-    try:
-        if 'confidence_history' in st.session_state and st.session_state.confidence_history:
-            last_conf = st.session_state.confidence_history[-1]['timestamp']
-    except Exception:
         last_conf = None
-    st.metric("데이터 최신 시각", (last_conf or datetime.datetime.now()).strftime("%Y-%m-%d %H:%M"))
+        try:
+            if 'confidence_history' in st.session_state and st.session_state.confidence_history:
+                last_conf = st.session_state.confidence_history[-1]['timestamp']
+        except Exception:
+            last_conf = None
+        st.metric("데이터 최신 시각", (last_conf or datetime.now()).strftime("%Y-%m-%d %H:%M"))
     with col_h3:
-    rl = risk_data.get('risk_level', 'N/A')
-    st.metric("리스크 레벨", rl)
+        rl = risk_data.get('risk_level', 'N/A')
+        st.metric("리스크 레벨", rl)
     with col_h4:
-    volr = risk_data.get('volatility', None)
-    st.metric("추정 변동성", f"{volr:.2f}%" if isinstance(volr, (int,float)) else "N/A")
+        volr = risk_data.get('volatility', None)
+        st.metric("추정 변동성", f"{volr:.2f}%" if isinstance(volr, (int,float)) else "N/A")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # 2) 핵심 KPI 카드(신뢰도·리스크·권장 레버리지·거래량 패턴)
     # ─────────────────────────────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-    if confidence_data:
-        st.metric("신뢰도", f"{confidence_data.get('score', 0):.1f}%",
-                  help="모델 일관성·변동성 대비 신뢰도(0~100)")
-    else:
-        st.metric("신뢰도", "알 수 없습니다")
+        if confidence_data:
+            st.metric("신뢰도", f"{confidence_data.get('score', 0):.1f}%",
+                      help="모델 일관성·변동성 대비 신뢰도(0~100)")
+        else:
+            st.metric("신뢰도", "알 수 없습니다")
     with c2:
-    rs = risk_data.get('risk_score', None)
-    st.metric("리스크 점수", f"{rs:.1f} / 100" if isinstance(rs,(int,float)) else "알 수 없습니다",
-              help="낮을수록 안전. 내부 0~100 스케일")
+        rs = risk_data.get('risk_score', None)
+        st.metric("리스크 점수", f"{rs:.1f} / 100" if isinstance(rs,(int,float)) else "알 수 없습니다",
+                  help="낮을수록 안전. 내부 0~100 스케일")
     with c3:
-    st.metric("권장 레버리지", f"{risk_data.get('recommended_leverage','N/A')}x")
+        st.metric("권장 레버리지", f"{risk_data.get('recommended_leverage','N/A')}x")
     with c4:
-    vr = volume_data.get('volume_ratio', None)
-    st.metric("거래량 패턴", f"{vr:.2f}x" if isinstance(vr,(int,float)) else "알 수 없습니다",
-              help="최근 거래량/기준 거래량 비율")
+        vr = volume_data.get('volume_ratio', None)
+        st.metric("거래량 패턴", f"{vr:.2f}x" if isinstance(vr,(int,float)) else "알 수 없습니다",
+                  help="최근 거래량/기준 거래량 비율")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # 3) 레짐/리스크 게이트 (진입 가능/보류)
     # ─────────────────────────────────────────────────────────────────────────────
+    def _gate_reason(conf, risk, vol):
+        reasons = []
+        ok = True
+        if conf is None or conf < 60:
+            ok = False; reasons.append("신뢰도 < 60")
+        if risk is None or risk > 40:
+            ok = False; reasons.append("리스크 > 40")
+        if vol is not None and (vol < 0.8 or vol > 2.5):
+            ok = False; reasons.append("거래량 비정상(0.8~2.5 외)")
+        return ok, reasons
+
+    conf_s = confidence_data.get('score') if confidence_data else None
+    risk_s = risk_data.get('risk_score')
+    vol_r  = volume_data.get('volume_ratio')
+    ok_gate, reasons = _gate_reason(conf_s, risk_s, vol_r)
+
+    if ok_gate:
+        st.success("🟢 **레짐 게이트: 진입 가능** — 주요 지표가 기준 범위 내입니다.")
+    else:
+        st.warning("🟡 **레짐 게이트: 보류 권장** — 기준 미충족 항목: " + (", ".join(reasons) if reasons else "알 수 없습니다"))
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # 4) 모델/지표 근거 요약
+    # ─────────────────────────────────────────────────────────────────────────────
+    with st.expander("🔎 근거 요약 펼치기", expanded=False):
+        col_e1, col_e2, col_e3 = st.columns(3)
+        with col_e1:
+            if confidence_data:
+                st.markdown(f"**신뢰도 레벨:** {confidence_data.get('level','N/A')}")
+                st.markdown(f"- CV: {confidence_data.get('cv','N/A')}")
+                st.markdown(f"- 일관성: {confidence_data.get('consistency','N/A')}")
+                st.markdown(f"- 권고: {confidence_data.get('recommendation','N/A')}")
+            else:
+                st.markdown("신뢰도 데이터: 알 수 없습니다")
+        with col_e2:
+            st.markdown(f"**리스크 레벨:** {risk_data.get('risk_level','N/A')}")
+            st.markdown(f"- 변동성: {risk_data.get('volatility','N/A')}%")
+            st.markdown(f"- 최대 포지션: {risk_data.get('max_position_size','N/A')}%")
+            st.markdown(f"- 손절 거리: {risk_data.get('stop_loss_distance','N/A')}%")
+        with col_e3:
+            st.markdown("**거래량 요약**")
+            st.markdown(f"- 비율: {('%.2fx' % vol_r) if isinstance(vol_r,(int,float)) else '알 수 없습니다'}")
+            st.markdown(f"- 설명: {volume_data.get('description','N/A')}")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # 5) 거래비용·체결가 영향 (선택 입력)
+    # ─────────────────────────────────────────────────────────────────────────────
+    with st.expander("💸 거래비용/체결가 영향 (선택 입력)", expanded=False):
+        col_in1, col_in2, col_in3, col_in4 = st.columns(4)
+        with col_in1:
+            position_size = st.number_input("포지션 수량", value=0.0, min_value=0.0, step=0.1)
+        with col_in2:
+            entry_price = st.number_input("진입가", value=0.0, min_value=0.0, step=1.0, format="%.2f")
+        with col_in3:
+            exit_price = st.number_input("청산가", value=0.0, min_value=0.0, step=1.0, format="%.2f")
+        with col_in4:
+            lev = st.number_input("레버리지", value=float(risk_data.get('recommended_leverage', 1) or 1), min_value=1.0, step=1.0)
+
+        # 간단 프리셋
+        exchange_preset = {'taker_fee': 0.0006, 'slippage_rate': 0.0005, 'funding_rate': 0.0001, 'funding_interval_h': 8}
+
+        if st.button("비용 계산", type="secondary"):
+            if position_size > 0 and entry_price > 0 and exit_price > 0:
+                try:
+                    costs = calculate_trading_costs(position_size, entry_price, exit_price, lev, exchange_preset, holding_hours=24)
+                    cco1, cco2, cco3, cco4 = st.columns(4)
+                    with cco1: st.metric("진입 수수료", f"{costs.get('entry_fee',0):,.4f}")
+                    with cco2: st.metric("슬리피지", f"{(costs.get('entry_slip',0)+costs.get('exit_slip',0)):,.4f}")
+                    with cco3: st.metric("펀딩", f"{costs.get('funding_cost',0):,.4f}")
+                    with cco4: st.metric("총 비용", f"{costs.get('total_cost',0):,.4f}")
+                except Exception as e:
+                    st.error(f"비용 계산 실패: {e}")
+            else:
+                st.info("입력값을 모두 0보다 크게 설정하세요.")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # 6) 포트폴리오 리스크
+    # ─────────────────────────────────────────────────────────────────────────────
+    st.markdown("### 🧯 포트폴리오 리스크")
+    pr1, pr2, pr3 = st.columns(3)
+    with pr1:
+        st.metric("권장 레버리지(재확인)", f"{risk_data.get('recommended_leverage','N/A')}x")
+    with pr2:
+        st.metric("최대 포지션 비중", f"{risk_data.get('max_position_size','N/A')}%")
+    with pr3:
+        st.metric("권장 손절 폭", f"{risk_data.get('stop_loss_distance','N/A')}%")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # 7) 히스토리(2탭)
+    # ─────────────────────────────────────────────────────────────────────────────
+    tabs = st.tabs(["📈 신뢰도 히스토리", "📉 리스크 히스토리"])
+    with tabs[0]:
+        try:
+            plot_confidence_history()
+        except Exception as e:
+            st.info(f"신뢰도 히스토리 표시 불가: {e}")
+    with tabs[1]:
+        try:
+            plot_risk_history()
+        except Exception as e:
+            st.info(f"리스크 히스토리 표시 불가: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # 8) 경고·권장사항
+    # ─────────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ⚠️ 경고 및 권장사항")
+    # 리스크 경고
+    if isinstance(risk_data, dict) and risk_data.get('warnings'):
+        for warning in risk_data['warnings']:
+            st.warning(warning)
+    # 신뢰도 경고
+    if confidence_data and isinstance(confidence_data.get('score', None), (int,float)) and confidence_data['score'] < 50:
+        st.error(f"🔴 낮은 신뢰도: {confidence_data.get('recommendation','점검 필요')}")
+    # 거래량 경고
+    if isinstance(vol_r,(int,float)):
+        if vol_r > 3.0:
+            st.warning("📈 거래량 급증 감지")
+        elif vol_r < 0.5:
+            st.warning("📉 거래량 급감 감지")
+
 def _gate_reason(conf, risk, vol):
     reasons = []
     ok = True
@@ -3205,7 +3327,7 @@ def fetch_cryptopanic_news(
                 'bullish_count': sentiment_counts['positive'],
                 'bearish_count': sentiment_counts['negative'],
                 'neutral_count': sentiment_counts['neutral'],
-                'timestamp': datetime.datetime.now().isoformat(),
+                'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
         else:
@@ -3398,7 +3520,7 @@ def fetch_fred_economic_data(
                 'change_yoy': change_yoy,
                 'trend': trend,
                 'series_id': series_id,
-                'timestamp': datetime.datetime.now().isoformat(),
+                'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
         else:
@@ -3411,7 +3533,7 @@ def fetch_fred_economic_data(
 def _get_fred_dummy_data(series_id: str) -> Dict:
     """FRED API 실패 시 더미 데이터 반환"""
     # 최근 12개월 더미 데이터
-    dates = pd.date_range(end=datetime.datetime.now(), periods=12, freq='MS')
+    dates = pd.date_range(end=datetime.now(), periods=12, freq='MS')
     
     if 'CPI' in series_id:
         # CPI 더미 (약 3% 인플레이션)
@@ -3432,7 +3554,7 @@ def _get_fred_dummy_data(series_id: str) -> Dict:
         'change_yoy': 3.2,
         'trend': 'Rising',
         'series_id': series_id,
-        'timestamp': datetime.datetime.now().isoformat(),
+        'timestamp': datetime.now().isoformat(),
         'status': 'dummy'
     }
 
@@ -3476,7 +3598,7 @@ def fetch_btc_dominance() -> Dict:
                 'dominance': dominance,
                 'trend': trend,
                 'change_24h': 0.0,  # Historical data needed
-                'timestamp': datetime.datetime.now().isoformat(),
+                'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
         else:
@@ -3550,7 +3672,7 @@ def fetch_kimchi_premium(symbol: str = 'BTC') -> Dict:
                 'global_price': global_price_usd,
                 'usd_krw_rate': usd_krw,
                 'signal': signal,
-                'timestamp': datetime.datetime.now().isoformat(),
+                'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
         
@@ -3602,7 +3724,7 @@ def fetch_liquidation_data(symbol: str = 'BTCUSDT', period: str = '24h') -> Dict
             'long_liquidation': 0,
             'short_liquidation': 0,
             'signal': 'Data Unavailable (Premium API Required)',
-            'timestamp': datetime.datetime.now().isoformat(),
+            'timestamp': datetime.now().isoformat(),
             'status': 'dummy'
         }
     
@@ -3744,7 +3866,7 @@ def analyze_comprehensive_market(
         'key_factors': factors,
         'risk_level': risk_level,
         'summary': summary,
-        'timestamp': datetime.datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat()
     }
 
 
@@ -7166,7 +7288,7 @@ def fetch_open_interest(symbol: str = 'BTCUSDT') -> Dict:
             return {
                 'open_interest': float(data.get('openInterest', 0)),
                 'symbol': data.get('symbol', symbol),
-                'timestamp': datetime.datetime.now().isoformat(),
+                'timestamp': datetime.now().isoformat(),
                 'status': 'success'
             }
         else:
@@ -7341,7 +7463,7 @@ def fetch_open_interest_history(symbol: str = 'BTCUSDT', limit: int = 100):
         if response.status_code == 200:
             data = response.json()
             current_oi = float(data.get('openInterest', 0))
-            current_time = datetime.datetime.now()
+            current_time = datetime.now()
             
             # 더미 히스토리 생성 (실제로는 DB에 저장 필요)
             dates = pd.date_range(end=current_time, periods=limit, freq='4H')
@@ -8402,7 +8524,7 @@ def generate_integrated_signal(df: pd.DataFrame, symbol: str = 'BTCUSDT') -> Dic
         'derivatives': derivatives,
         'order_flow': order_flow,
         'directional': directional,
-        'timestamp': datetime.datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat()
     }
 
 
