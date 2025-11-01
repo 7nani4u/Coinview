@@ -924,108 +924,200 @@ def plot_risk_history():
 
 def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict, 
                               volume_data: Dict, confidence_data: Dict = None):
-    """
-    통합 분석 대시보드
-    
-    Args:
-        symbol: 코인 심볼
-        predictions: 예측값 리스트
-        risk_data: 리스크 분석 결과
-        volume_data: 거래량 분석 결과
-        confidence_data: 신뢰도 분석 결과 (선택)
-    """
-    
-    st.markdown("---")
-    st.markdown("## 📊 통합 분석 대시보드")
-    
-    # 신뢰도 계산 (제공되지 않으면 자동 계산)
-    if confidence_data is None and predictions:
-        confidence_data = calculate_confidence_level(predictions)
-    
-    # 히스토리에 추가
+
+"""
+통합 분석 대시보드 (재배치 버전)
+- 순서: 헤더 → KPI 카드 → 레짐/리스크 게이트 → 근거 요약 → 거래비용(선택 입력) → 포트폴리오 리스크 → 히스토리(2탭) → 경고·권장
+"""
+import streamlit as st
+from datetime import datetime
+from typing import Dict
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0) 방어적 가드 & 신뢰도 자동 산출 + 히스토리 적재
+# ─────────────────────────────────────────────────────────────────────────────
+if confidence_data is None and predictions:
+    try:
+        confidence_data = calculate_confidence_level(predictions)  # 존재 함수
+    except Exception:
+        confidence_data = None
+
+try:
+    add_risk_to_history(risk_data, symbol)
     if confidence_data:
         add_confidence_to_history(confidence_data, symbol)
-    add_risk_to_history(risk_data, symbol)
-    
-    # 상단 지표 카드
-    st.markdown("### 🎯 핵심 지표")
-    cols = st.columns(4)
-    
-    with cols[0]:
-        if confidence_data:
-            st.metric(
-                "모델 신뢰도",
-                f"{confidence_data['score']:.1f}%",
-                delta=confidence_data['level'],
-                delta_color="normal" if confidence_data['score'] >= 65 else "inverse"
-            )
-            st.markdown(f"{confidence_data['icon']} {confidence_data['level']}")
-    
-    with cols[1]:
-        st.metric(
-            "리스크 레벨",
-            risk_data['risk_level'],
-            delta=f"{risk_data['risk_score']:.1f}",
-            delta_color="inverse" if risk_data['risk_score'] > 60 else "normal"
-        )
-        st.markdown(f"{risk_data['icon']} {risk_data['risk_level']}")
-    
-    with cols[2]:
-        st.metric(
-            "권장 레버리지",
-            f"{risk_data['recommended_leverage']}x",
-            delta=f"포지션 {risk_data['max_position_size']}%"
-        )
-    
-    with cols[3]:
-        st.metric(
-            "거래량 패턴",
-            volume_data['pattern'],
-            delta=f"{volume_data['volume_ratio']:.2f}x"
-        )
-        st.markdown(f"신호: {volume_data['signal']}")
-    
-    # 탭으로 상세 정보 구성
-    tabs = st.tabs(["📈 신뢰도 히스토리", "📉 리스크 히스토리", "⚠️ 경고 & 권장사항"])
-    
-    with tabs[0]:
-        plot_confidence_history()
-    
-    with tabs[1]:
-        plot_risk_history()
-    
-    with tabs[2]:
-        st.markdown("### ⚠️ 현재 경고사항")
-        
-        # 리스크 경고
-        if risk_data.get('warnings'):
-            for warning in risk_data['warnings']:
-                st.warning(warning)
-        
-        # 신뢰도 경고
-        if confidence_data and confidence_data['score'] < 50:
-            st.error(f"🔴 낮은 신뢰도: {confidence_data['recommendation']}")
-        
-        # 거래량 경고
-        if volume_data['volume_ratio'] > 3.0:
-            st.warning("📈 거래량 급증 감지!")
-        elif volume_data['volume_ratio'] < 0.5:
-            st.warning("📉 거래량 급감 감지!")
-        
-        st.markdown("---")
-        st.markdown("### ✅ 권장사항")
-        
-        if confidence_data:
-            st.info(f"**신뢰도**: {confidence_data['recommendation']}")
-        
-        st.info(f"**리스크**: 레버리지 {risk_data['recommended_leverage']}x 이하 사용")
-        st.info(f"**포지션**: 자본의 {risk_data['max_position_size']}% 이하")
-        st.info(f"**손절**: 진입가 대비 {risk_data['stop_loss_distance']}% 설정")
-        st.info(f"**거래량**: {volume_data['description']}")
+except Exception:
+    pass
 
-# ============================================================================
-# v2.9.10: 고급 분석 함수들
-# ============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) 헤더(데이터/시장 상태 바)
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("## 📊 통합 분석 대시보드")
+
+col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+with col_h1:
+    st.metric("심볼", symbol)
+with col_h2:
+    last_conf = None
+    try:
+        if 'confidence_history' in st.session_state and st.session_state.confidence_history:
+            last_conf = st.session_state.confidence_history[-1]['timestamp']
+    except Exception:
+        last_conf = None
+    st.metric("데이터 최신 시각", (last_conf or datetime.now()).strftime("%Y-%m-%d %H:%M"))
+with col_h3:
+    rl = risk_data.get('risk_level', 'N/A')
+    st.metric("리스크 레벨", rl)
+with col_h4:
+    volr = risk_data.get('volatility', None)
+    st.metric("추정 변동성", f"{volr:.2f}%" if isinstance(volr, (int,float)) else "N/A")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2) 핵심 KPI 카드(신뢰도·리스크·권장 레버리지·거래량 패턴)
+# ─────────────────────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    if confidence_data:
+        st.metric("신뢰도", f"{confidence_data.get('score', 0):.1f}%",
+                  help="모델 일관성·변동성 대비 신뢰도(0~100)")
+    else:
+        st.metric("신뢰도", "알 수 없습니다")
+with c2:
+    rs = risk_data.get('risk_score', None)
+    st.metric("리스크 점수", f"{rs:.1f} / 100" if isinstance(rs,(int,float)) else "알 수 없습니다",
+              help="낮을수록 안전. 내부 0~100 스케일")
+with c3:
+    st.metric("권장 레버리지", f"{risk_data.get('recommended_leverage','N/A')}x")
+with c4:
+    vr = volume_data.get('volume_ratio', None)
+    st.metric("거래량 패턴", f"{vr:.2f}x" if isinstance(vr,(int,float)) else "알 수 없습니다",
+              help="최근 거래량/기준 거래량 비율")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) 레짐/리스크 게이트 (진입 가능/보류)
+# ─────────────────────────────────────────────────────────────────────────────
+def _gate_reason(conf, risk, vol):
+    reasons = []
+    ok = True
+    if conf is None or conf < 60:
+        ok = False; reasons.append("신뢰도 < 60")
+    if risk is None or risk > 40:
+        ok = False; reasons.append("리스크 > 40")
+    if vol is not None and (vol < 0.8 or vol > 2.5):
+        ok = False; reasons.append("거래량 비정상(0.8~2.5 외)")
+    return ok, reasons
+
+conf_s = confidence_data.get('score') if confidence_data else None
+risk_s = risk_data.get('risk_score')
+vol_r  = volume_data.get('volume_ratio')
+ok_gate, reasons = _gate_reason(conf_s, risk_s, vol_r)
+
+if ok_gate:
+    st.success("🟢 **레짐 게이트: 진입 가능** — 주요 지표가 기준 범위 내입니다.")
+else:
+    st.warning("🟡 **레짐 게이트: 보류 권장** — 기준 미충족 항목: " + (", ".join(reasons) if reasons else "알 수 없습니다"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) 모델/지표 근거 요약
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("🔎 근거 요약 펼치기", expanded=False):
+    col_e1, col_e2, col_e3 = st.columns(3)
+    with col_e1:
+        if confidence_data:
+            st.markdown(f"**신뢰도 레벨:** {confidence_data.get('level','N/A')}")
+            st.markdown(f"- CV: {confidence_data.get('cv','N/A')}")
+            st.markdown(f"- 일관성: {confidence_data.get('consistency','N/A')}")
+            st.markdown(f"- 권고: {confidence_data.get('recommendation','N/A')}")
+        else:
+            st.markdown("신뢰도 데이터: 알 수 없습니다")
+    with col_e2:
+        st.markdown(f"**리스크 레벨:** {risk_data.get('risk_level','N/A')}")
+        st.markdown(f"- 변동성: {risk_data.get('volatility','N/A')}%")
+        st.markdown(f"- 최대 포지션: {risk_data.get('max_position_size','N/A')}%")
+        st.markdown(f"- 손절 거리: {risk_data.get('stop_loss_distance','N/A')}%")
+    with col_e3:
+        st.markdown("**거래량 요약**")
+        st.markdown(f"- 비율: {('%.2fx' % vol_r) if isinstance(vol_r,(int,float)) else '알 수 없습니다'}")
+        st.markdown(f"- 설명: {volume_data.get('description','N/A')}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5) 거래비용·체결가 영향 (선택 입력)
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("💸 거래비용/체결가 영향 (선택 입력)", expanded=False):
+    col_in1, col_in2, col_in3, col_in4 = st.columns(4)
+    with col_in1:
+        position_size = st.number_input("포지션 수량", value=0.0, min_value=0.0, step=0.1)
+    with col_in2:
+        entry_price = st.number_input("진입가", value=0.0, min_value=0.0, step=1.0, format="%.2f")
+    with col_in3:
+        exit_price = st.number_input("청산가", value=0.0, min_value=0.0, step=1.0, format="%.2f")
+    with col_in4:
+        lev = st.number_input("레버리지", value=float(risk_data.get('recommended_leverage', 1) or 1), min_value=1.0, step=1.0)
+
+    # 간단 프리셋
+    exchange_preset = {'taker_fee': 0.0006, 'slippage_rate': 0.0005, 'funding_rate': 0.0001, 'funding_interval_h': 8}
+
+    if st.button("비용 계산", type="secondary"):
+        if position_size > 0 and entry_price > 0 and exit_price > 0:
+            try:
+                costs = calculate_trading_costs(position_size, entry_price, exit_price, lev, exchange_preset, holding_hours=24)
+                cco1, cco2, cco3, cco4 = st.columns(4)
+                with cco1: st.metric("진입 수수료", f"{costs.get('entry_fee',0):,.4f}")
+                with cco2: st.metric("슬리피지", f"{(costs.get('entry_slip',0)+costs.get('exit_slip',0)):,.4f}")
+                with cco3: st.metric("펀딩", f"{costs.get('funding_cost',0):,.4f}")
+                with cco4: st.metric("총 비용", f"{costs.get('total_cost',0):,.4f}")
+            except Exception as e:
+                st.error(f"비용 계산 실패: {e}")
+        else:
+            st.info("입력값을 모두 0보다 크게 설정하세요.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6) 포트폴리오 리스크
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("### 🧯 포트폴리오 리스크")
+pr1, pr2, pr3 = st.columns(3)
+with pr1:
+    st.metric("권장 레버리지(재확인)", f"{risk_data.get('recommended_leverage','N/A')}x")
+with pr2:
+    st.metric("최대 포지션 비중", f"{risk_data.get('max_position_size','N/A')}%")
+with pr3:
+    st.metric("권장 손절 폭", f"{risk_data.get('stop_loss_distance','N/A')}%")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7) 히스토리(2탭)
+# ─────────────────────────────────────────────────────────────────────────────
+tabs = st.tabs(["📈 신뢰도 히스토리", "📉 리스크 히스토리"])
+with tabs[0]:
+    try:
+        plot_confidence_history()
+    except Exception as e:
+        st.info(f"신뢰도 히스토리 표시 불가: {e}")
+with tabs[1]:
+    try:
+        plot_risk_history()
+    except Exception as e:
+        st.info(f"리스크 히스토리 표시 불가: {e}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8) 경고·권장사항
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown("### ⚠️ 경고 및 권장사항")
+# 리스크 경고
+if isinstance(risk_data, dict) and risk_data.get('warnings'):
+    for warning in risk_data['warnings']:
+        st.warning(warning)
+# 신뢰도 경고
+if confidence_data and isinstance(confidence_data.get('score', None), (int,float)) and confidence_data['score'] < 50:
+    st.error(f"🔴 낮은 신뢰도: {confidence_data.get('recommendation','점검 필요')}")
+# 거래량 경고
+if isinstance(vol_r,(int,float)):
+    if vol_r > 3.0:
+        st.warning("📈 거래량 급증 감지")
+    elif vol_r < 0.5:
+        st.warning("📉 거래량 급감 감지")
+
 
 def calculate_confidence_level(predictions: list, actual_values: list = None) -> Dict:
     """
