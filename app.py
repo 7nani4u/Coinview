@@ -5036,6 +5036,12 @@ def render_data_summary(df: pd.DataFrame, selected_crypto: str, interval_name: s
     daily_change = df['일일수익률'].iloc[-1] * 100
     avg_volume = df['Volume'].mean()
     total_periods = len(df)
+    # 한국어 표기 분해능 라벨로 변환
+    try:
+        resolution_display_map = {v: k for k, v in RESOLUTION_MAP.items()}
+        interval_label = resolution_display_map.get(interval_name, interval_name)
+    except Exception:
+        interval_label = interval_name
     
     with col1:
         st.metric(
@@ -5047,7 +5053,7 @@ def render_data_summary(df: pd.DataFrame, selected_crypto: str, interval_name: s
     with col2:
         period_text = f"{total_periods} 기간"
         st.metric(
-            label=f"분석 기간 ({interval_name})",
+            label=f"분석 기간 ({interval_label})",
             value=period_text
         )
     
