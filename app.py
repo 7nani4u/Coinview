@@ -5216,25 +5216,22 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         )
     
     with col5:
-        # 권장사항을 컴팩트하게 표시 (테두리 크기를 글씨 크기에 맞게 조정)
+        # 권장사항을 다른 컬럼과 동일한 스타일로 표시
         if current_status['recommendation']:
             # 색상 결정
             if '즉시' in current_status['recommendation']:
                 color = '#dc3545'
-                bg_color = '#f8d7da'
             elif '고려' in current_status['recommendation']:
                 color = '#ff9800'
-                bg_color = '#fff3cd'
             else:
                 color = '#0288d1'
-                bg_color = '#e3f2fd'
             
-            st.markdown(f"""
-            <div style='background-color: {bg_color}; border-left: 3px solid {color}; padding: 6px 10px; border-radius: 5px; display: inline-block;'>
-                <p style='font-size: 10px; color: #666; margin: 0 0 3px 0; font-weight: 600;'>💡 권장사항</p>
-                <p style='font-size: 12px; font-weight: bold; color: {color}; margin: 0; line-height: 1.3;'>{current_status['recommendation']}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("""
+                <div style='text-align: left;'>
+                    <p style='font-size: 0.875rem; color: rgb(49, 51, 63); margin-bottom: 0.25rem;'>💡 권장사항</p>
+                    <p style='font-size: 1rem; font-weight: 600; color: {}; margin: 0;'>{}</p>
+                </div>
+            """.format(color, current_status['recommendation']), unsafe_allow_html=True)
     
     st.markdown("---")
     
