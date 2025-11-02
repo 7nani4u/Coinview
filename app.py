@@ -5315,24 +5315,13 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         pnl_bg = '#e6f4ea' if current_status['unrealized_pnl'] >= 0 else '#fdecea'
         
         st.markdown(f"""
-        <div style="
-            background: white;
-            padding: 1rem;
-            border-radius: 0.5rem;
-            border: 1px solid rgb(230, 234, 241);
-            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
-        ">
-            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">현재가</div>
-            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
-                ${current_status['current_price']:,.2f}
-                <span style="
-                    background: {pnl_bg};
-                    color: {pnl_color};
-                    padding: 0.125rem 0.5rem;
-                    border-radius: 0.375rem;
-                    font-size: 0.75rem;
-                    font-weight: 500;
-                ">{current_status['unrealized_pnl']:+.2f}%</span>
+        <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+            <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">현재가</p>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:1.5rem; font-weight:600;">${current_status['current_price']:,.2f}</span>
+                <span style="font-size:0.875rem; color:{pnl_color}; background:{pnl_bg}; padding:4px 8px; border-radius:999px;">
+                    {current_status['unrealized_pnl']:+.2f}%
+                </span>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -5645,10 +5634,9 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
             icon = '⏸️'
         
         st.markdown(f"""
-        <div style='background-color: {bg_color}; border-left: 5px solid {border_color}; 
-                    padding: 20px; border-radius: 10px; margin: 10px 0;'>
-            <h3 style='margin: 0; color: {border_color};'>{icon} {position_rec['recommendation_text']}</h3>
-            <p style='margin: 10px 0 0 0; color: #666;'>
+        <div style='background-color: #F8F9FA; border-radius: 12px; padding: 16px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);'>
+            <h3 style='margin: 0; color: rgb(38, 39, 48); font-weight: 600;'>{icon} {position_rec['recommendation_text']}</h3>
+            <p style='margin: 8px 0 0 0; color: rgb(107, 114, 126); font-size: 14px;'>
                 <strong>추천 이유:</strong> {position_rec['reasoning']}
             </p>
         </div>
@@ -5745,22 +5733,22 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("### 📍 진입 설정")
+        st.markdown("<div class='section-title'>📍 진입 설정</div>", unsafe_allow_html=True)
         # [수정됨] v2.3.0: 권장/최대 레버리지 분리 표시
         st.markdown(f"""
-        <div style='background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>
-            <p style='margin: 0; font-size: 14px; color: #666;'>⚙️ 레버리지 최적화</p>
-            <div style='display: flex; justify-content: space-between; margin-top: 5px;'>
+        <div style='background-color: #F8F9FA; padding: 16px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);'>
+            <p style='margin: 0; font-size: 14px; color: rgb(107, 114, 126);'>⚙️ 레버리지 최적화</p>
+            <div style='display: flex; justify-content: space-between; margin-top: 8px;'>
                 <div>
-                    <p style='margin: 0; font-size: 12px; color: #888;'>권장 레버리지</p>
-                    <p style='margin: 0; font-size: 24px; font-weight: bold; color: #1f77b4;'>{leverage_info['recommended']}배</p>
+                    <p style='margin: 0; font-size: 12px; color: rgb(107, 114, 126);'>권장 레버리지</p>
+                    <p style='margin: 0; font-size: 24px; font-weight: 600; color: rgb(38, 39, 48);'>{leverage_info['recommended']}배</p>
                 </div>
                 <div>
-                    <p style='margin: 0; font-size: 12px; color: #888;'>최대 레버리지</p>
-                    <p style='margin: 0; font-size: 24px; font-weight: bold; color: #ff7f0e;'>{leverage_info['maximum']}배</p>
+                    <p style='margin: 0; font-size: 12px; color: rgb(107, 114, 126);'>최대 레버리지</p>
+                    <p style='margin: 0; font-size: 24px; font-weight: 600; color: rgb(38, 39, 48);'>{leverage_info['maximum']}배</p>
                 </div>
             </div>
-            <p style='margin: 5px 0 0 0; font-size: 11px; color: #888; text-align: center;'>
+            <p style='margin: 8px 0 0 0; font-size: 11px; color: rgb(107, 114, 126); text-align: center;'>
                 리스크 레벨: <strong>{leverage_info['risk_level']}</strong>
             </p>
         </div>
@@ -5769,13 +5757,13 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         st.metric(label="포지션 크기", value=f"{position_size:.4f} 코인")
     
     with col2:
-        st.markdown("### 🛑 리스크 관리")
+        st.markdown("<div class='section-title'>🛑 리스크 관리</div>", unsafe_allow_html=True)
         st.metric(label="손절가", value=f"${stop_loss:,.2f}")
         st.metric(label="목표가", value=f"${take_profit:,.2f}")
         st.metric(label="RR Ratio", value=f"{rr_ratio:.2f}")
     
     with col3:
-        st.markdown("### 💰 예상 손익")
+        st.markdown("<div class='section-title'>💰 예상 손익</div>", unsafe_allow_html=True)
         expected_profit = position_size * (take_profit - entry_price)
         expected_loss = position_size * (entry_price - stop_loss)
         
@@ -5802,7 +5790,7 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     
     # [개선됨] v2.9.0.1: 초보자 친화적 증거금 정보 표시
     st.markdown("---")
-    st.markdown("### 💳 거래 자금 정보")
+    st.markdown("<div class='section-title'>💳 거래 자금 정보</div>", unsafe_allow_html=True)
     st.caption("📌 레버리지를 사용하면 적은 자금으로 큰 거래가 가능합니다")
     
     position_value = position_size * entry_price
