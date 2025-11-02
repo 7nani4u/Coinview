@@ -5167,25 +5167,17 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
     
     # 현재 상태와 권장사항을 함께 표시 (최적화된 컬럼 비율)
     col1, col2, col3, col4, col5 = st.columns([0.9, 1, 0.9, 0.8, 1.4])
-    
+
+    # 다른 섹션과 동일한 카드 UI를 사용하기 위해 st.metric으로 통일
     with col1:
-        st.markdown("""
-            <div style='text-align: left;'>
-                <p style='font-size: 0.875rem; color: rgb(49, 51, 63); margin-bottom: 0.25rem;'>진입가</p>
-                <p style='font-size: 1.5rem; font-weight: 600; margin: 0;'>${:,.2f}</p>
-            </div>
-        """.format(entry_price), unsafe_allow_html=True)
-    
+        st.metric(label="진입가", value=f"${entry_price:,.2f}")
+
     with col2:
-        # 델타 색상
-        delta_color = '#09ab3b' if current_status['unrealized_pnl'] >= 0 else '#ff2b2b'
-        st.markdown("""
-            <div style='text-align: left;'>
-                <p style='font-size: 0.875rem; color: rgb(49, 51, 63); margin-bottom: 0.25rem;'>현재가</p>
-                <p style='font-size: 1.5rem; font-weight: 600; margin: 0;'>${:,.2f}</p>
-                <p style='font-size: 0.875rem; color: {}; margin-top: 0.25rem;'>{:+.2f}%</p>
-            </div>
-        """.format(current_status['current_price'], delta_color, current_status['unrealized_pnl']), unsafe_allow_html=True)
+        st.metric(
+            label="현재가",
+            value=f"${current_status['current_price']:,.2f}",
+            delta=f"{current_status['unrealized_pnl']:+.2f}%"
+        )
     
     with col3:
         # RSI 상태 한글 번역
