@@ -5751,8 +5751,8 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
             st.warning("⚠️ 현재 포지션 크기가 0이어서 비교할 수 없습니다.")
     
     else:
-        st.error(f"❌ {kelly_result['reason']}")
-        st.warning("⚠️ Kelly Criterion에 따르면 이 거래를 건너뛄는 것이 좋습니다.")
+        # 부정적 기대값 메시지는 표시하지 않고, 거래 건너뛰기 권장 메시지만 표시
+        st.warning("⚠️ Kelly Criterion에 따르면 이 거래를 건너뛰는 것이 좋습니다.")
     
     # 상세 정보
     with st.expander("📖 Kelly Criterion 상세 정보"):
@@ -6177,8 +6177,6 @@ with st.sidebar:
         st.session_state.selected_crypto = CRYPTO_MAP[crypto_choice]
     
     elif coin_input_method == "직접 입력":  # CoinGecko 통합 + 심볼 직접 입력
-        st.info("💡 **코인 검색 또는 심볼 직접 입력**: 이름으로 검색하거나 'ontusdt'와 같이 직접 입력하세요")
-        
         # 검색 입력창
         search_query = st.text_input(
             "🔍 코인 검색 또는 심볼 직접 입력",
