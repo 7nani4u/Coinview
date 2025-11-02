@@ -990,36 +990,110 @@ def create_analysis_dashboard(symbol: str, predictions: list, risk_data: Dict,
     
     with cols[0]:
         if confidence_data:
-            st.metric(
-                "모델 신뢰도",
-                f"{confidence_data['score']:.1f}%",
-                delta=confidence_data['level'],
-                delta_color="normal" if confidence_data['score'] >= 65 else "inverse"
-            )
+            # 신뢰도 배지 색상 결정
+            confidence_color = '#09ab3b' if confidence_data['score'] >= 65 else '#ff2b2b'
+            confidence_bg = '#e6f4ea' if confidence_data['score'] >= 65 else '#fdecea'
+            
+            st.markdown(f"""
+            <div style="
+                background: white;
+                padding: 1rem;
+                border-radius: 0.5rem;
+                border: 1px solid rgb(230, 234, 241);
+                box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            ">
+                <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">모델 신뢰도</div>
+                <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                    {confidence_data['score']:.1f}%
+                    <span style="
+                        background: {confidence_bg};
+                        color: {confidence_color};
+                        padding: 0.125rem 0.5rem;
+                        border-radius: 0.375rem;
+                        font-size: 0.75rem;
+                        font-weight: 500;
+                    ">{confidence_data['level']}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             st.markdown(f"{confidence_data['icon']} {confidence_data['level']}")
     
     with cols[1]:
-        st.metric(
-            "리스크 레벨",
-            risk_data['risk_level'],
-            delta=f"{risk_data['risk_score']:.1f}",
-            delta_color="inverse" if risk_data['risk_score'] > 60 else "normal"
-        )
+        # 리스크 배지 색상 결정
+        risk_color = '#ff2b2b' if risk_data['risk_score'] > 60 else '#09ab3b'
+        risk_bg = '#fdecea' if risk_data['risk_score'] > 60 else '#e6f4ea'
+        
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">리스크 레벨</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                {risk_data['risk_level']}
+                <span style="
+                    background: {risk_bg};
+                    color: {risk_color};
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">{risk_data['risk_score']:.1f}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown(f"{risk_data['icon']} {risk_data['risk_level']}")
     
     with cols[2]:
-        st.metric(
-            "권장 레버리지",
-            f"{risk_data['recommended_leverage']}x",
-            delta=f"포지션 {risk_data['max_position_size']}%"
-        )
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">권장 레버리지</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                {risk_data['recommended_leverage']}x
+                <span style="
+                    background: #f3f4f6;
+                    color: #6b7280;
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">포지션 {risk_data['max_position_size']}%</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with cols[3]:
-        st.metric(
-            "거래량 패턴",
-            volume_data['pattern'],
-            delta=f"{volume_data['volume_ratio']:.2f}x"
-        )
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">거래량 패턴</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                {volume_data['pattern']}
+                <span style="
+                    background: #f3f4f6;
+                    color: #6b7280;
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">{volume_data['volume_ratio']:.2f}x</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown(f"신호: {volume_data['signal']}")
     
     # 탭으로 상세 정보 구성
@@ -5134,11 +5208,35 @@ def render_ai_forecast(future_df: pd.DataFrame, hw_confidence: float):
     
     with col2:
         st.markdown("### 📈 예측 요약")
-        st.metric(
-            label="30일 후 예상가",
-            value=f"${future_df['예측 종가'].iloc[-1]:,.2f}",
-            delta=f"{((future_df['예측 종가'].iloc[-1] / future_df['예측 종가'].iloc[0]) - 1) * 100:+.2f}%"
-        )
+        
+        # 예상가 변동률 계산 및 배지 색상 결정
+        predicted_change = ((future_df['예측 종가'].iloc[-1] / future_df['예측 종가'].iloc[0]) - 1) * 100
+        change_color = '#09ab3b' if predicted_change >= 0 else '#ff2b2b'
+        change_bg = '#e6f4ea' if predicted_change >= 0 else '#fdecea'
+        
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            margin-bottom: 1rem;
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">30일 후 예상가</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                ${future_df['예측 종가'].iloc[-1]:,.2f}
+                <span style="
+                    background: {change_bg};
+                    color: {change_color};
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">{predicted_change:+.2f}%</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         
         st.metric(
             label="모델 신뢰도",
@@ -5212,11 +5310,32 @@ def render_exit_strategy(exit_strategy: dict, entry_price: float, investment_amo
         st.metric(label="진입가", value=f"${entry_price:,.2f}")
 
     with col2:
-        st.metric(
-            label="현재가",
-            value=f"${current_status['current_price']:,.2f}",
-            delta=f"{current_status['unrealized_pnl']:+.2f}%"
-        )
+        # 현재가 변동률 배지 색상 결정
+        pnl_color = '#09ab3b' if current_status['unrealized_pnl'] >= 0 else '#ff2b2b'
+        pnl_bg = '#e6f4ea' if current_status['unrealized_pnl'] >= 0 else '#fdecea'
+        
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">현재가</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                ${current_status['current_price']:,.2f}
+                <span style="
+                    background: {pnl_bg};
+                    color: {pnl_color};
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">{current_status['unrealized_pnl']:+.2f}%</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col3:
         # RSI 상태 한글 번역
@@ -5701,12 +5820,28 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         )
     
     with col2:
-        st.metric(
-            label="💵 필요한 내 돈",
-            value=f"${required_margin:,.2f}",
-            delta=f"-{((margin_saved) / investment_amount * 100):.1f}% 절약",
-            help=f"실제로 내가 내야 하는 돈입니다 ({leverage_info['recommended']}배 레버리지 사용)"
-        )
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">💵 필요한 내 돈</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                ${required_margin:,.2f}
+                <span style="
+                    background: #e6f4ea;
+                    color: #09ab3b;
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">-{((margin_saved) / investment_amount * 100):.1f}% 절약</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col3:
         st.metric(
@@ -5716,12 +5851,28 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         )
     
     with col4:
-        st.metric(
-            label="💰 남은 자금",
-            value=f"${margin_saved:,.2f}",
-            delta=f"+{(margin_saved / investment_amount * 100):.1f}%",
-            help="다른 거래에 사용할 수 있는 남은 돈입니다"
-        )
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">💰 남은 자금</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                ${margin_saved:,.2f}
+                <span style="
+                    background: #e6f4ea;
+                    color: #09ab3b;
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">+{(margin_saved / investment_amount * 100):.1f}%</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     # 초보자를 위한 쉬운 설명 추가
     with st.expander("💡 레버리지란? (초보자 가이드)"):
@@ -8020,11 +8171,32 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric(
-            label="총 수익률",
-            value=f"{result['total_return_pct']:.2f}%",
-            delta=f"${result['final_capital'] - result['initial_capital']:,.0f}"
-        )
+        # 총 수익률 배지 색상 결정
+        return_color = '#09ab3b' if result['final_capital'] - result['initial_capital'] >= 0 else '#ff2b2b'
+        return_bg = '#e6f4ea' if result['final_capital'] - result['initial_capital'] >= 0 else '#fdecea'
+        
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">총 수익률</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                {result['total_return_pct']:.2f}%
+                <span style="
+                    background: {return_bg};
+                    color: {return_color};
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">${result['final_capital'] - result['initial_capital']:,.0f}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         st.metric(
@@ -8034,11 +8206,28 @@ def render_deepseek_backtest_results(result: Dict, comparison_result: Dict = Non
         )
     
     with col3:
-        st.metric(
-            label="총 거래",
-            value=result['total_trades'],
-            delta=f"승: {result['wins']} / 패: {result['losses']}"
-        )
+        st.markdown(f"""
+        <div style="
+            background: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgb(230, 234, 241);
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        ">
+            <div style="color: rgb(107, 114, 126); font-size: 0.875rem; margin-bottom: 0.25rem;">총 거래</div>
+            <div style="font-size: 1.875rem; font-weight: 600; color: rgb(38, 39, 48); display: flex; align-items: center; gap: 0.5rem;">
+                {result['total_trades']}
+                <span style="
+                    background: #f3f4f6;
+                    color: #6b7280;
+                    padding: 0.125rem 0.5rem;
+                    border-radius: 0.375rem;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                ">승: {result['wins']} / 패: {result['losses']}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col4:
         st.metric(
