@@ -580,27 +580,48 @@ def render_trading_metrics(metrics):
     
     with col1:
         ret_1w = returns['1week']
-        st.metric(
-            label="1주일",
-            value=f"{ret_1w:+.2f}%",
-            delta="상승" if ret_1w > 0 else "하락"
-        )
+        up = ret_1w > 0
+        badge_bg = '#e6f4ea' if up else '#fdecea'
+        badge_color = '#09ab3b' if up else '#ff2b2b'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">1주일</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{ret_1w:+.2f}%</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{"상승" if up else "하락"}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         ret_1m = returns['1month']
-        st.metric(
-            label="1개월",
-            value=f"{ret_1m:+.2f}%",
-            delta="상승" if ret_1m > 0 else "하락"
-        )
+        up = ret_1m > 0
+        badge_bg = '#e6f4ea' if up else '#fdecea'
+        badge_color = '#09ab3b' if up else '#ff2b2b'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">1개월</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{ret_1m:+.2f}%</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{"상승" if up else "하락"}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col3:
         ret_3m = returns['3months']
-        st.metric(
-            label="3개월",
-            value=f"{ret_3m:+.2f}%",
-            delta="상승" if ret_3m > 0 else "하락"
-        )
+        up = ret_3m > 0
+        badge_bg = '#e6f4ea' if up else '#fdecea'
+        badge_color = '#09ab3b' if up else '#ff2b2b'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">3개월</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{ret_3m:+.2f}%</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{"상승" if up else "하락"}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     st.markdown("### 🎯 예상 매매 비율")
     
@@ -5044,10 +5065,22 @@ def render_data_summary(df: pd.DataFrame, selected_crypto: str, interval_name: s
         interval_label = interval_name
     
     with col1:
-        st.metric(
-            label=f"현재가 (USD)",
-            value=f"${current_price:,.2f}",
-            delta=f"{daily_change:+.2f}%"
+        # delta를 값 옆에 배치한 커스텀 카드 (다른 카드와 동일한 테두리/패딩)
+        delta_color = '#09ab3b' if daily_change >= 0 else '#ff2b2b'
+        delta_bg = '#e6f4ea' if daily_change >= 0 else '#fdecea'
+        st.markdown(
+            f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">현재가 (USD)</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">${current_price:,.2f}</span>
+                    <span style="font-size:0.875rem; color:{delta_color}; background:{delta_bg}; padding:4px 8px; border-radius:999px;">
+                        {daily_change:+.2f}%
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
     
     with col2:
@@ -5627,16 +5660,26 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
         expected_profit = position_size * (take_profit - entry_price)
         expected_loss = position_size * (entry_price - stop_loss)
         
-        st.metric(
-            label="목표 수익",
-            value=f"${expected_profit:,.2f}",
-            delta=f"{(expected_profit / investment_amount) * 100:.2f}%"
-        )
-        st.metric(
-            label="최대 손실",
-            value=f"-${expected_loss:,.2f}",
-            delta=f"-{(expected_loss / investment_amount) * 100:.2f}%"
-        )
+        profit_pct = (expected_profit / investment_amount) * 100
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">목표 수익</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">${expected_profit:,.2f}</span>
+                    <span style="font-size:0.875rem; color:#09ab3b; background:#e6f4ea; padding:4px 8px; border-radius:999px;">{profit_pct:.2f}%</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+        loss_pct = (expected_loss / investment_amount) * 100
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">최대 손실</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">-${expected_loss:,.2f}</span>
+                    <span style="font-size:0.875rem; color:#ff2b2b; background:#fdecea; padding:4px 8px; border-radius:999px;">-{loss_pct:.2f}%</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     # [개선됨] v2.9.0.1: 초보자 친화적 증거금 정보 표시
     st.markdown("---")
@@ -5931,12 +5974,17 @@ def render_portfolio_backtest(price_data_df, symbol_name):
     
     with col1:
         return_color = "normal" if result['total_return'] >= 0 else "inverse"
-        st.metric(
-            label="📈 총 수익률",
-            value=f"{result['total_return']:.2f}%",
-            delta=f"{result['total_return']:.2f}%",
-            delta_color=return_color
-        )
+        badge_bg = '#e6f4ea' if result['total_return'] >= 0 else '#fdecea'
+        badge_color = '#09ab3b' if result['total_return'] >= 0 else '#ff2b2b'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">📈 총 수익률</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{result['total_return']:.2f}%</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{result['total_return']:.2f}%</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         st.metric(
@@ -5946,12 +5994,15 @@ def render_portfolio_backtest(price_data_df, symbol_name):
         )
     
     with col3:
-        st.metric(
-            label="📉 최대 낙폭",
-            value=f"{result['max_drawdown']:.2f}%",
-            delta=f"{result['max_drawdown']:.2f}%",
-            delta_color="inverse"
-        )
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">📉 최대 낙폭</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{result['max_drawdown']:.2f}%</span>
+                    <span style="font-size:0.875rem; color:#ff2b2b; background:#fdecea; padding:4px 8px; border-radius:999px;">{result['max_drawdown']:.2f}%</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col4:
         st.metric(
@@ -5972,22 +6023,63 @@ def render_technical_indicators(df: pd.DataFrame):
     with col1:
         rsi = df['RSI14'].iloc[-1]
         rsi_signal = "과매수" if rsi > 70 else "과매도" if rsi < 30 else "중립"
-        st.metric(label="RSI (14)", value=f"{rsi:.2f}", delta=rsi_signal)
+        # 배지 색상 매핑
+        badge_bg = '#fdecea' if rsi_signal == '과매수' else '#e6f4ea' if rsi_signal == '과매도' else '#f1f3f4'
+        badge_color = '#ff2b2b' if rsi_signal == '과매수' else '#09ab3b' if rsi_signal == '과매도' else '#5f6368'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">RSI (14)</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{rsi:.2f}</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{rsi_signal}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         stoch = df['StochK14'].iloc[-1]
         stoch_signal = "과매수" if stoch > 80 else "과매도" if stoch < 20 else "중립"
-        st.metric(label="Stochastic (14)", value=f"{stoch:.2f}", delta=stoch_signal)
+        badge_bg = '#fdecea' if stoch_signal == '과매수' else '#e6f4ea' if stoch_signal == '과매도' else '#f1f3f4'
+        badge_color = '#ff2b2b' if stoch_signal == '과매수' else '#09ab3b' if stoch_signal == '과매도' else '#5f6368'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">Stochastic (14)</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{stoch:.2f}</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{stoch_signal}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col3:
         mfi = df['MFI14'].iloc[-1]
         mfi_signal = "과매수" if mfi > 80 else "과매도" if mfi < 20 else "중립"
-        st.metric(label="MFI (14)", value=f"{mfi:.2f}", delta=mfi_signal)
+        badge_bg = '#fdecea' if mfi_signal == '과매수' else '#e6f4ea' if mfi_signal == '과매도' else '#f1f3f4'
+        badge_color = '#ff2b2b' if mfi_signal == '과매수' else '#09ab3b' if mfi_signal == '과매도' else '#5f6368'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">MFI (14)</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{mfi:.2f}</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{mfi_signal}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
     
     with col4:
         macd_hist = df['MACD_Hist'].iloc[-1]
         macd_signal = "상승" if macd_hist > 0 else "하락"
-        st.metric(label="MACD Histogram", value=f"{macd_hist:.2f}", delta=macd_signal)
+        badge_bg = '#e6f4ea' if macd_signal == '상승' else '#fdecea'
+        badge_color = '#09ab3b' if macd_signal == '상승' else '#ff2b2b'
+        st.markdown(f"""
+            <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <p style="font-size:0.875rem; color:rgb(49,51,63); margin:0 0 0.25rem 0;">MACD Histogram</p>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:1.5rem; font-weight:600;">{macd_hist:.2f}</span>
+                    <span style="font-size:0.875rem; color:{badge_color}; background:{badge_bg}; padding:4px 8px; border-radius:999px;">{macd_signal}</span>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
 
 def render_optimized_prediction_sequence(
