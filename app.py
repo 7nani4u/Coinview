@@ -6362,41 +6362,89 @@ with st.sidebar:
     st.markdown("---")
     
     # v2.6.0: Fear & Greed Index
+    # 커스텀 게이지 렌더러 (스크린샷 스타일)
+    def _render_fear_greed_gauge(value:int, classification:str):
+        import math
+        korean_map = {
+            'Extreme Fear': '매우 공포',
+            'Fear': '공포',
+            'Neutral': '중립',
+            'Greed': '탐욕',
+            'Extreme Greed': '매우 탐욕'
+        }
+        color_map = {
+            'Extreme Fear': '#e74c3c',
+            'Fear': '#f39c12',
+            'Neutral': '#f1c40f',
+            'Greed': '#2ecc71',
+            'Extreme Greed': '#27ae60'
+        }
+        label_kor = korean_map.get(classification, classification)
+        badge_color = color_map.get(classification, '#888')
+        
+        # 게이지 기하값
+        W, H = 600, 270
+        cx, cy, R = W/2, 220, 200
+        phi = math.pi * (1 - (value/100.0))
+        px = cx + R * math.cos(phi)
+        py = cy - R * math.sin(phi)
+        
+        html = f"""
+        <style>
+          .fgx-card {{ position: relative; background:#fff; border-radius:18px; padding:18px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
+          .fgx-title {{ font-weight:800; font-size:22px; color:#1f1f1f; margin-bottom:4px; }}
+          .fgx-gauge svg {{ display:block; width:100%; height:auto; }}
+          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:118px; text-align:center; }}
+          .fgx-center .value {{ font-size:72px; font-weight:900; color:#222; line-height:1; }}
+          .fgx-center .badge {{ display:inline-block; margin-top:8px; padding:6px 14px; border-radius:999px; font-weight:700; color:#fff; background:{badge_color}; }}
+          .fgx-label {{ position:absolute; font-weight:700; font-size:13px; color:#333; }}
+          .fgx-label.left-most {{ left:12px; bottom:18px; }}
+          .fgx-label.right-most {{ right:12px; bottom:18px; }}
+          .fgx-label.mid-left {{ left:78px; top:88px; }}
+          .fgx-label.mid-right {{ right:78px; top:88px; }}
+          .fgx-label.top-mid {{ left:50%; transform:translateX(-50%); top:20px; }}
+        </style>
+        <div class="fgx-card">
+          <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
+          <div class="fgx-gauge">
+            <svg viewBox="0 0 {W} {H}">
+              <defs>
+                <linearGradient id="fgxGrad" x1="0%" y1="50%" x2="100%" y2="50%">
+                  <stop offset="0%" stop-color="#e74c3c"/>
+                  <stop offset="25%" stop-color="#f39c12"/>
+                  <stop offset="50%" stop-color="#f1c40f"/>
+                  <stop offset="75%" stop-color="#8fd14f"/>
+                  <stop offset="100%" stop-color="#27ae60"/>
+                </linearGradient>
+              </defs>
+              <!-- outer colorful arc -->
+              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" stroke="url(#fgxGrad)" stroke-width="28" fill="none" stroke-linecap="round"/>
+              <!-- inner gray arc (background ring) -->
+              <path d="M {cx-(R-30)} {cy} A {R-30} {R-30} 0 0 1 {cx+(R-30)} {cy}" stroke="#dfe3e8" stroke-width="22" fill="none" stroke-linecap="round" opacity="0.45"/>
+              <!-- pointer dot -->
+              <circle cx="{px}" cy="{py}" r="14" fill="#ffffff" stroke="#666" stroke-width="4"/>
+            </svg>
+          </div>
+          <div class="fgx-center">
+            <div class="value">{value}</div>
+            <div class="badge">{label_kor}</div>
+          </div>
+          <div class="fgx-label left-most">매우 공포</div>
+          <div class="fgx-label mid-left">공포</div>
+          <div class="fgx-label top-mid">중립</div>
+          <div class="fgx-label mid-right">탐욕</div>
+          <div class="fgx-label right-most">매우 탐욕</div>
+        </div>
+        """
+        return html
+    
     st.markdown("### 😱 시장 심리")
     try:
         fg_data = get_fear_greed_index()
         if fg_data:
             current_value = fg_data['current_value']
             classification = fg_data['current_classification']
-            
-            # 한글 번역 맵
-            korean_map = {
-                'Extreme Fear': '극도의 공포',
-                'Fear': '공포',
-                'Neutral': '중립',
-                'Greed': '탐욕',
-                'Extreme Greed': '극도의 탐욕'
-            }
-            korean_classification = korean_map.get(classification, classification)
-            
-            color_map = {
-                'Extreme Fear': '#e74c3c',
-                'Fear': '#e67e22',
-                'Neutral': '#f39c12',
-                'Greed': '#2ecc71',
-                'Extreme Greed': '#27ae60'
-            }
-            color = color_map.get(classification, 'gray')
-            
-            st.markdown(f"""
-            <div style='background: linear-gradient(135deg, {color}aa, {color}); 
-                        padding:20px; border-radius:15px; text-align:center; 
-                        box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom:20px;'>
-                <h1 style='margin:0; color:white; font-size:48px;'>{current_value}</h1>
-                <p style='margin:5px 0 0 0; color:white; font-size:18px; font-weight:bold;'>{korean_classification}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
+            st.markdown(_render_fear_greed_gauge(current_value, classification), unsafe_allow_html=True)
             if current_value < 25:
                 st.success("🟢 극도의 공포 → 매수 기회")
             elif current_value > 75:
@@ -6404,7 +6452,7 @@ with st.sidebar:
         else:
             st.info("ℹ️ Fear & Greed 데이터 로딩 중...")
     except Exception as e:
-        pass
+        st.info("ℹ️ Fear & Greed 데이터 로딩 중...")
     
     st.markdown("---")
     
