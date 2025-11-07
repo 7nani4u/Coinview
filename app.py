@@ -6477,6 +6477,7 @@ with st.sidebar:
     def _render_fear_greed_gauge(value:int, classification:str): 
         """스크린샷과 동일한 스타일의 반원형 게이지 렌더링""" 
         import math 
+        import textwrap
         
         # 한국어 레이블 매핑 
         korean_map = { 
@@ -6507,7 +6508,7 @@ with st.sidebar:
         # 현재 값에 따른 각도 계산 
         current_angle = start_angle + (end_angle - start_angle) * (value / 100.0) 
         
-        html = f""" 
+        html = textwrap.dedent(f""" 
         <style> 
             .fear-greed-container {{ 
                 position: relative; 
@@ -6621,7 +6622,7 @@ with st.sidebar:
                 <span>탐욕</span> 
             </div> 
         </div> 
-        """ 
+        """) 
         return html 
     
     st.markdown("### 😱 시장 심리")
@@ -6630,7 +6631,11 @@ with st.sidebar:
         if fg_data:
             current_value = fg_data['current_value']
             classification = fg_data['current_classification']
-            st.markdown(_render_fear_greed_gauge(current_value, classification), unsafe_allow_html=True)
+            st.components.v1.html(
+                _render_fear_greed_gauge(current_value, classification),
+                height=320,
+                scrolling=False
+            )
             if current_value < 25:
                 st.success("🟢 극도의 공포 → 매수 기회")
             elif current_value > 75:
