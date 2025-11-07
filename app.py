@@ -6391,18 +6391,20 @@ with st.sidebar:
         
         html = f"""
         <style>
-          .fgx-card {{ position: relative; background:#fff; border-radius:18px; padding:18px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }}
-          .fgx-title {{ font-weight:800; font-size:22px; color:#1f1f1f; margin-bottom:4px; }}
+          .fgx-card {{ position: relative; background:#fff; border-radius:18px; padding:16px 16px 30px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); margin-bottom:14px; min-height:320px; }}
+          .fgx-title {{ font-weight:800; font-size:20px; line-height:1.25; color:#1f1f1f; margin-bottom:8px; word-break:keep-all; }}
+          .fgx-gauge {{ position: relative; }}
           .fgx-gauge svg {{ display:block; width:100%; height:auto; }}
-          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:118px; text-align:center; }}
-          .fgx-center .value {{ font-size:72px; font-weight:900; color:#222; line-height:1; }}
-          .fgx-center .badge {{ display:inline-block; margin-top:8px; padding:6px 14px; border-radius:999px; font-weight:700; color:#fff; background:{badge_color}; }}
-          .fgx-label {{ position:absolute; font-weight:700; font-size:13px; color:#333; }}
-          .fgx-label.left-most {{ left:12px; bottom:18px; }}
-          .fgx-label.right-most {{ right:12px; bottom:18px; }}
-          .fgx-label.mid-left {{ left:78px; top:88px; }}
-          .fgx-label.mid-right {{ right:78px; top:88px; }}
-          .fgx-label.top-mid {{ left:50%; transform:translateX(-50%); top:20px; }}
+          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:124px; text-align:center; }}
+          .fgx-center .value {{ font-size:64px; font-weight:900; color:#222; line-height:1; }}
+          .fgx-center .badge {{ display:inline-block; margin-top:6px; padding:6px 12px; border-radius:999px; font-weight:700; font-size:13px; color:#fff; background:{badge_color}; }}
+          .fgx-label {{ position:absolute; font-weight:700; font-size:12px; color:#333; opacity:0.9; }}
+          /* 라벨을 게이지 컨테이너 기준으로 배치 */
+          .fgx-gauge .top-mid {{ left:50%; transform:translateX(-50%); top:12px; }}
+          .fgx-gauge .mid-left {{ left:74px; top:56px; }}
+          .fgx-gauge .mid-right {{ right:74px; top:56px; }}
+          .fgx-gauge .left-most {{ left:10px; bottom:10px; }}
+          .fgx-gauge .right-most {{ right:10px; bottom:10px; }}
         </style>
         <div class="fgx-card">
           <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
@@ -6418,22 +6420,22 @@ with st.sidebar:
                 </linearGradient>
               </defs>
               <!-- outer colorful arc -->
-              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" stroke="url(#fgxGrad)" stroke-width="28" fill="none" stroke-linecap="round"/>
+              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" stroke="url(#fgxGrad)" stroke-width="26" fill="none" stroke-linecap="round"/>
               <!-- inner gray arc (background ring) -->
-              <path d="M {cx-(R-30)} {cy} A {R-30} {R-30} 0 0 1 {cx+(R-30)} {cy}" stroke="#dfe3e8" stroke-width="22" fill="none" stroke-linecap="round" opacity="0.45"/>
+              <path d="M {cx-(R-30)} {cy} A {R-30} {R-30} 0 0 1 {cx+(R-30)} {cy}" stroke="#dfe3e8" stroke-width="20" fill="none" stroke-linecap="round" opacity="0.45"/>
               <!-- pointer dot -->
-              <circle cx="{px}" cy="{py}" r="14" fill="#ffffff" stroke="#666" stroke-width="4"/>
+              <circle cx="{px}" cy="{py}" r="12" fill="#ffffff" stroke="#666" stroke-width="3"/>
             </svg>
+            <div class="fgx-center">
+              <div class="value">{value}</div>
+              <div class="badge">{label_kor}</div>
+            </div>
+            <div class="fgx-label left-most">매우 공포</div>
+            <div class="fgx-label mid-left">공포</div>
+            <div class="fgx-label top-mid">중립</div>
+            <div class="fgx-label mid-right">탐욕</div>
+            <div class="fgx-label right-most">매우 탐욕</div>
           </div>
-          <div class="fgx-center">
-            <div class="value">{value}</div>
-            <div class="badge">{label_kor}</div>
-          </div>
-          <div class="fgx-label left-most">매우 공포</div>
-          <div class="fgx-label mid-left">공포</div>
-          <div class="fgx-label top-mid">중립</div>
-          <div class="fgx-label mid-right">탐욕</div>
-          <div class="fgx-label right-most">매우 탐욕</div>
         </div>
         """
         return html
