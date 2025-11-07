@@ -6382,29 +6382,29 @@ with st.sidebar:
         label_kor = korean_map.get(classification, classification)
         badge_color = color_map.get(classification, '#888')
         
-        # 게이지 기하값 (스크린샷과 동일한 비율로 재조정)
-        W, H = 600, 260  # 높이 축소
-        cx, cy, R = W/2, 210, 180  # 반경 축소
+        # 게이지 기하값 (원하는 스크린샷에 맞춰 조정: 더 큰 반경, 높이 증가)
+        W, H = 600, 300  # 높이 증가로 더 큰 게이지
+        cx, cy, R = W/2, 250, 220  # 반경 증가로 더 큰 아크
         phi = math.pi * (1 - (value/100.0))
         px = cx + R * math.cos(phi)
         py = cy - R * math.sin(phi)
         
         html = f"""
         <style>
-          .fgx-card {{ position: relative; background:#fff; border-radius:16px; padding:16px 16px 28px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom:16px; min-height:300px; }}
-          .fgx-title {{ font-weight:700; font-size: 18px; line-height:1.2; color:#1f1f1f; margin-bottom:10px; word-break:keep-all; white-space:nowrap; text-align:center; }}
+          .fgx-card {{ position: relative; background:#fff; border-radius:22px; padding:22px 22px 46px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); margin-bottom:22px; min-height:420px; }}
+          .fgx-title {{ font-weight:800; font-size: 28px; line-height:1.15; color:#1f1f1f; margin-bottom:18px; word-break:keep-all; white-space:nowrap; text-align:center; text-shadow: 0 2px 0 rgba(255,255,255,0.8); }}
           .fgx-gauge {{ position: relative; }}
-          .fgx-gauge svg {{ display:block; width:100%; height:auto; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.1)); }}
-          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:120px; text-align:center; }}
-          .fgx-center .value {{ font-size: 48px; font-weight:800; color:#222; line-height:1; }}
-          .fgx-center .badge {{ display:inline-block; margin-top:6px; padding:5px 12px; border-radius:16px; font-weight:600; font-size: 12px; color:#fff; background:{badge_color}; }}
-          .fgx-label {{ position:absolute; font-weight:600; font-size: 11px; color:#555; opacity:0.9; }}
-          /* 라벨을 게이지 컨테이너 기준으로 배치 */
-          .fgx-gauge .top-mid {{ left:50%; transform:translateX(-50%); top:40px; }}
-          .fgx-gauge .mid-left {{ left:65px; top:80px; }}
-          .fgx-gauge .mid-right {{ right:65px; top:80px; }}
-          .fgx-gauge .left-most {{ left:10px; bottom:12px; width:60px; text-align:center; line-height:1.1; }}
-          .fgx-gauge .right-most {{ right:10px; bottom:12px; width:60px; text-align:center; line-height:1.1; }}
+          .fgx-gauge svg {{ display:block; width:100%; height:auto; }}
+          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:175px; text-align:center; }}
+          .fgx-center .value {{ font-size: 88px; font-weight:900; color:#222; line-height:1; text-shadow: 0 6px 16px rgba(0,0,0,0.25); }}
+          .fgx-center .badge {{ display:inline-block; margin-top:10px; padding:8px 18px; border-radius:24px; font-weight:800; font-size: 16px; color:#fff; background:{badge_color}; box-shadow: 0 4px 10px rgba(0,0,0,0.15); }}
+          .fgx-label {{ position:absolute; font-weight:800; font-size: 16px; color:#333; opacity:1; text-shadow: 0 2px 4px rgba(255,255,255,0.6), 0 1px 1px rgba(0,0,0,0.15); }}
+          /* 라벨 위치를 스크린샷에 맞춰 조정 */
+          .fgx-gauge .top-mid {{ left:50%; transform:translateX(-50%); top:26px; }}
+          .fgx-gauge .mid-left {{ left:120px; top:92px; }}
+          .fgx-gauge .mid-right {{ right:120px; top:92px; }}
+          .fgx-gauge .left-most {{ left:28px; bottom:6px; width:84px; text-align:center; line-height:1.2; color:#111; }}
+          .fgx-gauge .right-most {{ right:28px; bottom:6px; width:84px; text-align:center; line-height:1.2; color:#111; }}
         </style>
         <div class="fgx-card">
           <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
@@ -6420,11 +6420,11 @@ with st.sidebar:
                 </linearGradient>
               </defs>
               <!-- outer colorful arc -->
-              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" stroke="url(#fgxGrad)" stroke-width="18" fill="none" stroke-linecap="round"/>
+              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" stroke="url(#fgxGrad)" stroke-width="28" fill="none" stroke-linecap="round"/>
               <!-- inner gray arc (background ring) -->
-              <path d="M {cx-(R-30)} {cy} A {R-30} {R-30} 0 0 1 {cx+(R-30)} {cy}" stroke="#dfe3e8" stroke-width="12" fill="none" stroke-linecap="round" opacity="0.45"/>
+              <path d="M {cx-(R-40)} {cy} A {R-40} {R-40} 0 0 1 {cx+(R-40)} {cy}" stroke="#f8f9fa" stroke-width="20" fill="none" stroke-linecap="round" opacity="0.6"/>
               <!-- pointer dot -->
-              <circle cx="{px}" cy="{py}" r="8" fill="#ffffff" stroke="#666" stroke-width="2"/>
+              <circle cx="{px}" cy="{py}" r="14" fill="#ffffff" stroke="#999" stroke-width="4" filter="drop-shadow(0 4px 8px rgba(0,0,0,0.2))"/>
             </svg>
             <div class="fgx-center">
               <div class="value">{value}</div>
