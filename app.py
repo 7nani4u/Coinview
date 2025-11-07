@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import time
 """
 코인 AI 예측 시스템 - v2.9.12 (커스터마이즈 대시보드)
 ✨ 주요 기능:
@@ -1590,48 +1591,70 @@ def calculate_portfolio_risk(positions: list) -> Dict:
 
 
 
-@st.cache_data(ttl=3600)
-def get_fear_greed_index(limit=30):
+@st.cache_data(ttl=600)  # 캐시 10분으로 단축
+def get_fear_greed_index(limit=30, retries=3, delay=5):
     """
     Fear & Greed Index 가져오기 (Alternative.me API)
-    
-    Returns:
-    --------
-    dict or None
-        - 'current_value': 현재 값 (0-100)
-        - 'current_classification': 분류
-        - 'historical_data': DataFrame
+    - 재시도 로직, 타임아웃 증가, 상세 로깅 추가
     """
-    try:
-        url = f'https://api.alternative.me/fng/?limit={limit}'
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        if 'data' not in data:
+    url = f'https://api.alternative.me/fng/?limit={limit}'
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=20)  # 타임아웃 20초로 증가
+            response.raise_for_status()
+            
+            data = response.json()
+            if 'data' not in data or not data['data']:
+                st.error("API 응답에 'data'가 없거나 비어있습니다.")
+                return None
+
+            current = data['data'][0]
+            current_value = int(current['value'])
+            current_classification = current['value_classification']
+            
+            historical = [
+                {
+                    'timestamp': datetime.datetime.fromtimestamp(int(item['timestamp'])),
+                    'value': int(item['value']),
+                    'classification': item['value_classification']
+                } 
+                for item in data['data']
+            ]
+            
+            historical_df = pd.DataFrame(historical)
+            
+            return {
+                'current_value': current_value,
+                'current_classification': current_classification,
+                'historical_data': historical_df
+            }
+            
+        except requests.exceptions.RequestException as e:
+            st.error(f"API 요청 실패 (시도 {attempt + 1}/{retries}): {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                st.error("최종 API 요청 실패. 네트워크 연결을 확인하세요.")
+                return None
+        except (KeyError, ValueError) as e:
+            st.error(f"API 응답 처리 실패: {e}")
             return None
-        
-        current = data['data'][0]
-        current_value = int(current['value'])
-        current_classification = current['value_classification']
-        
-        historical = []
-        for item in data['data']:
-            historical.append({
-                'timestamp': datetime.datetime.fromtimestamp(int(item['timestamp'])),
-                'value': int(item['value']),
-                'classification': item['value_classification']
-            })
-        
-        historical_df = pd.DataFrame(historical)
-        
-        return {
-            'current_value': current_value,
-            'current_classification': current_classification,
-            'historical_data': historical_df
-        }
-    except Exception as e:
-        return None
+            
+    return None
+            
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                time.sleep(delay)  # 재시도 전 대기
+            else:
+                st.error(f"API 요청 실패 (시도 {retries}회): {e}")
+                return None
+        except (KeyError, IndexError, ValueError) as e:
+            st.error(f"API 데이터 처리 오류: {e}")
+            return None
+        except Exception as e:
+            st.error(f"알 수 없는 오류 발생: {e}")
+            return None
+    return None
 
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.02):
@@ -6398,13 +6421,13 @@ with st.sidebar:
           .fgx-center {{ position:absolute; left:50%; top: 55%; transform: translate(-50%, -50%); text-align:center; width: 100%; }}
           .fgx-center .value {{ font-size: 96px; font-weight:900; color:#111; line-height:1; }}
           .fgx-center .badge {{ display:inline-block; margin-top:12px; padding:10px 24px; border-radius:30px; font-weight:800; font-size: 18px; color:#fff; background:{badge_color}; }}
-          .fgx-label {{ position:absolute; font-weight:800; font-size: 18px; color:#444; }}
-          /* 라벨 위치 재조정 */
-          .fgx-gauge .top-mid   {{ top: 0; left: 50%; transform: translateX(-50%); }}
-          .fgx-gauge .mid-left  {{ top: 80px; left: 100px; }}
-          .fgx-gauge .mid-right {{ top: 80px; right: 100px; }}
-          .fgx-gauge .left-most  {{ bottom: 20px; left: 40px; line-height:1.2; text-align:center; }}
-          .fgx-gauge .right-most {{ bottom: 20px; right: 40px; line-height:1.2; text-align:center; }}
+          .fgx-label {{ position:absolute; font-weight:900; font-size: 20px; color:#111; text-shadow: 0 3px 6px rgba(0,0,0,0.15), 0 2px 0 rgba(255,255,255,0.7); }}
+          /* 라벨 위치 재조정 (스크린샷 정렬) */
+          .fgx-gauge .top-mid   {{ top: 40px; left: 50%; transform: translateX(-50%); }}
+          .fgx-gauge .mid-left  {{ top: 120px; left: 100px; }}
+          .fgx-gauge .mid-right {{ top: 120px; right: 100px; }}
+          .fgx-gauge .left-most  {{ bottom: 16px; left: 34px; line-height:1.2; text-align:center; }}
+          .fgx-gauge .right-most {{ bottom: 16px; right: 34px; line-height:1.2; text-align:center; }}
         </style>
         <div class="fgx-card">
           <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
@@ -6418,7 +6441,19 @@ with st.sidebar:
                   <stop offset="75%" stop-color="#8fd14f"/>
                   <stop offset="100%" stop-color="#27ae60"/>
                 </linearGradient>
+              <!-- inner shade gradient + clip-path for half-dome fill -->
+              <linearGradient id="innerShade" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#ffffff" stop-opacity="0.90"/>
+                <stop offset="100%" stop-color="#cfd3d7" stop-opacity="0.95"/>
+              </linearGradient>
+              <clipPath id="arcClip">
+                <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy} L {cx+R} {cy+R} L {cx-R} {cy+R} Z"/>
+              </clipPath>
               </defs>
+              <!-- Inner Shaded Dome -->
+              <g clip-path="url(#arcClip)">
+                <rect x="{cx-R}" y="{cy-R}" width="{2*R}" height="{R}" fill="url(#innerShade)"/>
+              </g>
               <!-- Background Arc -->
               <path d=f"M{cx-R},{cy} A{R},{R} 0 0 1 {cx+R},{cy}" fill="none" stroke="#e6e6e6" stroke-width="30" />
               <!-- Color Arc -->
