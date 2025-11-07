@@ -1591,70 +1591,68 @@ def calculate_portfolio_risk(positions: list) -> Dict:
 
 
 
-@st.cache_data(ttl=600)  # 캐시 10분으로 단축
-def get_fear_greed_index(limit=30, retries=3, delay=5):
-    """
-    Fear & Greed Index 가져오기 (Alternative.me API)
-    - 재시도 로직, 타임아웃 증가, 상세 로깅 추가
+@st.cache_data(ttl=600)
+def _fetch_fgi_cached(limit=30):
+    """Fear & Greed Index를 Alternative.me에서 직접 가져와 캐시합니다.
+    실패 시 예외를 던져 캐시에 잘못된(None) 값이 저장되지 않도록 합니다.
     """
     url = f'https://api.alternative.me/fng/?limit={limit}'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+    }
+    response = requests.get(url, timeout=20, headers=headers)
+    response.raise_for_status()
+    data = response.json()
+    if 'data' not in data or not data['data']:
+        raise ValueError("Fear & Greed API 응답에 'data'가 없거나 비어있습니다.")
+
+    current = data['data'][0]
+    current_value = int(current['value'])
+    current_classification = current['value_classification']
+
+    historical = [
+        {
+            'timestamp': datetime.datetime.fromtimestamp(int(item['timestamp'])),
+            'value': int(item['value']),
+            'classification': item['value_classification']
+        }
+        for item in data['data']
+    ]
+    historical_df = pd.DataFrame(historical)
+
+    return {
+        'current_value': current_value,
+        'current_classification': current_classification,
+        'historical_data': historical_df
+    }
+
+
+def get_fear_greed_index(limit=30, retries=3, delay=5):
+    """Fear & Greed Index 래퍼 함수.
+    - 캐시된 가져오기 함수를 호출하고 실패 시 재시도합니다.
+    - 모든 시도가 실패하면 마지막 성공 값을 반환하거나 기본값을 제공합니다.
+    """
+    last_success = st.session_state.get('fgi_last_success')
     for attempt in range(retries):
         try:
-            response = requests.get(url, timeout=20)  # 타임아웃 20초로 증가
-            response.raise_for_status()
-            
-            data = response.json()
-            if 'data' not in data or not data['data']:
-                st.error("API 응답에 'data'가 없거나 비어있습니다.")
-                return None
-
-            current = data['data'][0]
-            current_value = int(current['value'])
-            current_classification = current['value_classification']
-            
-            historical = [
-                {
-                    'timestamp': datetime.datetime.fromtimestamp(int(item['timestamp'])),
-                    'value': int(item['value']),
-                    'classification': item['value_classification']
-                } 
-                for item in data['data']
-            ]
-            
-            historical_df = pd.DataFrame(historical)
-            
-            return {
-                'current_value': current_value,
-                'current_classification': current_classification,
-                'historical_data': historical_df
-            }
-            
-        except requests.exceptions.RequestException as e:
-            st.error(f"API 요청 실패 (시도 {attempt + 1}/{retries}): {e}")
+            result = _fetch_fgi_cached(limit)
+            st.session_state['fgi_last_success'] = result
+            return result
+        except Exception as e:
             if attempt < retries - 1:
                 time.sleep(delay)
             else:
-                st.error("최종 API 요청 실패. 네트워크 연결을 확인하세요.")
-                return None
-        except (KeyError, ValueError) as e:
-            st.error(f"API 응답 처리 실패: {e}")
-            return None
-            
-    return None
-            
-        except requests.exceptions.RequestException as e:
-            if attempt < retries - 1:
-                time.sleep(delay)  # 재시도 전 대기
-            else:
-                st.error(f"API 요청 실패 (시도 {retries}회): {e}")
-                return None
-        except (KeyError, IndexError, ValueError) as e:
-            st.error(f"API 데이터 처리 오류: {e}")
-            return None
-        except Exception as e:
-            st.error(f"알 수 없는 오류 발생: {e}")
-            return None
-    return None
+                st.warning(f"Fear & Greed API 오류: {e}. 최근 값 또는 기본값으로 표시합니다.")
+                break
+    # 재시도 모두 실패: 최근 성공값이 있으면 사용
+    if last_success:
+        return last_success
+    # 마지막 수단: 기본값 (중립 50)
+    return {
+        'current_value': 50,
+        'current_classification': 'Neutral',
+        'historical_data': pd.DataFrame()
+    }
 
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.02):
@@ -6406,28 +6404,28 @@ with st.sidebar:
         badge_color = color_map.get(classification, '#888')
         
         # 게이지 기하값 (스크린샷과 유사하게 재조정)
-        W, H = 600, 320  # 높이 확보
-        cx, cy, R = W/2, 280, 240  # y 좌표와 반경 조정
+        W, H = 620, 320  # 폭 소폭 확장
+        cx, cy, R = W/2, 245, 205  # y 좌표/반경 재조정 (겹침 방지)
         phi = math.pi * (1 - (value/100.0))
         px = cx + R * math.cos(phi)
         py = cy - R * math.sin(phi)
         
         html = f"""
         <style>
-          .fgx-card {{ position: relative; background:#fff; border-radius:24px; padding:24px; box-shadow: 0 10px 30px rgba(0,0,0,0.07); margin-bottom:24px; min-height:450px; }}
-          .fgx-title {{ font-weight:900; font-size: 32px; line-height:1.2; color:#111; margin-bottom:20px; text-align:center; }}
+          .fgx-card {{ position: relative; background:#fff; border-radius:22px; padding:22px 24px 44px; box-shadow: 0 8px 22px rgba(0,0,0,0.08); margin-bottom:20px; min-height:370px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif; }}
+          .fgx-title {{ font-weight:900; font-size: 30px; line-height:1.1; color:#111; margin-bottom:16px; text-align:center; }}
           .fgx-gauge {{ position: relative; height: {H}px; }}
           .fgx-gauge svg {{ position: absolute; top: 0; left: 0; width:100%; height:100%; overflow: visible; }}
-          .fgx-center {{ position:absolute; left:50%; top: 55%; transform: translate(-50%, -50%); text-align:center; width: 100%; }}
-          .fgx-center .value {{ font-size: 96px; font-weight:900; color:#111; line-height:1; }}
-          .fgx-center .badge {{ display:inline-block; margin-top:12px; padding:10px 24px; border-radius:30px; font-weight:800; font-size: 18px; color:#fff; background:{badge_color}; }}
-          .fgx-label {{ position:absolute; font-weight:900; font-size: 20px; color:#111; text-shadow: 0 3px 6px rgba(0,0,0,0.15), 0 2px 0 rgba(255,255,255,0.7); }}
-          /* 라벨 위치 재조정 (스크린샷 정렬) */
-          .fgx-gauge .top-mid   {{ top: 40px; left: 50%; transform: translateX(-50%); }}
-          .fgx-gauge .mid-left  {{ top: 120px; left: 100px; }}
-          .fgx-gauge .mid-right {{ top: 120px; right: 100px; }}
-          .fgx-gauge .left-most  {{ bottom: 16px; left: 34px; line-height:1.2; text-align:center; }}
-          .fgx-gauge .right-most {{ bottom: 16px; right: 34px; line-height:1.2; text-align:center; }}
+          .fgx-center {{ position:absolute; left:50%; top: 54%; transform: translate(-50%, -50%); text-align:center; width: 100%; }}
+          .fgx-center .value {{ font-size: 72px; font-weight:900; color:#111; line-height:1; text-shadow: 0 3px 10px rgba(0,0,0,0.12); letter-spacing:-0.5px; }}
+          .fgx-center .badge {{ display:inline-block; margin-top:10px; padding:7px 16px; border-radius:16px; font-weight:800; font-size: 14px; color:#fff; background:{badge_color}; }}
+          .fgx-label {{ position:absolute; font-weight:900; font-size: 16px; color:#111; text-shadow: 0 2px 4px rgba(0,0,0,0.10), 0 1px 0 rgba(255,255,255,0.7); }}
+          /* 라벨 위치 (제목과 간섭 없게 조정) */
+          .fgx-gauge .top-mid   {{ top: 46px; left: 50%; transform: translateX(-50%); }}
+          .fgx-gauge .mid-left  {{ top: 110px; left: 90px; }}
+          .fgx-gauge .mid-right {{ top: 110px; right: 90px; }}
+          .fgx-gauge .left-most  {{ bottom: 18px; left: 28px; line-height:1.2; text-align:center; }}
+          .fgx-gauge .right-most {{ bottom: 18px; right: 28px; line-height:1.2; text-align:center; }}
         </style>
         <div class="fgx-card">
           <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
@@ -6454,12 +6452,12 @@ with st.sidebar:
               <g clip-path="url(#arcClip)">
                 <rect x="{cx-R}" y="{cy-R}" width="{2*R}" height="{R}" fill="url(#innerShade)"/>
               </g>
-              <!-- Background Arc -->
-              <path d=f"M{cx-R},{cy} A{R},{R} 0 0 1 {cx+R},{cy}" fill="none" stroke="#e6e6e6" stroke-width="30" />
-              <!-- Color Arc -->
-              <path d=f"M{cx-R},{cy} A{R},{R} 0 0 1 {px},{py}" fill="none" stroke="{gauge_color}" stroke-width="30" stroke-linecap="round" />
+              <!-- Colorful Outer Arc -->
+              <path d="M {cx-R} {cy} A {R} {R} 0 0 1 {cx+R} {cy}" fill="none" stroke="url(#fgxGrad)" stroke-width="36" stroke-linecap="round" />
+              <!-- Inner Gray Arc -->
+              <path d="M {cx-(R-34)} {cy} A {R-34} {R-34} 0 0 1 {cx+(R-34)} {cy}" fill="none" stroke="#e6e9ef" stroke-width="28" stroke-linecap="round" opacity="0.6" />
               <!-- Pointer -->
-              <circle cx="{px}" cy="{py}" r="18" fill="#fff" stroke="#b0b0b0" stroke-width="5" />
+              <circle cx="{px}" cy="{py}" r="14" fill="#fff" stroke="#f39c12" stroke-width="4" />
             </svg>
             <div class="fgx-center">
               <div class="value">{value}</div>
