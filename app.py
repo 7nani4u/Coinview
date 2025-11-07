@@ -6391,20 +6391,20 @@ with st.sidebar:
         
         html = f"""
         <style>
-          .fgx-card {{ position: relative; background:#fff; border-radius:18px; padding:16px 16px 30px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); margin-bottom:14px; min-height:320px; }}
-          .fgx-title {{ font-weight:800; font-size:20px; line-height:1.25; color:#1f1f1f; margin-bottom:8px; word-break:keep-all; }}
+          .fgx-card {{ position: relative; background:#fff; border-radius:18px; padding:16px 16px 34px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); margin-bottom:14px; min-height:330px; }}
+          .fgx-title {{ font-weight:800; font-size: clamp(22px, 4.2vw, 32px); line-height:1.25; color:#1f1f1f; margin-bottom:10px; word-break:keep-all; }}
           .fgx-gauge {{ position: relative; }}
-          .fgx-gauge svg {{ display:block; width:100%; height:auto; }}
-          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:124px; text-align:center; }}
-          .fgx-center .value {{ font-size:64px; font-weight:900; color:#222; line-height:1; }}
-          .fgx-center .badge {{ display:inline-block; margin-top:6px; padding:6px 12px; border-radius:999px; font-weight:700; font-size:13px; color:#fff; background:{badge_color}; }}
-          .fgx-label {{ position:absolute; font-weight:700; font-size:12px; color:#333; opacity:0.9; }}
+          .fgx-gauge svg {{ display:block; width:100%; height:auto; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.12)); }}
+          .fgx-center {{ position:absolute; left:50%; transform:translateX(-50%); top:120px; text-align:center; }}
+          .fgx-center .value {{ font-size: clamp(68px, 10vw, 96px); font-weight:900; color:#222; line-height:1; text-shadow: 0 3px 10px rgba(0,0,0,0.12); }}
+          .fgx-center .badge {{ display:inline-block; margin-top:8px; padding:7px 14px; border-radius:999px; font-weight:700; font-size: clamp(12px, 2.4vw, 16px); color:#fff; background:{badge_color}; }}
+          .fgx-label {{ position:absolute; font-weight:800; font-size: clamp(11px, 2.0vw, 16px); color:#333; opacity:0.95; text-shadow: 0 1px 1px rgba(255,255,255,0.4); }}
           /* 라벨을 게이지 컨테이너 기준으로 배치 */
-          .fgx-gauge .top-mid {{ left:50%; transform:translateX(-50%); top:12px; }}
-          .fgx-gauge .mid-left {{ left:74px; top:56px; }}
-          .fgx-gauge .mid-right {{ right:74px; top:56px; }}
-          .fgx-gauge .left-most {{ left:10px; bottom:10px; }}
-          .fgx-gauge .right-most {{ right:10px; bottom:10px; }}
+          .fgx-gauge .top-mid {{ left:50%; transform:translateX(-50%); top:18px; }}
+          .fgx-gauge .mid-left {{ left:72px; top:64px; }}
+          .fgx-gauge .mid-right {{ right:72px; top:64px; }}
+          .fgx-gauge .left-most {{ left:6px; bottom:8px; width:66px; text-align:center; line-height:1.1; }}
+          .fgx-gauge .right-most {{ right:6px; bottom:8px; width:66px; text-align:center; line-height:1.1; }}
         </style>
         <div class="fgx-card">
           <div class="fgx-title">가상자산 공포 / 탐욕지수</div>
@@ -6430,12 +6430,12 @@ with st.sidebar:
               <div class="value">{value}</div>
               <div class="badge">{label_kor}</div>
             </div>
-            <div class="fgx-label left-most">매우 공포</div>
+            <div class="fgx-label left-most">매우<br>공포</div>
             <div class="fgx-label mid-left">공포</div>
             <div class="fgx-label top-mid">중립</div>
             <div class="fgx-label mid-right">탐욕</div>
-            <div class="fgx-label right-most">매우 탐욕</div>
-          </div>
+            <div class="fgx-label right-most">매우<br>탐욕</div>
+        </div>
         </div>
         """
         return html
