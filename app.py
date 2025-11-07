@@ -6473,6 +6473,157 @@ with st.sidebar:
         """
         return html
     
+    # 사용자 제공 스타일의 게이지로 함수 재정의
+    def _render_fear_greed_gauge(value:int, classification:str): 
+        """스크린샷과 동일한 스타일의 반원형 게이지 렌더링""" 
+        import math 
+        
+        # 한국어 레이블 매핑 
+        korean_map = { 
+            'Extreme Fear': '매우 공포', 
+            'Fear': '공포', 
+            'Neutral': '중립', 
+            'Greed': '탐욕', 
+            'Extreme Greed': '매우 탐욕' 
+        } 
+        
+        # 색상 매핑 
+        color_map = { 
+            'Extreme Fear': '#ff0000', 
+            'Fear': '#ff6b35', 
+            'Neutral': '#f1c40f', 
+            'Greed': '#2ecc71', 
+            'Extreme Greed': '#00ff00' 
+        } 
+        
+        label_kor = korean_map.get(classification, classification) 
+        badge_color = color_map.get(classification, '#888') 
+        
+        # 게이지 기하값 설정 
+        W, H = 600, 300 
+        cx, cy, R = W/2, H-50, 180  # 중심, 반지름 
+        start_angle, end_angle = math.pi, 0  # 180도에서 0도까지 (반원) 
+        
+        # 현재 값에 따른 각도 계산 
+        current_angle = start_angle + (end_angle - start_angle) * (value / 100.0) 
+        
+        html = f""" 
+        <style> 
+            .fear-greed-container {{ 
+                position: relative; 
+                width: {W}px; 
+                height: {H}px; 
+                margin: 0 auto; 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', Arial, sans-serif; 
+            }} 
+            .fear-greed-title {{ 
+                text-align: center; 
+                font-size: 24px; 
+                font-weight: bold; 
+                margin-bottom: 20px; 
+                color: #333; 
+            }} 
+            .gauge-background {{ 
+                position: absolute; 
+                width: {2*R}px; 
+                height: {R}px; 
+                left: {(W-2*R)/2}px; 
+                top: 0; 
+                border-radius: {R}px {R}px 0 0; 
+                background: conic-gradient( 
+                    from 180deg at 50% 100%, 
+                    #ff0000 0%, 
+                    #ff6b35 25%, 
+                    #f1c40f 50%, 
+                    #2ecc71 75%, 
+                    #00ff00 100% 
+                ); 
+                overflow: hidden; 
+            }} 
+            .gauge-mask {{ 
+                position: absolute; 
+                width: {2*R-20}px; 
+                height: {R-10}px; 
+                left: {(W-2*R)/2 + 10}px; 
+                top: 10px; 
+                border-radius: {R-10}px {R-10}px 0 0; 
+                background: white; 
+            }} 
+            .gauge-value {{ 
+                position: absolute; 
+                top: 60px; 
+                left: 50%; 
+                transform: translateX(-50%); 
+                text-align: center; 
+            }} 
+            .gauge-number {{ 
+                font-size: 48px; 
+                font-weight: bold; 
+                color: #333; 
+            }} 
+            .gauge-label {{ 
+                font-size: 18px; 
+                color: {badge_color}; 
+                font-weight: bold; 
+                margin-top: 5px; 
+            }} 
+            .gauge-labels {{ 
+                position: absolute; 
+                bottom: 10px; 
+                width: 100%; 
+                display: flex; 
+                justify-content: space-between; 
+                padding: 0 20px; 
+                font-size: 14px; 
+                font-weight: bold; 
+                color: #666; 
+            }} 
+            .needle {{ 
+                position: absolute; 
+                width: 4px; 
+                height: {R-20}px; 
+                background: #333; 
+                bottom: 50px; 
+                left: 50%; 
+                transform-origin: bottom center; 
+                transform: translateX(-50%) rotate({current_angle}rad); 
+                border-radius: 2px 2px 0 0; 
+            }} 
+            .needle-dot {{ 
+                position: absolute; 
+                width: 12px; 
+                height: 12px; 
+                background: #333; 
+                border-radius: 50%; 
+                bottom: 50px; 
+                left: 50%; 
+                transform: translate(-50%, 50%); 
+            }} 
+        </style> 
+        
+        <div class="fear-greed-container"> 
+            <div class="fear-greed-title">가상자산 공포 / 탐욕지수</div> 
+            
+            <div class="gauge-background"></div> 
+            <div class="gauge-mask"></div> 
+            
+            <div class="needle"></div> 
+            <div class="needle-dot"></div> 
+            
+            <div class="gauge-value"> 
+                <div class="gauge-number">{value}</div> 
+                <div class="gauge-label">{label_kor}</div> 
+            </div> 
+            
+            <div class="gauge-labels"> 
+                <span>공포</span> 
+                <span>중립</span> 
+                <span>탐욕</span> 
+            </div> 
+        </div> 
+        """ 
+        return html 
+    
     st.markdown("### 😱 시장 심리")
     try:
         fg_data = get_fear_greed_index()
