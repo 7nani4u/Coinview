@@ -3167,6 +3167,10 @@ def calculate_binance_safe_leverage(
         var_pct = min(0.25, 1.65 * max(volatility, 1e-6))  # 최대 25% 캡
         safe_leverage_var = risk_per_trade_pct / var_pct
 
+        # VaR는 "강한 상한"으로 사용하지 않고 보수적 페널티로 반영
+        # VaRCap<1인 경우 권장 레버리지를 60~100% 범위로 완만히 축소
+        var_penalty = 0.6 + 0.4 * min(1.0, max(safe_leverage_var, 0.0))
+
         # 투자금 기반 증거금 목표 설정 (AI 신뢰도에 따라 동적)
         if margin_target is None:
             # 신뢰도 0~1 → 목표 50%~70%
@@ -3190,9 +3194,10 @@ def calculate_binance_safe_leverage(
         )['recommended']
 
         # 결합 상한
-        combined_cap = min(max_leverage, safe_leverage_liq, max(1.0, safe_leverage_var))
-        # 안전 상한(cap)을 지키면서, 증거금 목표를 충족하기 위한 하한(floor)을 만족
-        recommended_pre = min(combined_cap, heuristic)
+        # 상한은 청산/심볼 최대만 적용 (VaR는 보수적 페널티로만 반영)
+        combined_cap = min(max_leverage, safe_leverage_liq)
+        # 안전 상한(cap)을 지키면서, 증거금 목표(floor)와 VaR 페널티를 반영
+        recommended_pre = min(combined_cap, heuristic * var_penalty)
         recommended = max(leverage_floor_needed, recommended_pre)
         recommended = float(max(1.0, min(recommended, combined_cap)))
 
@@ -3219,7 +3224,7 @@ def calculate_binance_safe_leverage(
             f"투자금 {investment_amount:,.0f}USDT, 위험 {risk_per_trade_pct*100:.1f}%, SL {sl_drop_pct*100:.2f}% / "
             f"MMR {maintenance_margin_rate*100:.2f}% / Buffer {dynamic_buffer*100:.2f}% / VaR95 {var_pct*100:.2f}% → "
             f"증거금목표 {margin_target*100:.0f}% ⇒ Floor {leverage_floor_needed:.1f}x / "
-            f"LiqCap {safe_leverage_liq:.1f}x / VaRCap {safe_leverage_var:.1f}x / Heuristic {heuristic:.1f}x / "
+            f"LiqCap {safe_leverage_liq:.1f}x / VarPenalty {var_penalty*100:.0f}% / Heuristic {heuristic:.1f}x / "
             f"최종 {recommended:.1f}x (증거금 사용 {margin_usage_pct:.1f}%)"
         )
 
