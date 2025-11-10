@@ -264,7 +264,7 @@ except ImportError:
 # 1) Streamlit 페이지 설정
 # ────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="코인 AI 예측 시스템 v2.9.12",
+    page_title="코인 AI 예측 시스템 v2.11",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -6402,90 +6402,7 @@ initialize_session_history()
 initialize_dashboard_settings()
 
 with st.sidebar:
-    st.markdown("# 🚀 설정")
-    
-    # 디버깅 모드 옵션
-    st.session_state.debug_mode = st.checkbox(
-        "🐞 디버깅 모드",
-        value=st.session_state.get('debug_mode', False),
-        help="오류 상세 및 내부 로그를 표시합니다"
-    )
-    
-    # 대시보드 커스터마이징 설정
-    with st.expander("🎨 대시보드 커스터마이징", expanded=False):
-        st.markdown("### 레이아웃 선택")
-        layout_option = st.radio(
-            "표시 방식",
-            ["Standard (표준)", "Compact (간결)", "Detailed (상세)"],
-            index=0,
-            help="대시보드의 표시 방식을 선택하세요"
-        )
-        if layout_option == "Standard (표준)":
-            st.session_state.dashboard_layout = 'standard'
-        elif layout_option == "Compact (간결)":
-            st.session_state.dashboard_layout = 'compact'
-        else:
-            st.session_state.dashboard_layout = 'detailed'
-        
-        st.markdown("### 위젯 설정")
-        st.session_state.enabled_widgets['confidence'] = st.checkbox(
-            "🎯 신뢰도 카드",
-            value=st.session_state.enabled_widgets.get('confidence', True)
-        )
-        st.session_state.enabled_widgets['risk'] = st.checkbox(
-            "⚠️ 리스크 카드",
-            value=st.session_state.enabled_widgets.get('risk', True)
-        )
-        st.session_state.enabled_widgets['volume'] = st.checkbox(
-            "📊 거래량 카드",
-            value=st.session_state.enabled_widgets.get('volume', True)
-        )
-        st.session_state.enabled_widgets['portfolio'] = st.checkbox(
-            "💼 포트폴리오 카드",
-            value=st.session_state.enabled_widgets.get('portfolio', True)
-        )
-        st.session_state.enabled_widgets['history_chart'] = st.checkbox(
-            "📈 히스토리 차트",
-            value=st.session_state.enabled_widgets.get('history_chart', True)
-        )
-        st.session_state.enabled_widgets['detailed_analysis'] = st.checkbox(
-            "🎯 상세 분석",
-            value=st.session_state.enabled_widgets.get('detailed_analysis', True)
-        )
-        st.session_state.enabled_widgets['alerts'] = st.checkbox(
-            "🔔 알림",
-            value=st.session_state.enabled_widgets.get('alerts', True)
-        )
-        
-        st.markdown("### 테마 선택")
-        theme_option = st.selectbox(
-            "색상 테마",
-            ["Default (기본)", "Dark (어두움)", "Light (밝음)", "Colorful (다채로움)"],
-            index=0,
-            help="대시보드의 색상 테마를 선택하세요"
-        )
-        if theme_option == "Default (기본)":
-            st.session_state.dashboard_theme = 'default'
-        elif theme_option == "Dark (어두움)":
-            st.session_state.dashboard_theme = 'dark'
-        elif theme_option == "Light (밝음)":
-            st.session_state.dashboard_theme = 'light'
-        else:
-            st.session_state.dashboard_theme = 'colorful'
-    
-    st.markdown("---")
-    
-    # 캐시 새로고침 버튼
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        if st.button("🔄", help="데이터 캐시 새로고침"):
-            st.cache_data.clear()
-            st.success("✅ 캐시 클리어!")
-            st.rerun()
-    with col1:
-        st.caption("📈 데이터 캐싱 활성")
-    
-    st.markdown("---")
+    # 사이드바: 시장 심리 및 주요 설정 이외 항목만 유지
     
     # v2.6.0: Fear & Greed Index
     st.markdown("### 😱 시장 심리")
