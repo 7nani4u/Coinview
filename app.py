@@ -3122,6 +3122,7 @@ def calculate_binance_safe_leverage(
     side: str = 'LONG',
     maintenance_margin_rate: float = 0.005,
     liquidation_buffer: float = 0.005,
+    margin_target: float = None,
 ) -> dict:
     """
     Binance 선물(USDT-M) 기준 안전 레버리지 추천.
@@ -3166,7 +3167,23 @@ def calculate_binance_safe_leverage(
         var_pct = min(0.25, 1.65 * max(volatility, 1e-6))  # 최대 25% 캡
         safe_leverage_var = risk_per_trade_pct / var_pct
 
-        # 휴리스틱 권장 레버리지(기존 로직 활용) — 낮은 쪽으로 보수적 결합
+        # 투자금 기반 증거금 목표 설정 (AI 신뢰도에 따라 동적)
+        if margin_target is None:
+            # 신뢰도 0~1 → 목표 50%~70%
+            margin_target = 0.5 + 0.2 * conf_factor
+        margin_target = float(min(max(margin_target, 0.2), 0.9))
+
+        # 포지션 크기/가치 계산 (투자금과 손절 거리 기반)
+        sl_dist = max(abs(entry_price - stop_loss), 1e-8)
+        position_size = (investment_amount * risk_per_trade_pct) / sl_dist
+        position_value = position_size * entry_price
+
+        # 증거금 목표를 만족하기 위한 최소 필요 레버리지(하한)
+        # required_margin = position_value / leverage <= investment_amount * margin_target
+        # → leverage >= position_value / (investment_amount * margin_target)
+        leverage_floor_needed = position_value / max(investment_amount * margin_target, 1e-8)
+
+        # 휴리스틱 권장 레버리지(기존 로직 활용)
         atr_ratio = sl_drop_pct  # 손절 거리 비율을 ATR 비율 대용으로 사용
         heuristic = calculate_optimized_leverage(
             investment_amount, volatility, atr_ratio, ai_confidence, int(max_leverage)
@@ -3174,8 +3191,10 @@ def calculate_binance_safe_leverage(
 
         # 결합 상한
         combined_cap = min(max_leverage, safe_leverage_liq, max(1.0, safe_leverage_var))
-        recommended = min(combined_cap, heuristic)
-        recommended = float(max(1.0, min(recommended, max_leverage)))
+        # 안전 상한(cap)을 지키면서, 증거금 목표를 충족하기 위한 하한(floor)을 만족
+        recommended_pre = min(combined_cap, heuristic)
+        recommended = max(leverage_floor_needed, recommended_pre)
+        recommended = float(max(1.0, min(recommended, combined_cap)))
 
         # 최대값(권장 대비 20% 여유, 단 안전 상한 초과 금지)
         maximum = float(min(max_leverage, max(1.0, round(recommended * 1.2, 1)), combined_cap))
@@ -3192,17 +3211,26 @@ def calculate_binance_safe_leverage(
         else:
             risk_level = "매우 높음"
 
+        # 추천 레버리지에서의 필요 증거금
+        required_margin_at_recommended = position_value / max(recommended, 1e-8)
+        margin_usage_pct = (required_margin_at_recommended / investment_amount) * 100
+
         explain = (
-            f"SL {sl_drop_pct*100:.2f}% / MMR {maintenance_margin_rate*100:.2f}% / "
-            f"Buffer {dynamic_buffer*100:.2f}% / VaR95 {var_pct*100:.2f}% → "
-            f"LiqCap {safe_leverage_liq:.1f}x, VaRCap {safe_leverage_var:.1f}x, Heuristic {heuristic:.1f}x"
+            f"투자금 {investment_amount:,.0f}USDT, 위험 {risk_per_trade_pct*100:.1f}%, SL {sl_drop_pct*100:.2f}% / "
+            f"MMR {maintenance_margin_rate*100:.2f}% / Buffer {dynamic_buffer*100:.2f}% / VaR95 {var_pct*100:.2f}% → "
+            f"증거금목표 {margin_target*100:.0f}% ⇒ Floor {leverage_floor_needed:.1f}x / "
+            f"LiqCap {safe_leverage_liq:.1f}x / VaRCap {safe_leverage_var:.1f}x / Heuristic {heuristic:.1f}x / "
+            f"최종 {recommended:.1f}x (증거금 사용 {margin_usage_pct:.1f}%)"
         )
 
         return {
             'recommended': round(recommended, 1),
             'maximum': round(maximum, 1),
             'risk_level': risk_level,
-            'explain': explain
+            'explain': explain,
+            'margin_target': round(margin_target, 2),
+            'required_margin': round(required_margin_at_recommended, 2),
+            'position_value': round(position_value, 2)
         }
     except Exception as e:
         return {
@@ -5856,6 +5884,9 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
             </p>
             <p style="font-size:0.75rem; color:rgb(107,114,126); margin:6px 0 0 0; text-align:center;">
                 안전 기준: {leverage_info.get('explain', '')}
+            </p>
+            <p style="font-size:0.75rem; color:rgb(107,114,126); margin:4px 0 0 0; text-align:center;">
+                투자금 기준 증거금 목표: <strong>{int(leverage_info.get('margin_target', 0)*100)}%</strong>
             </p>
         </div>
         """, unsafe_allow_html=True)
