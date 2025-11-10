@@ -2824,17 +2824,6 @@ def recommend_position(ai_prediction: dict, current_price: float,
 def render_ai_prediction(ai_prediction: dict, current_price: float):
     """[추가됨] 🤖 AI 예측 결과 섹션"""
     st.markdown("<div class='section-title'>🤖 AI 예측 결과</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-            <div><strong>입력:</strong> 최근 가격·기술지표</div>
-            <div><strong>처리:</strong> 앙상블 모델 예측, 신호 가중 합산</div>
-            <div><strong>출력:</strong> 단기 추세(상승/하락/변동 없음), 신뢰도, 근거, 신호 강도</div>
-            <div><strong>검증:</strong> 신뢰도 범위(0–100), 예측 실패 시 중립 처리</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     
     col1, col2, col3 = st.columns(3)
     
@@ -5271,17 +5260,6 @@ def render_progress_bar(step: int, total: int = 6):
 def render_data_summary(df: pd.DataFrame, selected_crypto: str, interval_name: str):
     """데이터 요약"""
     st.markdown("<div class='section-title'>📊 데이터 개요</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-            <div><strong>입력:</strong> 선택 코인, 분해능</div>
-            <div><strong>처리:</strong> 가격 데이터 로드, 핵심 지표 계산</div>
-            <div><strong>출력:</strong> 현재가, 분석 기간, 평균 거래량, 최근 변동성</div>
-            <div><strong>검증:</strong> 데이터 길이/결측치 확인, 분해능 지원 여부</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     
     col1, col2, col3, col4 = st.columns(4)
     
@@ -5775,17 +5753,6 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
                            rr_ratio: float, investment_amount: float, position_rec: dict = None, current_status: dict = None):
     """매매 전략 (v2.3.0: 레버리지 표시 개선)"""
     st.markdown("<div class='section-title'>🎯 매매 전략</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-            <div><strong>입력:</strong> AI 추세·신뢰도, 현재가, 변동성</div>
-            <div><strong>처리:</strong> 포지션 추천, 손절/목표가 설정, 손익비 계산, 안전 레버리지 산출</div>
-            <div><strong>출력:</strong> 포지션/확률/리스크, 권장·최대 레버리지</div>
-            <div><strong>검증:</strong> 손절·목표가 방향 일치, RR Ratio>0, 레버리지 상·하한 충족</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     
     # 포지션 추천 카드 (맨 위에 표시)
     if position_rec is not None:
@@ -5955,17 +5922,6 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     # [개선됨] v2.9.0.1: 초보자 친화적 증거금 정보 표시
     st.markdown("---")
     st.markdown("### 💳 거래 자금 정보")
-    st.markdown(
-        """
-        <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-            <div><strong>입력:</strong> 포지션 크기, 권장 레버리지, 진입가, 투자금</div>
-            <div><strong>처리:</strong> 실제 거래 금액/필요 증거금/자금 사용률 계산</div>
-            <div><strong>출력:</strong> 거래 금액, 증거금, 사용률, 잔여 자금</div>
-            <div><strong>검증:</strong> 증거금 과다 사용 여부, 사용률 임계값(예: 10–30%)</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     st.caption("📌 레버리지를 사용하면 적은 자금으로 큰 거래가 가능합니다")
     
     position_value = position_size * entry_price
@@ -6084,17 +6040,6 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
                          entry_price: float, investment_amount: float):
     """🎲 Kelly Criterion 분석 결과 표시"""
     st.markdown("<div class='section-title'>🎲 Kelly Criterion 분석</div>", unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-            <div><strong>입력:</strong> AI 신뢰도, 손익비(RR), 투자금</div>
-            <div><strong>처리:</strong> Kelly 공식 적용, 공격/보수 포지션 산출</div>
-            <div><strong>출력:</strong> Full/반 Kelly, 최종 권장 포지션 비율</div>
-            <div><strong>검증:</strong> Kelly 비율이 0–25% 범위, RR>0 여부</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
     
     # 기본 정보
     col1, col2, col3 = st.columns(3)
