@@ -5413,9 +5413,10 @@ def render_ai_forecast(future_df: pd.DataFrame, hw_confidence: float):
             st.error("⚠️ 강한 하락 예상")
 
 
-def render_patterns(patterns: list):
+def render_patterns(patterns: list, show_header: bool = True):
     """패턴 분석 (개선된 레이아웃)"""
-    st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴</div>", unsafe_allow_html=True)
+    if show_header:
+        st.markdown("<div class='section-title'>🕯️ 캔들스틱 패턴</div>", unsafe_allow_html=True)
     
     if not patterns:
         st.info("최근 주요 패턴이 감지되지 않았습니다.")
@@ -5896,17 +5897,6 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     
     with col1:
         st.markdown("### 📍 진입 설정")
-        st.markdown(
-            """
-            <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-                <div><strong>입력:</strong> 진입가, 손절가, 목표가, 권장 레버리지</div>
-                <div><strong>처리:</strong> 포지션 크기/증거금/자금 사용률 계산</div>
-                <div><strong>출력:</strong> 권장·최대 레버리지, 포지션 크기, 진입가</div>
-                <div><strong>검증:</strong> 증거금이 투자금 내, 자금 사용률 과도 여부</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         # [수정됨] v2.3.0: 권장/최대 레버리지 분리 표시
         st.markdown(f"""
         <div style="background-color:#F8F9FA; border-radius:12px; padding:16px; box-shadow:0 4px 6px rgba(0,0,0,0.1); margin-bottom:16px;">
@@ -5932,34 +5922,12 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
     
     with col2:
         st.markdown("### 🛑 리스크 관리")
-        st.markdown(
-            """
-            <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-                <div><strong>입력:</strong> 투자금, 예상 손실</div>
-                <div><strong>처리:</strong> 실제 리스크% 산출</div>
-                <div><strong>출력:</strong> 리스크 경고/주의/정상 메시지</div>
-                <div><strong>검증:</strong> 리스크 허용치(예: 1–3%) 초과 여부</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         st.metric(label="손절가", value=f"${stop_loss:,.2f}")
         st.metric(label="목표가", value=f"${take_profit:,.2f}")
         st.metric(label="RR Ratio", value=f"{rr_ratio:.2f}")
-    
+
     with col3:
         st.markdown("### 💰 예상 손익")
-        st.markdown(
-            """
-            <div style="background:#F8F9FA;border:1px solid #e6eaf1;border-radius:8px;padding:10px;margin-bottom:10px;color:#6b7280;font-size:0.85rem;">
-                <div><strong>입력:</strong> 포지션 크기, 진입·손절·목표가</div>
-                <div><strong>처리:</strong> 기대 수익/손실 및 투자금 대비 비율 계산</div>
-                <div><strong>출력:</strong> 목표 수익, 최대 손실, 수익/손실 비율</div>
-                <div><strong>검증:</strong> 손실 계산이 손절가 기준으로 올바른지</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
         expected_profit = position_size * (take_profit - entry_price)
         expected_loss = position_size * (entry_price - stop_loss)
         
@@ -6357,8 +6325,8 @@ def render_portfolio_backtest(price_data_df, symbol_name):
     # 포트폴리오 가치 추이 및 코인별 성과 섹션 삭제됨
 
 
-def render_technical_indicators(df: pd.DataFrame):
-    """기술적 지표"""
+def render_technical_indicators(df: pd.DataFrame, patterns: list = None):
+    """기술적 지표 (캔들스틱 패턴 통합)"""
     st.markdown("<div class='section-title'>📈 기술적 지표</div>", unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
@@ -6424,6 +6392,11 @@ def render_technical_indicators(df: pd.DataFrame):
             </div>
         """, unsafe_allow_html=True)
 
+    # 캔들스틱 패턴 통합 표시 (있을 경우)
+    if patterns is not None:
+        st.markdown("<div class='sub-section-title'>🕯️ 캔들스틱 패턴</div>", unsafe_allow_html=True)
+        render_patterns(patterns, show_header=False)
+
 
 def render_optimized_prediction_sequence(
     df: pd.DataFrame,
@@ -6464,12 +6437,10 @@ def render_optimized_prediction_sequence(
                             rr_ratio, investment_amount, position_rec, exit_strategy['current_status'])
     # 4) 리스크 분석 (Kelly)
     render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
-    # 5) 캔들스틱 패턴
-    render_patterns(patterns)
+    # 5) 기술적 지표 + 캔들스틱 패턴(통합)
+    render_technical_indicators(df, patterns)
     # 6) 매도 시점 예측
     render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
-    # 7) 기술적 지표
-    render_technical_indicators(df)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -7201,8 +7172,7 @@ if bt:
             df, entry_price, atr, investment_amount, leverage_info['recommended'], interval
         )
         
-        # 안전 레버리지 근거 표시
-        st.info(f"🔒 안전 레버리지 근거: {leverage_info.get('explain', '')}")
+        # 안전 레버리지 상세 설명은 UI 간소화를 위해 숨김 처리
         
         # 최적 순서로 핵심 결과 렌더링 (포지션 추천 포함)
         render_optimized_prediction_sequence(
