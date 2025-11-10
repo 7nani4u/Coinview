@@ -2726,7 +2726,7 @@ def predict_trend_with_ai(df: pd.DataFrame, current_price: float,
         trend_kr = '하락'
     else:
         trend = 'neutral'
-        trend_kr = '보합'
+        trend_kr = '변동 없음'
     
     # 신뢰도 계산
     confidence = min(abs(weighted_signal) * 100, 100)
@@ -5887,12 +5887,7 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
             <p style="font-size:0.75rem; color:rgb(107,114,126); margin:8px 0 0 0; text-align:center;">
                 리스크 레벨: <strong>{leverage_info['risk_level']}</strong>
             </p>
-            <p style="font-size:0.75rem; color:rgb(107,114,126); margin:6px 0 0 0; text-align:center;">
-                안전 기준: {leverage_info.get('explain', '')}
-            </p>
-            <p style="font-size:0.75rem; color:rgb(107,114,126); margin:4px 0 0 0; text-align:center;">
-                투자금 기준 증거금 목표: <strong>{int(leverage_info.get('margin_target', 0)*100)}%</strong>
-            </p>
+            
         </div>
         """, unsafe_allow_html=True)
         st.metric(label="진입가", value=f"${entry_price:,.2f}")
@@ -6053,7 +6048,7 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
     st.markdown("<div class='section-title'>🎲 Kelly Criterion 분석</div>", unsafe_allow_html=True)
     
     # 기본 정보
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric(
@@ -6076,21 +6071,7 @@ def render_kelly_analysis(kelly_result: dict, current_position_size: float,
             help="최대치 제한 적용 후"
         )
     
-    with col4:
-        category_emoji = {
-            '매우 보수적': '🛡️',
-            '중립적': '⚖️',
-            '공격적': '🚀',
-            '매우 공격적': '🔥',
-            '거래 제외': '⛔',
-            '기대값 음수': '❌',
-            '비정상': '⚠️'
-        }
-        emoji = category_emoji.get(kelly_result['risk_category'], '📊')
-        st.metric(
-            label="리스크 카테고리",
-            value=f"{emoji} {kelly_result['risk_category']}"
-        )
+    # 리스크 카테고리 표시는 요청에 따라 제거됨
     
     # Kelly 결과 해석
     if kelly_result['recommendation'] == 'TRADE':
