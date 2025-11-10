@@ -7025,14 +7025,6 @@ if bt:
             macd=macd,
             macd_signal=macd_signal
         )
-        
-        # Kelly Criterion 계산
-        kelly_result = calculate_kelly_criterion(
-            ai_confidence=ai_prediction['confidence'],
-            rr_ratio=rr_ratio,
-            kelly_fraction=0.5
-        )
-        
         # ─────────────────────────────────────────────────────────────
         # AI 포지션 추천 기반으로 Stop Loss/Take Profit/레버리지 재계산
         # ─────────────────────────────────────────────────────────────
@@ -7075,6 +7067,13 @@ if bt:
             st.warning("⚠️ Stop Loss 거리가 너무 작아 1%로 조정되었습니다.")
         position_size = risk_amount / stop_loss_distance
         rr_ratio = calculate_rr_ratio(entry_price, take_profit, stop_loss)
+        
+        # Kelly Criterion 계산 (RR Ratio 계산 이후로 이동)
+        kelly_result = calculate_kelly_criterion(
+            ai_confidence=ai_prediction['confidence'],
+            rr_ratio=rr_ratio,
+            kelly_fraction=0.5
+        )
         
         # Binance 안전 레버리지 계산 (청산/VAR/AI/손익비 반영)
         leverage_info = calculate_binance_safe_leverage(
