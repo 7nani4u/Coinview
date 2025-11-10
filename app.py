@@ -3110,6 +3110,109 @@ def calculate_optimized_leverage(investment_amount: float, volatility: float,
     }
 
 
+def calculate_binance_safe_leverage(
+    investment_amount: float,
+    entry_price: float,
+    stop_loss: float,
+    volatility: float,
+    ai_confidence: float,
+    rr_ratio: float,
+    max_leverage: int,
+    risk_per_trade_pct: float,
+    side: str = 'LONG',
+    maintenance_margin_rate: float = 0.005,
+    liquidation_buffer: float = 0.005,
+) -> dict:
+    """
+    Binance 선물(USDT-M) 기준 안전 레버리지 추천.
+
+    원칙:
+    - 청산가가 손절가보다 충분히 멀도록 최대 레버리지 상한을 제한
+    - 변동성 기반 VaR(95%)로 손실 한도(risk_per_trade_pct)를 초과하지 않도록 제한
+    - AI 신뢰도/손익비를 고려해 보수/공격 정도를 자동 조절
+
+    Returns:
+        dict: {
+            'recommended': float,
+            'maximum': float,
+            'risk_level': str,
+            'explain': str
+        }
+    """
+    try:
+        # 입력 방어
+        entry_price = float(entry_price)
+        stop_loss = float(stop_loss)
+        volatility = float(volatility)
+        ai_confidence = float(ai_confidence)
+        rr_ratio = float(rr_ratio)
+        max_leverage = float(max(max_leverage, 1))
+        risk_per_trade_pct = float(max(risk_per_trade_pct, 0.001))  # 최소 0.1%
+
+        # 손절 거리(%)
+        sl_drop_pct = abs(entry_price - stop_loss) / max(entry_price, 1e-8)
+
+        # AI 신뢰도에 따라 청산 버퍼 가중 (신뢰 낮을수록 버퍼↑)
+        conf_factor = max(0.0, min(ai_confidence / 100.0, 1.0))
+        dynamic_buffer = liquidation_buffer + (1.0 - conf_factor) * 0.01
+
+        # 방향에 따른 청산 한계 근사치
+        # 단순 근사: 청산까지 가격 변화 비율 ≈ 1/leverage - mmr
+        # 안전 조건: sl_drop_pct < 1/leverage - mmr - buffer
+        denom = sl_drop_pct + maintenance_margin_rate + dynamic_buffer
+        safe_leverage_liq = 1.0 / max(denom, 1e-6)
+
+        # 95% VaR 기반 상한 (정규 근사): z=1.65
+        var_pct = min(0.25, 1.65 * max(volatility, 1e-6))  # 최대 25% 캡
+        safe_leverage_var = risk_per_trade_pct / var_pct
+
+        # 휴리스틱 권장 레버리지(기존 로직 활용) — 낮은 쪽으로 보수적 결합
+        atr_ratio = sl_drop_pct  # 손절 거리 비율을 ATR 비율 대용으로 사용
+        heuristic = calculate_optimized_leverage(
+            investment_amount, volatility, atr_ratio, ai_confidence, int(max_leverage)
+        )['recommended']
+
+        # 결합 상한
+        combined_cap = min(max_leverage, safe_leverage_liq, max(1.0, safe_leverage_var))
+        recommended = min(combined_cap, heuristic)
+        recommended = float(max(1.0, min(recommended, max_leverage)))
+
+        # 최대값(권장 대비 20% 여유, 단 안전 상한 초과 금지)
+        maximum = float(min(max_leverage, max(1.0, round(recommended * 1.2, 1)), combined_cap))
+
+        # 리스크 레벨 분류
+        if recommended <= 2:
+            risk_level = "매우 낮음"
+        elif recommended <= 5:
+            risk_level = "낮음"
+        elif recommended <= 10:
+            risk_level = "중간"
+        elif recommended <= 20:
+            risk_level = "높음"
+        else:
+            risk_level = "매우 높음"
+
+        explain = (
+            f"SL {sl_drop_pct*100:.2f}% / MMR {maintenance_margin_rate*100:.2f}% / "
+            f"Buffer {dynamic_buffer*100:.2f}% / VaR95 {var_pct*100:.2f}% → "
+            f"LiqCap {safe_leverage_liq:.1f}x, VaRCap {safe_leverage_var:.1f}x, Heuristic {heuristic:.1f}x"
+        )
+
+        return {
+            'recommended': round(recommended, 1),
+            'maximum': round(maximum, 1),
+            'risk_level': risk_level,
+            'explain': explain
+        }
+    except Exception as e:
+        return {
+            'recommended': 1.0,
+            'maximum': min(float(max_leverage), 2.0),
+            'risk_level': 'Unknown',
+            'explain': f'레버리지 계산 오류: {str(e)}'
+        }
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -5751,6 +5854,9 @@ def render_trading_strategy(current_price: float, leverage_info: dict, entry_pri
             <p style="font-size:0.75rem; color:rgb(107,114,126); margin:8px 0 0 0; text-align:center;">
                 리스크 레벨: <strong>{leverage_info['risk_level']}</strong>
             </p>
+            <p style="font-size:0.75rem; color:rgb(107,114,126); margin:6px 0 0 0; text-align:center;">
+                안전 기준: {leverage_info.get('explain', '')}
+            </p>
         </div>
         """, unsafe_allow_html=True)
         st.metric(label="진입가", value=f"${entry_price:,.2f}")
@@ -6889,76 +6995,8 @@ if bt:
         
         hw_confidence = 75.0
         
-        # [수정됨] v2.3.0: 레버리지 정보를 딕셔너리로 받음
-        leverage_info = calculate_optimized_leverage(
-            investment_amount=investment_amount,
-            volatility=volatility,
-            atr_ratio=atr_ratio,
-            confidence=hw_confidence,
-            max_leverage=leverage_ceiling,
-            crypto_name=selected_crypto  # [추가됨] 코인 이름 전달
-        )
-        
+        # 진입가만 먼저 설정하고, Stop Loss/레버리지는 AI 예측 후 계산합니다
         entry_price = current_price
-        
-        # [추가됨] v2.7.2: AI 예측 먼저 실행하여 포지션 타입 결정
-        # (AI 예측 코드는 아래에서 실행되지만, 여기서는 임시로 LONG 가정)
-        # 실제로는 AI 예측 후 다시 계산해야 함
-        position_type = 'LONG'  # 기본값, AI 예측 후 업데이트
-        
-        # [수정됨] v2.7.2: 롱/숏 구분하여 Stop Loss & Take Profit 계산
-        if position_type == 'LONG':
-            stop_loss = entry_price - (atr * stop_loss_k)
-            take_profit = entry_price + (atr * stop_loss_k * 2)
-        else:  # SHORT
-            stop_loss = entry_price + (atr * stop_loss_k)
-            take_profit = entry_price - (atr * stop_loss_k * 2)
-        
-        # [추가됨] v2.7.2: 가격 유효성 검증
-        if position_type == 'LONG':
-            if stop_loss >= entry_price:
-                stop_loss = entry_price * 0.95  # 5% 아래로 강제 조정
-                st.warning("⚠️ Stop Loss가 진입가보다 높아 5% 아래로 조정되었습니다.")
-            if take_profit <= entry_price:
-                take_profit = entry_price * 1.10  # 10% 위로 강제 조정
-        else:  # SHORT
-            if stop_loss <= entry_price:
-                stop_loss = entry_price * 1.05  # 5% 위로 강제 조정
-                st.warning("⚠️ Stop Loss가 진입가보다 낮아 5% 위로 조정되었습니다.")
-            if take_profit >= entry_price:
-                take_profit = entry_price * 0.90  # 10% 아래로 강제 조정
-        
-        # [수정됨] v2.7.2: Position Size 계산 오류 수정 (CRITICAL FIX)
-        # 기존: (risk_amount * leverage) / stop_loss_distance → 레버리지만큼 리스크 증폭 ❌
-        # 수정: risk_amount / stop_loss_distance → 레버리지는 증거금에만 영향 ✓
-        risk_amount = investment_amount * risk_per_trade_pct
-        stop_loss_distance = abs(entry_price - stop_loss)
-        
-        # [추가됨] v2.7.2: 0 나누기 보호
-        if stop_loss_distance < entry_price * 0.001:  # 0.1% 최소값
-            stop_loss_distance = entry_price * 0.01  # 1%로 조정
-            st.warning("⚠️ Stop Loss 거리가 너무 작아 1%로 조정되었습니다.")
-        
-        # 올바른 Position Size 공식 (Fixed Fractional Method)
-        position_size = risk_amount / stop_loss_distance
-        
-        # [추가됨] v2.7.2: 필요 증거금 계산
-        position_value = position_size * entry_price
-        required_margin = position_value / leverage_info['recommended']
-        
-        # [추가됨] v2.7.2: 증거금 부족 체크
-        if required_margin > investment_amount:
-            st.error(f"❌ 증거금 부족: ${required_margin:,.2f} 필요 (보유: ${investment_amount:,.2f})")
-            # 사용 가능한 최대 포지션으로 조정
-            position_size = (investment_amount * leverage_info['recommended']) / entry_price
-            position_value = position_size * entry_price
-            required_margin = investment_amount
-            st.info(f"→ 포지션 크기를 {position_size:.6f} 코인으로 조정합니다.")
-        
-        rr_ratio = calculate_rr_ratio(entry_price, take_profit, stop_loss)
-        
-        # 매도 전략 계산 (interval 파라미터 추가)
-        exit_strategy = calculate_exit_strategy(df, entry_price, atr, investment_amount, leverage_info['recommended'], interval)
         
         progress_placeholder.empty()
         status_text.empty()
@@ -6995,6 +7033,80 @@ if bt:
             kelly_fraction=0.5
         )
         
+        # ─────────────────────────────────────────────────────────────
+        # AI 포지션 추천 기반으로 Stop Loss/Take Profit/레버리지 재계산
+        # ─────────────────────────────────────────────────────────────
+        position_rec = recommend_position(
+            ai_prediction=ai_prediction,
+            current_price=current_price,
+            stop_loss=current_price - atr * stop_loss_k,  # 임시 값 (롱 기준)
+            take_profit=current_price + atr * stop_loss_k * 2,
+            volatility=volatility
+        )
+        side = position_rec['position']  # LONG/SHORT/NEUTRAL
+        
+        # 포지션 방향에 따른 Stop Loss/Take Profit 확정
+        if side == 'SHORT':
+            stop_loss = entry_price + (atr * stop_loss_k)
+            take_profit = entry_price - (atr * stop_loss_k * 2)
+        else:  # LONG 또는 관망시 기본 LONG 기준
+            stop_loss = entry_price - (atr * stop_loss_k)
+            take_profit = entry_price + (atr * stop_loss_k * 2)
+        
+        # 가격 유효성 검증
+        if side == 'SHORT':
+            if stop_loss <= entry_price:
+                stop_loss = entry_price * 1.05
+                st.warning("⚠️ Stop Loss가 진입가보다 낮아 5% 위로 조정되었습니다.")
+            if take_profit >= entry_price:
+                take_profit = entry_price * 0.90
+        else:
+            if stop_loss >= entry_price:
+                stop_loss = entry_price * 0.95
+                st.warning("⚠️ Stop Loss가 진입가보다 높아 5% 아래로 조정되었습니다.")
+            if take_profit <= entry_price:
+                take_profit = entry_price * 1.10
+        
+        # 포지션 크기 및 RR 재계산
+        risk_amount = investment_amount * risk_per_trade_pct
+        stop_loss_distance = abs(entry_price - stop_loss)
+        if stop_loss_distance < entry_price * 0.001:
+            stop_loss_distance = entry_price * 0.01
+            st.warning("⚠️ Stop Loss 거리가 너무 작아 1%로 조정되었습니다.")
+        position_size = risk_amount / stop_loss_distance
+        rr_ratio = calculate_rr_ratio(entry_price, take_profit, stop_loss)
+        
+        # Binance 안전 레버리지 계산 (청산/VAR/AI/손익비 반영)
+        leverage_info = calculate_binance_safe_leverage(
+            investment_amount=investment_amount,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            volatility=volatility,
+            ai_confidence=ai_prediction['confidence'],
+            rr_ratio=rr_ratio,
+            max_leverage=leverage_ceiling,
+            risk_per_trade_pct=risk_per_trade_pct,
+            side=side
+        )
+        
+        # 필요 증거금 검증 및 조정
+        position_value = position_size * entry_price
+        required_margin = position_value / max(leverage_info['recommended'], 1e-6)
+        if required_margin > investment_amount:
+            st.error(f"❌ 증거금 부족: ${required_margin:,.2f} 필요 (보유: ${investment_amount:,.2f})")
+            position_size = (investment_amount * leverage_info['recommended']) / entry_price
+            position_value = position_size * entry_price
+            required_margin = investment_amount
+            st.info(f"→ 포지션 크기를 {position_size:.6f} 코인으로 조정합니다.")
+        
+        # 매도 전략 재계산
+        exit_strategy = calculate_exit_strategy(
+            df, entry_price, atr, investment_amount, leverage_info['recommended'], interval
+        )
+        
+        # 안전 레버리지 근거 표시
+        st.info(f"🔒 안전 레버리지 근거: {leverage_info.get('explain', '')}")
+        
         # 최적 순서로 핵심 결과 렌더링 (포지션 추천 포함)
         render_optimized_prediction_sequence(
             df=df,
@@ -7012,6 +7124,7 @@ if bt:
             kelly_result=kelly_result,
             patterns=patterns,
             exit_strategy=exit_strategy,
+            position_rec=position_rec,
             volatility=volatility
         )
         
