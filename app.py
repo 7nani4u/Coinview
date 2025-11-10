@@ -6437,9 +6437,15 @@ def render_optimized_prediction_sequence(
                             rr_ratio, investment_amount, position_rec, exit_strategy['current_status'])
     # 4) 리스크 분석 (Kelly)
     render_kelly_analysis(kelly_result, position_size, entry_price, investment_amount)
-    # 5) 기술적 지표 + 캔들스틱 패턴(통합)
-    render_technical_indicators(df, patterns)
-    # 6) 매도 시점 예측
+    # 5) 기술적 지표
+    render_technical_indicators(df, None)
+    # 6) 🕯️ 캔들스틱 패턴 (별도 표시)
+    try:
+        if patterns is not None:
+            render_patterns(patterns, show_header=True)
+    except Exception as e:
+        st.warning(f"캔들스틱 패턴 표시 중 오류: {e}")
+    # 7) 매도 시점 예측 (섹션 내에 🎯 매도 시나리오 포함)
     render_exit_strategy(exit_strategy, entry_price, investment_amount, leverage_info['recommended'])
 
 
