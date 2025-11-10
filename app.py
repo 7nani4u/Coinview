@@ -737,48 +737,6 @@ def coingecko_to_yfinance_symbol(coin_symbol: str, coin_id: str) -> str:
     return out
 
 
-def normalize_direct_input_to_yf(query: str) -> str | None:
-    """사용자 자유 입력을 신뢰성 있게 yfinance 형식으로 변환합니다.
-
-    허용 입력 예시:
-    - btcusdt, BTCUSDT, btc-usdt, btc/usdt, btc usd
-    - ethusd, eth-usd, eth/usd
-    - 단일 심볼: btc, eth, xrp (자동으로 -USD 접미사 부여)
-
-    반환:
-    - 정상 변환 시 'SYM-USD' 문자열
-    - 변환 불가 시 None
-    """
-    if not query:
-        return None
-    import re
-    s = query.strip().lower()
-    # 구분자 제거 및 소문자 정규화
-    s = re.sub(r"[\s\-_/]+", "", s)
-
-    # 접미사(usdt|usd) 있는 경우 우선 처리
-    m = re.match(r"^([a-z0-9]+?)(usdt|usd)$", s)
-    if m:
-        base = m.group(1).upper()
-        try:
-            return coingecko_to_yfinance_symbol(base, None)
-        except Exception:
-            # 기본 규칙으로 폴백
-            return f"{base}-USD" if base else None
-
-    # 접미사가 없으면 단일 심볼로 간주
-    base = s.upper()
-    if not base:
-        return None
-    # 길이가 7자 이상이고 숫자가 없으면 '이름'일 가능성 높음 → 검색으로 위임
-    if len(base) >= 7 and not any(ch.isdigit() for ch in base):
-        return None
-    try:
-        return coingecko_to_yfinance_symbol(base, None)
-    except Exception:
-        return f"{base}-USD"
-
-
 
 # ============================================================================
 # v2.9.11: 히스토리 추적 및 대시보드
@@ -6559,26 +6517,36 @@ with st.sidebar:
         search_query = st.text_input(
             "🔍 코인 검색 또는 심볼 직접 입력",
             key='coingecko_search',
-            placeholder="예: Bitcoin, Ethereum, btcusdt, eth/usdt, xrp usd",
-            help="코인 이름으로 검색하거나 거래소 형식의 심볼을 직접 입력하세요 (예: btcusdt, eth/usdt)"
+            placeholder="예: Bitcoin, Ethereum, ontusdt, btcusdt, ethusdt",
+            help="코인 이름으로 검색하거나 거래소 형식의 심볼을 직접 입력하세요 (예: ontusdt)"
         )
-
-        # 1) 자유 입력을 우선 정규화 시도
-        normalized_yf = None
-        if search_query:
-            normalized_yf = normalize_direct_input_to_yf(search_query)
-            if normalized_yf:
-                st.session_state.selected_crypto = normalized_yf
-                st.session_state.coin_input_method = "직접 입력"  # 선택 고정
-                st.success(f"✅ 선택됨: `{search_query}` → `{normalized_yf}`")
+        
+        # 심볼 직접 입력 확인 (USDT 포함 여부로 판단)
+        if search_query and ('usdt' in search_query.lower() or 'usd' in search_query.lower()):
+            # 입력값 정리 (소문자 변환, 공백 제거)
+            clean_symbol = search_query.lower().strip()
+            
+            # USDT/USD 확인 및 처리
+            if 'usdt' in clean_symbol:
+                # 심볼에서 USDT 제거하고 yfinance 형식으로 변환
+                base_symbol = clean_symbol.replace('usdt', '').upper()
+                yf_symbol = f"{base_symbol}-USD"
             else:
-                st.info("ℹ️ 심볼 직접 변환 실패: CoinGecko 검색으로 전환합니다.")
-
-        # 2) CoinGecko 이름 검색 (직접 변환 실패 또는 일반 텍스트)
-        if search_query and not normalized_yf:
+                # USD가 있는 경우
+                base_symbol = clean_symbol.replace('usd', '').upper()
+                yf_symbol = f"{base_symbol}-USD"
+            
+            # 세션 상태 업데이트
+            st.session_state.selected_crypto = yf_symbol
+            
+            st.success(f"✅ 선택됨: **{clean_symbol.upper()}** → `{yf_symbol}`")
+        
+        # 일반 검색어 처리 (CoinGecko API 사용)
+        elif search_query:
+            # CoinGecko 코인 목록 로드 (1시간 캐싱)
             with st.spinner("🔎 CoinGecko에서 코인 목록 로딩 중..."):
                 all_coins = get_all_coins_from_coingecko()
-
+            
             if not all_coins:
                 st.error("❌ CoinGecko API 로드 실패. 기본 목록을 사용하세요.")
                 st.session_state.selected_crypto = "BTC-USD"
@@ -6588,11 +6556,11 @@ with st.sidebar:
                     coin for coin in all_coins
                     if search_lower in coin[0].lower()
                 ][:200]
-
+                
                 if filtered_coins:
                     cap_text = "(상위 200개)"
                     st.caption(f"📊 검색 결과: {len(filtered_coins)}개 코인 {cap_text}")
-
+                    
                     # 현재 선택된 코인 찾기
                     current_index = 0
                     if hasattr(st.session_state, 'selected_coingecko_coin'):
@@ -6600,60 +6568,68 @@ with st.sidebar:
                             if coin[1] == st.session_state.selected_coingecko_coin:
                                 current_index = idx
                                 break
-
+                    
+                    # 선택 박스
                     selected_display = st.selectbox(
                         "💎 코인 선택",
                         options=[coin[0] for coin in filtered_coins],
                         index=current_index,
                         key="coingecko_coin_select"
                     )
-
+                    
+                    # 선택된 코인 정보 추출
                     for coin in filtered_coins:
                         if coin[0] == selected_display:
                             display_name, coin_id, coin_symbol = coin
                             st.session_state.selected_coingecko_coin = coin_id
+                            
+                            # yfinance 심볼로 변환
                             yf_symbol = coingecko_to_yfinance_symbol(coin_symbol, coin_id)
                             st.session_state.selected_crypto = yf_symbol
-                            st.session_state.coin_input_method = "직접 입력"  # 선택 고정
+                            
                             st.success(f"✅ 선택됨: **{display_name}** → `{yf_symbol}`")
                             break
                 else:
                     st.warning("⚠️ 검색 결과가 없습니다. 다른 검색어를 시도해보세요.")
                     if not hasattr(st.session_state, 'selected_crypto'):
                         st.session_state.selected_crypto = "BTC-USD"
-                        st.session_state.coin_input_method = "직접 입력"
-
-        # 3) 검색어가 없을 때 상위 목록 제공
-        if not search_query:
+        else:
+            # 검색어 없을 때 CoinGecko 상위 코인 표시
             with st.spinner("🔎 CoinGecko에서 코인 목록 로딩 중..."):
                 all_coins = get_all_coins_from_coingecko()
-
+            
             if all_coins:
+                # 검색어 없으면 상위 100개만 표시
                 filtered_coins = all_coins[:100]
                 cap_text = "(상위 100개)"
                 st.caption(f"📊 인기 코인: {len(filtered_coins)}개 코인 {cap_text}")
-
+                
+                # 현재 선택된 코인 찾기
                 current_index = 0
                 if hasattr(st.session_state, 'selected_coingecko_coin'):
                     for idx, coin in enumerate(filtered_coins):
                         if coin[1] == st.session_state.selected_coingecko_coin:
                             current_index = idx
                             break
-
+                
+                # 선택 박스
                 selected_display = st.selectbox(
                     "💎 코인 선택",
                     options=[coin[0] for coin in filtered_coins],
                     index=current_index,
                     key="coingecko_coin_select"
                 )
-
+                
+                # 선택된 코인 정보 추출
                 for coin in filtered_coins:
                     if coin[0] == selected_display:
                         display_name, coin_id, coin_symbol = coin
                         st.session_state.selected_coingecko_coin = coin_id
+                        
+                        # yfinance 심볼로 변환
                         yf_symbol = coingecko_to_yfinance_symbol(coin_symbol, coin_id)
                         st.session_state.selected_crypto = yf_symbol
-                        st.session_state.coin_input_method = "직접 입력"  # 선택 고정
+                        
                         st.success(f"✅ 선택됨: **{display_name}** → `{yf_symbol}`")
                         break
     
@@ -6736,7 +6712,7 @@ with st.sidebar:
 
     # 세션 상태에 투자 금액 저장
     if 'investment_amount' not in st.session_state:
-        st.session_state.investment_amount = 700
+        st.session_state.investment_amount = 1000.0
     
     investment_amount = st.number_input(
         "💰 투자 금액 (USDT)",
