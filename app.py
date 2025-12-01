@@ -1642,7 +1642,7 @@ def get_fear_greed_index(limit=30):
         return None
 
 
-def create_fear_greed_gauge(value, title="Fear & Greed Index"):
+def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
     """
     Fear & Greed Index Gauge 차트 생성 (첨부 스크린샷 스타일)
     
@@ -1658,39 +1658,50 @@ def create_fear_greed_gauge(value, title="Fear & Greed Index"):
     plotly.graph_objects.Figure
     """
     
-    # 한글 라벨
+    # 한글 라벨 및 색상 (5단계)
     if value <= 25:
-        label_text = "매우 공포"
+        label_text = "매우<br>공포"
         label_color = "#FF4444"
+        bar_color = "#FF4444"
     elif value <= 45:
         label_text = "공포"
         label_color = "#FF8800"
+        bar_color = "#FF8800"
     elif value <= 55:
         label_text = "중립"
         label_color = "#FFDD00"
+        bar_color = "#FFDD00"
     elif value <= 75:
         label_text = "탐욕"
         label_color = "#88DD00"
+        bar_color = "#88DD00"
     else:
-        label_text = "매우 탐욕"
+        label_text = "매우<br>탐욕"
         label_color = "#00DD44"
+        bar_color = "#00DD44"
     
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
         domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': f"<b>{title}</b><br><span style='font-size:0.8em; color:gray;'>종립</span>", 
-               'font': {'size': 16, 'family': 'Arial, sans-serif'}},
-        number={'font': {'size': 60, 'family': 'Arial Black, sans-serif'}, 
+        title={'text': f"<b style='font-size:14px;'>{title}</b><br><span style='font-size:11px; color:#888888;'>종립</span>", 
+               'font': {'size': 14, 'family': 'Malgun Gothic, Arial, sans-serif'}},
+        number={'font': {'size': 50, 'family': 'Arial Black, sans-serif', 'color': '#333333'}, 
                 'suffix': ""},
         gauge={
-            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkgray", 
-                     'tickmode': 'linear', 'tick0': 0, 'dtick': 25,
-                     'tickfont': {'size': 11}},
-            'bar': {'color': label_color, 'thickness': 0.3},
+            'axis': {
+                'range': [None, 100], 
+                'tickwidth': 1, 
+                'tickcolor': "#CCCCCC",
+                'tickmode': 'array',
+                'tickvals': [0, 25, 50, 75, 100],
+                'ticktext': ['', '공포', '', '탐욕', ''],
+                'tickfont': {'size': 10, 'color': '#666666'}
+            },
+            'bar': {'color': bar_color, 'thickness': 0.25},
             'bgcolor': "white",
             'borderwidth': 2,
-            'bordercolor': "#DDDDDD",
+            'bordercolor': "#E0E0E0",
             'steps': [
                 {'range': [0, 25], 'color': "#FF6666"},
                 {'range': [25, 45], 'color': "#FFAA44"},
@@ -1699,27 +1710,28 @@ def create_fear_greed_gauge(value, title="Fear & Greed Index"):
                 {'range': [75, 100], 'color': "#44EE66"}
             ],
             'threshold': {
-                'line': {'color': "black", 'width': 3},
-                'thickness': 0.75,
+                'line': {'color': "#333333", 'width': 4},
+                'thickness': 0.8,
                 'value': value
             }
         }
     ))
     
-    # 하단에 라벨 표시
+    # 하단에 라벨 표시 (주황색 배경)
     fig.add_annotation(
-        text=f"<b style='font-size:18px; color:{label_color};'>{label_text}</b>",
+        text=f"<b style='font-size:14px; background-color:#FFA500; color:white; padding:4px 12px; border-radius:12px;'>{label_text.replace('<br>', ' ')}</b>",
         xref="paper", yref="paper",
-        x=0.5, y=0.15,
+        x=0.5, y=0.12,
         showarrow=False,
-        font=dict(size=18, family='Arial Black, sans-serif')
+        font=dict(size=14, family='Malgun Gothic, Arial Black, sans-serif')
     )
     
     fig.update_layout(
-        height=280,
-        margin=dict(l=20, r=20, t=50, b=50),
-        paper_bgcolor="rgba(245, 245, 245, 0.9)",
-        font={'color': "#333333", 'family': "Arial, sans-serif"}
+        height=260,
+        margin=dict(l=15, r=15, t=45, b=45),
+        paper_bgcolor="rgba(250, 250, 250, 1.0)",
+        plot_bgcolor="rgba(250, 250, 250, 1.0)",
+        font={'color': "#333333", 'family': "Malgun Gothic, Arial, sans-serif"}
     )
     
     return fig
@@ -1741,80 +1753,89 @@ def create_fomo_gauge(value, title="TM FOMO Index"):
     plotly.graph_objects.Figure
     """
     
-    # 한글 라벨
+    # 한글 라벨 및 액션 (5단계)
     if value <= 25:
         label_text = "매우 공포"
         label_color = "#FF4444"
         action_text = "Build Positions"
+        action_kr = "포지션 구축"
     elif value <= 45:
         label_text = "공포"
         label_color = "#FF8800"
         action_text = "Accumulation"
+        action_kr = "축적 단계"
     elif value <= 55:
         label_text = "중립"
         label_color = "#FFDD00"
         action_text = "Holding Steady"
+        action_kr = "현상 유지"
     elif value <= 75:
         label_text = "탐욕"
         label_color = "#88DD00"
         action_text = "Frothy"
+        action_kr = "과열 구간"
     else:
         label_text = "매우 탐욕"
         label_color = "#00DD44"
         action_text = "Capitulation"
+        action_kr = "항복 신호"
     
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
         domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': f"<b>{title}</b>", 
-               'font': {'size': 15, 'family': 'Arial, sans-serif', 'color': '#FFFFFF'}},
-        number={'font': {'size': 55, 'family': 'Arial Black, sans-serif', 'color': '#FFFFFF'}, 
+        title={'text': f"<b style='font-size:14px;'>{title}</b>", 
+               'font': {'size': 14, 'family': 'Arial, sans-serif', 'color': '#FFFFFF'}},
+        number={'font': {'size': 50, 'family': 'Arial Black, sans-serif', 'color': '#FFFFFF'}, 
                 'suffix': "%"},
         gauge={
-            'axis': {'range': [None, 100], 'tickwidth': 0, 'tickcolor': "transparent",
-                     'showticklabels': False},
-            'bar': {'color': "rgba(255,255,255,0.9)", 'thickness': 0.25},
-            'bgcolor': "rgba(0,0,0,0.3)",
+            'axis': {
+                'range': [None, 100], 
+                'tickwidth': 0, 
+                'tickcolor': "#666666",
+                'showticklabels': False
+            },
+            'bar': {'color': "rgba(255,255,255,0.9)", 'thickness': 0.22},
+            'bgcolor': "rgba(50,50,50,0.5)",
             'borderwidth': 0,
             'steps': [
                 {'range': [0, 25], 'color': "#FF4444"},
                 {'range': [25, 45], 'color': "#FF8800"},
                 {'range': [45, 55], 'color': "#FFDD00"},
-                {'range': [55, 75], 'color': "#88DD00"},
+                {'range': [55, 75], 'color': "#AAEE55"},
                 {'range': [75, 100], 'color': "#44DD88"}
             ],
             'threshold': {
-                'line': {'color': "white", 'width': 4},
+                'line': {'color': "#FFFFFF", 'width': 4},
                 'thickness': 0.8,
                 'value': value
             }
         }
     ))
     
-    # 하단에 라벨 표시
+    # 하단에 라벨 표시 (금색 화살표 + 영문)
     fig.add_annotation(
-        text=f"<b style='font-size:16px; color:#FFD700;'>➝ {action_text}</b>",
+        text=f"<b style='font-size:14px; color:#FFD700;'>➝ {action_text}</b>",
         xref="paper", yref="paper",
-        x=0.5, y=0.18,
+        x=0.5, y=0.16,
         showarrow=False,
-        font=dict(size=16, family='Arial, sans-serif')
+        font=dict(size=14, family='Arial, sans-serif')
     )
     
-    # Action 버튼
+    # Action / 한글 버튼 (빨간색 배경)
     fig.add_annotation(
-        text=f"<span style='font-size:13px; color:#FF6666;'><b>Action</b></span>     <span style='font-size:13px; color:#FF9999;'><b>{label_text}</b></span>",
+        text=f"<span style='font-size:12px; background-color:#DC3545; color:white; padding:3px 10px; border-radius:8px; margin-right:5px;'><b>Action</b></span>  <span style='font-size:12px; background-color:#FFC107; color:#333; padding:3px 10px; border-radius:8px;'><b>{action_kr}</b></span>",
         xref="paper", yref="paper",
-        x=0.5, y=0.05,
+        x=0.5, y=0.04,
         showarrow=False,
-        font=dict(size=13, family='Arial, sans-serif')
+        font=dict(size=12, family='Malgun Gothic, Arial, sans-serif')
     )
     
     fig.update_layout(
-        height=280,
-        margin=dict(l=20, r=20, t=50, b=50),
-        paper_bgcolor="#1a1a1a",
-        plot_bgcolor="#1a1a1a",
+        height=260,
+        margin=dict(l=15, r=15, t=45, b=45),
+        paper_bgcolor="#1E1E1E",
+        plot_bgcolor="#1E1E1E",
         font={'color': "#FFFFFF", 'family': "Arial, sans-serif"}
     )
     
@@ -6623,7 +6644,9 @@ with st.sidebar:
         else:
             st.info("ℹ️ 시장 심리 데이터 로딩 중...")
     except Exception as e:
-        st.error(f"❌ 데이터 로드 실패: {str(e)}[:50]")
+        st.warning(f"⚠️ 시장 심리 데이터를 불러올 수 없습니다.")
+        # 디버그용 로그 (선택사항)
+        # st.caption(f"Error: {str(e)[:100]}")
         pass
     
     st.markdown("---")
