@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.15 (단일 게이지)
+코인 AI 예측 시스템 - v2.9.16 (투명 배경)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index 단일 게이지)
 - 포트폴리오 분석 (선택한 코인)
@@ -79,6 +79,12 @@
 - 📦 위젯 추가/제거: 7개 위젯 개별 제어
 - 🔧 사이드바 설정 UI
 - 🎯 테마별 색상 자동 적용
+
+🌈 v2.9.16 투명 배경 (2025-12-01):
+- ✨ 게이지 배경 투명화 (사이드바와 조화)
+- 📊 5가지 상태 모두 표시: 매우공포, 공포, 중립, 탐욕, 매우탐욕
+- 🎨 축 라벨 최적화 (5개 라벨 균등 배치)
+- 🖌️ 깨끗하고 현대적인 UI
 
 🎯 v2.9.15 단일 게이지 (2025-12-01):
 - 📊 Fear & Greed Index 단일 게이지로 변경
@@ -1670,7 +1676,7 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
     
     # 한글 라벨 및 색상 (5단계)
     if value <= 25:
-        label_text = "매우<br>공포"
+        label_text = "매우 공포"
         label_color = "#FF4444"
         bar_color = "#FF4444"
     elif value <= 45:
@@ -1686,7 +1692,7 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
         label_color = "#88DD00"
         bar_color = "#88DD00"
     else:
-        label_text = "매우<br>탐욕"
+        label_text = "매우 탐욕"
         label_color = "#00DD44"
         bar_color = "#00DD44"
     
@@ -1694,7 +1700,7 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
         mode="gauge+number",
         value=value,
         domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': f"<b style='font-size:14px;'>{title}</b><br><span style='font-size:11px; color:#888888;'>종립</span>", 
+        title={'text': f"<b style='font-size:14px;'>{title}</b>", 
                'font': {'size': 14, 'family': 'Malgun Gothic, Arial, sans-serif'}},
         number={'font': {'size': 50, 'family': 'Arial Black, sans-serif', 'color': '#333333'}, 
                 'suffix': ""},
@@ -1704,14 +1710,14 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
                 'tickwidth': 1, 
                 'tickcolor': "#CCCCCC",
                 'tickmode': 'array',
-                'tickvals': [0, 25, 50, 75, 100],
-                'ticktext': ['', '공포', '', '탐욕', ''],
-                'tickfont': {'size': 10, 'color': '#666666'}
+                'tickvals': [12.5, 35, 50, 65, 87.5],
+                'ticktext': ['매우공포', '공포', '중립', '탐욕', '매우탐욕'],
+                'tickfont': {'size': 9, 'color': '#666666'}
             },
             'bar': {'color': bar_color, 'thickness': 0.25},
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "#E0E0E0",
+            'bgcolor': "rgba(0,0,0,0)",
+            'borderwidth': 0,
+            'bordercolor': "rgba(0,0,0,0)",
             'steps': [
                 {'range': [0, 25], 'color': "#FF6666"},
                 {'range': [25, 45], 'color': "#FFAA44"},
@@ -1739,8 +1745,8 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
     fig.update_layout(
         height=260,
         margin=dict(l=15, r=15, t=45, b=45),
-        paper_bgcolor="rgba(250, 250, 250, 1.0)",
-        plot_bgcolor="rgba(250, 250, 250, 1.0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         font={'color': "#333333", 'family': "Malgun Gothic, Arial, sans-serif"}
     )
     
