@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.17 (최종 완성)
+코인 AI 예측 시스템 - v2.9.19 (최종 완성)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index 단일 게이지)
 - 포트폴리오 분석 (선택한 코인)
@@ -79,6 +79,18 @@
 - 📦 위젯 추가/제거: 7개 위젯 개별 제어
 - 🔧 사이드바 설정 UI
 - 🎯 테마별 색상 자동 적용
+
+🏆 v2.9.19 최종 완성 (2025-12-01):
+- 📏 제목 크기 확대: 14pt → 18pt (가상자산 공포/탐욕지수 +29%)
+- 📐 상단 여백 축소: 45px → 35px (제목과 게이지 사이 -22%)
+- 🎯 완벽한 레이아웃 균형
+- ✨ 최적화된 가독성
+
+🎨 v2.9.18 라벨 강화 (2025-12-01):
+- 🟠 하단 라벨: 진한 주황색 배경 (#FF8C00) + 흰색 글씨 (#FFFFFF)
+- 🔤 라벨 글씨 크기: 14pt → 16pt (더 크고 명확하게)
+- 📌 패딩 증가: 4px → 6px (더 두듯한 버튼)
+- ✨ 글자 굵기: font-weight:bold 추가
 
 ✨ v2.9.17 최종 완성 (2025-12-01):
 - 📝 줄바꿈 처리: '매우<br>공포', '매우<br>탐욕' (잘림 방지)
@@ -1706,8 +1718,8 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
         mode="gauge+number",
         value=value,
         domain={'x': [0, 1], 'y': [0, 1]},
-        title={'text': f"<b style='font-size:14px;'>{title}</b>", 
-               'font': {'size': 14, 'family': 'Malgun Gothic, Arial, sans-serif'}},
+        title={'text': f"<b style='font-size:18px;'>{title}</b>", 
+               'font': {'size': 18, 'family': 'Malgun Gothic, Arial, sans-serif'}},
         number={'font': {'size': 50, 'family': 'Arial Black, sans-serif', 'color': '#333333'}, 
                 'suffix': ""},
         gauge={
@@ -1739,18 +1751,18 @@ def create_fear_greed_gauge(value, title="가상자산 공포/탐욕지수"):
         }
     ))
     
-    # 하단에 라벨 표시 (주황색 배경)
+    # 하단에 라벨 표시 (주황색 배경 + 흰색 글씨)
     fig.add_annotation(
-        text=f"<b style='font-size:14px; background-color:#FFA500; color:white; padding:4px 12px; border-radius:12px;'>{label_text.replace('<br>', ' ')}</b>",
+        text=f"<b style='font-size:16px; background-color:#FF8C00; color:#FFFFFF; padding:6px 16px; border-radius:12px; font-weight:bold;'>{label_text.replace('<br>', ' ')}</b>",
         xref="paper", yref="paper",
         x=0.5, y=0.12,
         showarrow=False,
-        font=dict(size=14, family='Malgun Gothic, Arial Black, sans-serif')
+        font=dict(size=16, color='#FFFFFF', family='Malgun Gothic, Arial Black, sans-serif')
     )
     
     fig.update_layout(
         height=260,
-        margin=dict(l=15, r=15, t=45, b=45),
+        margin=dict(l=15, r=15, t=35, b=45),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font={'color': "#333333", 'family': "Malgun Gothic, Arial, sans-serif"}
