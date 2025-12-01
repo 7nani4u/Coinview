@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.12 (커스터마이즈 대시보드)
+코인 AI 예측 시스템 - v2.9.13 (Gauge 차트 시장심리)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -79,6 +79,14 @@
 - 📦 위젯 추가/제거: 7개 위젯 개별 제어
 - 🔧 사이드바 설정 UI
 - 🎯 테마별 색상 자동 적용
+
+🎯 v2.9.13 Gauge 차트 시장심리 (2025-12-01):
+- 🔴 Fear & Greed Gauge: 반원형 게이지 차트 (밝은 테마)
+- ⚫ FOMO Index Gauge: 반원형 게이지 차트 (어두운 테마)
+- 👀 나란히 표시: 2개 차트를 사이드바에 동시 표시
+- 📊 색상 영역: 5단계 그라데이션 (공포~탐욕)
+- 🎯 실시간 지표: 한글 라벨 + 액션 표시
+- 📱 반응형 크기: 사이드바 너비에 맞춰 자동 조정
 - ⏱️ 타임라인 기반 추적
 """
 
@@ -1632,6 +1640,185 @@ def get_fear_greed_index(limit=30):
         }
     except Exception as e:
         return None
+
+
+def create_fear_greed_gauge(value, title="Fear & Greed Index"):
+    """
+    Fear & Greed Index Gauge 차트 생성 (첨부 스크린샷 스타일)
+    
+    Parameters:
+    -----------
+    value : int
+        0-100 사이의 값
+    title : str
+        차트 제목
+    
+    Returns:
+    --------
+    plotly.graph_objects.Figure
+    """
+    
+    # 한글 라벨
+    if value <= 25:
+        label_text = "매우 공포"
+        label_color = "#FF4444"
+    elif value <= 45:
+        label_text = "공포"
+        label_color = "#FF8800"
+    elif value <= 55:
+        label_text = "중립"
+        label_color = "#FFDD00"
+    elif value <= 75:
+        label_text = "탐욕"
+        label_color = "#88DD00"
+    else:
+        label_text = "매우 탐욕"
+        label_color = "#00DD44"
+    
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': f"<b>{title}</b><br><span style='font-size:0.8em; color:gray;'>종립</span>", 
+               'font': {'size': 16, 'family': 'Arial, sans-serif'}},
+        number={'font': {'size': 60, 'family': 'Arial Black, sans-serif'}, 
+                'suffix': ""},
+        gauge={
+            'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkgray", 
+                     'tickmode': 'linear', 'tick0': 0, 'dtick': 25,
+                     'tickfont': {'size': 11}},
+            'bar': {'color': label_color, 'thickness': 0.3},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "#DDDDDD",
+            'steps': [
+                {'range': [0, 25], 'color': "#FF6666"},
+                {'range': [25, 45], 'color': "#FFAA44"},
+                {'range': [45, 55], 'color': "#FFEE77"},
+                {'range': [55, 75], 'color': "#AAEE55"},
+                {'range': [75, 100], 'color': "#44EE66"}
+            ],
+            'threshold': {
+                'line': {'color': "black", 'width': 3},
+                'thickness': 0.75,
+                'value': value
+            }
+        }
+    ))
+    
+    # 하단에 라벨 표시
+    fig.add_annotation(
+        text=f"<b style='font-size:18px; color:{label_color};'>{label_text}</b>",
+        xref="paper", yref="paper",
+        x=0.5, y=0.15,
+        showarrow=False,
+        font=dict(size=18, family='Arial Black, sans-serif')
+    )
+    
+    fig.update_layout(
+        height=280,
+        margin=dict(l=20, r=20, t=50, b=50),
+        paper_bgcolor="rgba(245, 245, 245, 0.9)",
+        font={'color': "#333333", 'family': "Arial, sans-serif"}
+    )
+    
+    return fig
+
+
+def create_fomo_gauge(value, title="TM FOMO Index"):
+    """
+    FOMO Index Gauge 차트 생성 (첨부 스크린샷 스타일)
+    
+    Parameters:
+    -----------
+    value : float
+        0-100 사이의 값
+    title : str
+        차트 제목
+    
+    Returns:
+    --------
+    plotly.graph_objects.Figure
+    """
+    
+    # 한글 라벨
+    if value <= 25:
+        label_text = "매우 공포"
+        label_color = "#FF4444"
+        action_text = "Build Positions"
+    elif value <= 45:
+        label_text = "공포"
+        label_color = "#FF8800"
+        action_text = "Accumulation"
+    elif value <= 55:
+        label_text = "중립"
+        label_color = "#FFDD00"
+        action_text = "Holding Steady"
+    elif value <= 75:
+        label_text = "탐욕"
+        label_color = "#88DD00"
+        action_text = "Frothy"
+    else:
+        label_text = "매우 탐욕"
+        label_color = "#00DD44"
+        action_text = "Capitulation"
+    
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': f"<b>{title}</b>", 
+               'font': {'size': 15, 'family': 'Arial, sans-serif', 'color': '#FFFFFF'}},
+        number={'font': {'size': 55, 'family': 'Arial Black, sans-serif', 'color': '#FFFFFF'}, 
+                'suffix': "%"},
+        gauge={
+            'axis': {'range': [None, 100], 'tickwidth': 0, 'tickcolor': "transparent",
+                     'showticklabels': False},
+            'bar': {'color': "rgba(255,255,255,0.9)", 'thickness': 0.25},
+            'bgcolor': "rgba(0,0,0,0.3)",
+            'borderwidth': 0,
+            'steps': [
+                {'range': [0, 25], 'color': "#FF4444"},
+                {'range': [25, 45], 'color': "#FF8800"},
+                {'range': [45, 55], 'color': "#FFDD00"},
+                {'range': [55, 75], 'color': "#88DD00"},
+                {'range': [75, 100], 'color': "#44DD88"}
+            ],
+            'threshold': {
+                'line': {'color': "white", 'width': 4},
+                'thickness': 0.8,
+                'value': value
+            }
+        }
+    ))
+    
+    # 하단에 라벨 표시
+    fig.add_annotation(
+        text=f"<b style='font-size:16px; color:#FFD700;'>➝ {action_text}</b>",
+        xref="paper", yref="paper",
+        x=0.5, y=0.18,
+        showarrow=False,
+        font=dict(size=16, family='Arial, sans-serif')
+    )
+    
+    # Action 버튼
+    fig.add_annotation(
+        text=f"<span style='font-size:13px; color:#FF6666;'><b>Action</b></span>     <span style='font-size:13px; color:#FF9999;'><b>{label_text}</b></span>",
+        xref="paper", yref="paper",
+        x=0.5, y=0.05,
+        showarrow=False,
+        font=dict(size=13, family='Arial, sans-serif')
+    )
+    
+    fig.update_layout(
+        height=280,
+        margin=dict(l=20, r=20, t=50, b=50),
+        paper_bgcolor="#1a1a1a",
+        plot_bgcolor="#1a1a1a",
+        font={'color': "#FFFFFF", 'family': "Arial, sans-serif"}
+    )
+    
+    return fig
 
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.02):
@@ -6404,49 +6591,39 @@ initialize_dashboard_settings()
 with st.sidebar:
     # 사이드바: 시장 심리 및 주요 설정 이외 항목만 유지
     
-    # v2.6.0: Fear & Greed Index
-    st.markdown("### 😱 시장 심리")
+    # v2.6.0: Fear & Greed Index + FOMO Index (2개 Gauge 차트)
+    st.markdown("### 😱 시장 심리 지수")
     try:
         fg_data = get_fear_greed_index()
         if fg_data:
             current_value = fg_data['current_value']
-            classification = fg_data['current_classification']
             
-            # 한글 번역 맵
-            korean_map = {
-                'Extreme Fear': '극도의 공포',
-                'Fear': '공포',
-                'Neutral': '중립',
-                'Greed': '탐욕',
-                'Extreme Greed': '극도의 탐욕'
-            }
-            korean_classification = korean_map.get(classification, classification)
+            # FOMO Index 계산 (예시: Fear & Greed와 역상관)
+            # 실제로는 TM FOMO Index API가 있다면 그걸 사용
+            fomo_value = 100 - current_value  # 간단한 역상관 예시
             
-            color_map = {
-                'Extreme Fear': '#e74c3c',
-                'Fear': '#e67e22',
-                'Neutral': '#f39c12',
-                'Greed': '#2ecc71',
-                'Extreme Greed': '#27ae60'
-            }
-            color = color_map.get(classification, 'gray')
+            # 2개 차트를 나란히 표시 (사이드바에 맞게 크기 조절)
+            col1, col2 = st.columns(2)
             
-            st.markdown(f"""
-            <div style='background: linear-gradient(135deg, {color}aa, {color}); 
-                        padding:20px; border-radius:15px; text-align:center; 
-                        box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom:20px;'>
-                <h1 style='margin:0; color:white; font-size:48px;'>{current_value}</h1>
-                <p style='margin:5px 0 0 0; color:white; font-size:18px; font-weight:bold;'>{korean_classification}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            with col1:
+                fig_fg = create_fear_greed_gauge(current_value, "가상자산<br>공포/탐욕지수")
+                st.plotly_chart(fig_fg, use_container_width=True, config={'displayModeBar': False})
             
+            with col2:
+                fig_fomo = create_fomo_gauge(fomo_value)
+                st.plotly_chart(fig_fomo, use_container_width=True, config={'displayModeBar': False})
+            
+            # 간단한 해석 (한 줄로 표시)
             if current_value < 25:
-                st.success("🟢 극도의 공포 → 매수 기회")
+                st.success("↗️ 극도의 공포 → 매수 기회")
             elif current_value > 75:
-                st.warning("🔴 극도의 탐욕 → 매도 고려")
+                st.warning("↘️ 극도의 탐욕 → 매도 고려")
+            else:
+                st.info("🟡 중립 상태 → 추세 관찰")
         else:
-            st.info("ℹ️ Fear & Greed 데이터 로딩 중...")
+            st.info("ℹ️ 시장 심리 데이터 로딩 중...")
     except Exception as e:
+        st.error(f"❌ 데이터 로드 실패: {str(e)}[:50]")
         pass
     
     st.markdown("---")
