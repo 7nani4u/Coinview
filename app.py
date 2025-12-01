@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.14 (안정성 강화)
+코인 AI 예측 시스템 - v2.9.15 (단일 게이지)
 ✨ 주요 기능:
-- 시장 심리 지수 (Fear & Greed Index)
+- 시장 심리 지수 (Fear & Greed Index 단일 게이지)
 - 포트폴리오 분석 (선택한 코인)
 - 앙상블 예측 (8개 모델)
 - 적응형 지표 계산
@@ -80,6 +80,12 @@
 - 🔧 사이드바 설정 UI
 - 🎯 테마별 색상 자동 적용
 
+🎯 v2.9.15 단일 게이지 (2025-12-01):
+- 📊 Fear & Greed Index 단일 게이지로 변경
+- 🔴 FOMO Index 제거 (사용자 요청)
+- 📦 사이드바 UI 간결화
+- 🎨 전체 너비 활용하여 가독성 향상
+
 🔒 v2.9.14 안정성 강화 (2025-12-01):
 - 🔧 코인 선택 방식 상태 지속 버그 수정
 - 📌 Callback 함수 기반 상태 관리로 안정성 향상
@@ -88,8 +94,6 @@
 
 🎯 v2.9.13 Gauge 차트 시장심리 (2025-12-01):
 - 🔴 Fear & Greed Gauge: 반원형 게이지 차트 (밝은 테마)
-- ⚫ FOMO Index Gauge: 반원형 게이지 차트 (어두운 테마)
-- 👀 나란히 표시: 2개 차트를 사이드바에 동시 표시
 - 📊 색상 영역: 5단계 그라데이션 (공포~탐욕)
 - 🎯 실시간 지표: 한글 라벨 + 액션 표시
 - 📱 반응형 크기: 사이드바 너비에 맞춰 자동 조정
@@ -6618,27 +6622,16 @@ initialize_dashboard_settings()
 with st.sidebar:
     # 사이드바: 시장 심리 및 주요 설정 이외 항목만 유지
     
-    # v2.6.0: Fear & Greed Index + FOMO Index (2개 Gauge 차트)
+    # v2.6.0: Fear & Greed Index (단일 Gauge 차트)
     st.markdown("### 😱 시장 심리 지수")
     try:
         fg_data = get_fear_greed_index()
         if fg_data:
             current_value = fg_data['current_value']
             
-            # FOMO Index 계산 (예시: Fear & Greed와 역상관)
-            # 실제로는 TM FOMO Index API가 있다면 그걸 사용
-            fomo_value = 100 - current_value  # 간단한 역상관 예시
-            
-            # 2개 차트를 나란히 표시 (사이드바에 맞게 크기 조절)
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                fig_fg = create_fear_greed_gauge(current_value, "가상자산<br>공포/탐욕지수")
-                st.plotly_chart(fig_fg, use_container_width=True, config={'displayModeBar': False})
-            
-            with col2:
-                fig_fomo = create_fomo_gauge(fomo_value)
-                st.plotly_chart(fig_fomo, use_container_width=True, config={'displayModeBar': False})
+            # Fear & Greed Index 단일 게이지 차트 표시
+            fig_fg = create_fear_greed_gauge(current_value, "가상자산 공포/탐욕지수")
+            st.plotly_chart(fig_fg, use_container_width=True, config={'displayModeBar': False})
             
             # 간단한 해석 (한 줄로 표시)
             if current_value < 25:
