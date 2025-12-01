@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-코인 AI 예측 시스템 - v2.9.13 (Gauge 차트 시장심리)
+코인 AI 예측 시스템 - v2.9.14 (안정성 강화)
 ✨ 주요 기능:
 - 시장 심리 지수 (Fear & Greed Index)
 - 포트폴리오 분석 (선택한 코인)
@@ -79,6 +79,12 @@
 - 📦 위젯 추가/제거: 7개 위젯 개별 제어
 - 🔧 사이드바 설정 UI
 - 🎯 테마별 색상 자동 적용
+
+🔒 v2.9.14 안정성 강화 (2025-12-01):
+- 🔧 코인 선택 방식 상태 지속 버그 수정
+- 📌 Callback 함수 기반 상태 관리로 안정성 향상
+- ✅ "기본 목록" ↔ "직접 입력" 선택 상태 완벽 유지
+- 🎨 UI/UX 일관성 개선
 
 🎯 v2.9.13 Gauge 차트 시장심리 (2025-12-01):
 - 🔴 Fear & Greed Gauge: 반원형 게이지 차트 (밝은 테마)
@@ -6684,13 +6690,28 @@ with st.sidebar:
         st.session_state.selected_crypto = "BTC-USD"
     if 'coin_input_method' not in st.session_state:
         st.session_state.coin_input_method = "기본 목록"
+    if 'input_method_initialized' not in st.session_state:
+        st.session_state.input_method_initialized = False
     
-    coin_input_method = st.radio(
+    # Callback 함수: 입력 방식 변경 감지
+    def on_input_method_change():
+        """입력 방식 변경 시 호출되는 콜백 함수"""
+        st.session_state.coin_input_method = st.session_state.coin_input_method_radio
+    
+    # 입력 방식 선택 - callback 방식으로 안정적 상태 유지
+    input_methods = ["기본 목록", "직접 입력"]
+    current_index = 0 if st.session_state.coin_input_method == "기본 목록" else 1
+    
+    selected_method = st.radio(
         "🔧 입력 방식",
-        ["기본 목록", "직접 입력"],  # v2.9.9: 2개만 유지
+        input_methods,
+        index=current_index,
         horizontal=True,
-        key='coin_input_method'
+        key='coin_input_method_radio',
+        on_change=on_input_method_change
     )
+    
+    coin_input_method = st.session_state.coin_input_method
     
     if coin_input_method == "기본 목록":
         # 현재 선택된 코인에 해당하는 인덱스 찾기
