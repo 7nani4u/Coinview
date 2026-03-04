@@ -1,2 +1,21 @@
+# Vercel 호환 경량 의존성 목록 (2026-03-05, Manus AI)
+# 원본 requirements.txt에서 Vercel 500MB 제한에 맞춰 재구성
+
+# 1. FastAPI 웹 프레임워크
 fastapi
 uvicorn
+
+# 2. 데이터 처리 및 분석 (핵심)
+pandas
+numpy
+scipy
+statsmodels
+
+# 3. 데이터 소스
+yfinance
+pycoingecko
+requests
+
+# 4. 유틸리티
+python-dateutil # pandas가 자동으로 설치하지만 명시
+pytz # pandas가 자동으로 설치하지만 명시
