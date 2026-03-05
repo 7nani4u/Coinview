@@ -2,12 +2,12 @@
 # SignalCoin - main.py
 #
 # Vercel 공식 FastAPI 배포 구조:
-#   - 파일 위치: 프로젝트 루트의 main.py (api/ 폴더 아님)
-#   - vercel.json: 없음 (Vercel이 main.py를 자동 감지)
-#   - requirements.txt: fastapi만 있으면 됨 (추가 패키지 포함 가능)
+#   - 파일 위치: 프로젝트 루트의 main.py
+#   - vercel.json: builds + routes 설정
+#   - requirements.txt: 의존성
 #   - HTML은 HTMLResponse로 직접 서빙
 #
-# 참고: https://github.com/vercel/examples/tree/main/python/fastapi
+# 참고: https://vercel.com/docs/frameworks/backend/fastapi
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 app = FastAPI(
     title="SignalCoin",
     description="코인 AI 예측 시스템",
-    version="9.0.0",
+    version="9.1.0",
 )
 
 app.add_middleware(
@@ -252,7 +252,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     <label>&#128200; 시간 프레임</label>
     <select id="sel-interval">
       <option value="1d" selected>1일봉 (전체 기간)</option>
-      <option value="1h">1시간봉 (최근 2년)</option>
+      <option value="1h">1시간봉 (최근 730일)</option>
       <option value="5m">5분봉 (최근 60일)</option>
       <option value="1m">1분봉 (최근 7일)</option>
     </select>
@@ -304,6 +304,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     <label>&#128197; 기간 (일): <strong id="days-label">365</strong>일</label>
     <input type="range" id="range-days" min="90" max="1825" value="365" step="30"
            oninput="document.getElementById('days-label').textContent=this.value" />
+    <div id="days-note" class="info-box" style="font-size:11px;">&#9432; 1분봉은 최대 7일, 5분봉은 최대 60일로 자동 제한됩니다.</div>
   </div>
   <hr/>
 
@@ -406,10 +407,10 @@ function setupCoinMethodToggle() {
 
 function setupIntervalInfo() {
   const infoMap = {
-    "1m": "1분봉: 최근 7일만 지원 (초단타 매매용)",
-    "5m": "5분봉: 최근 60일만 지원 (단타 매매용)",
-    "1h": "1시간봉: 최근 2년만 지원 (스윙 트레이딩용)",
-    "1d": "1일봉: 전체 기간 지원 (중장기 투자용)"
+    "1m": "⏱️ 1분봉: 최근 7일만 지원 (초단타 매매용) - 기간은 자동으로 7일 제한",
+    "5m": "⏱️ 5분봉: 최근 60일만 지원 (단타 매매용) - 기간은 자동으로 60일 제한",
+    "1h": "⏱️ 1시간봉: 최근 730일만 지원 (스윙 트레이딩용)",
+    "1d": "⏱️ 1일봉: 전체 기간 지원 (중장기 투자용)"
   };
   document.getElementById("sel-interval").addEventListener("change", function() {
     document.getElementById("interval-info").textContent = infoMap[this.value] || "";
@@ -419,21 +420,21 @@ function setupIntervalInfo() {
 async function loadFearGreed() {
   try {
     const res = await fetch("/api/fear-greed");
-    if (!res.ok) throw new Error();
+    if (!res.ok) throw new Error("API 오류");
     const data = await res.json();
     renderFearGreedGauge(data.value, data.classification);
     const msgEl = document.getElementById("fg-message");
     if (data.value < 25) {
       msgEl.className = "success-box";
-      msgEl.textContent = "극도의 공포 -> 매수 기회";
+      msgEl.textContent = "극도의 공포 → 매수 기회";
     } else if (data.value > 75) {
       msgEl.className = "warn-box";
-      msgEl.textContent = "극도의 탐욕 -> 매도 고려";
+      msgEl.textContent = "극도의 탐욕 → 매도 고려";
     } else {
       msgEl.className = "info-box";
-      msgEl.textContent = "중립 상태 -> 추세 관찰";
+      msgEl.textContent = "중립 상태 → 추세 관찰";
     }
-  } catch {
+  } catch (e) {
     document.getElementById("fg-message").textContent = "시장 심리 데이터를 불러올 수 없습니다.";
   }
 }
@@ -473,14 +474,25 @@ async function runAnalysis() {
   const ticker = method === "basic"
     ? document.getElementById("sel-coin").value
     : (document.getElementById("custom-ticker").value.trim() || "BTC-USD");
-  const days = parseInt(document.getElementById("range-days").value);
+  const interval = document.getElementById("sel-interval").value;
+  let days = parseInt(document.getElementById("range-days").value);
+
+  // interval별 최대 일수 제한 (yfinance 제약)
+  const maxDays = { "1m": 7, "5m": 60, "1h": 730, "1d": 1825 };
+  if (days > (maxDays[interval] || 1825)) {
+    days = maxDays[interval];
+  }
 
   try {
     updateLoadingText("지표를 계산하는 중...");
-    const res = await fetch("/api/analyze?ticker=" + encodeURIComponent(ticker) + "&days=" + days);
+    const url = "/api/analyze?ticker=" + encodeURIComponent(ticker)
+              + "&days=" + days
+              + "&interval=" + encodeURIComponent(interval);
+    const res = await fetch(url);
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || "분석 실패");
+      let errMsg = "분석 실패";
+      try { const err = await res.json(); errMsg = err.detail || errMsg; } catch(_) {}
+      throw new Error(errMsg);
     }
     currentData = await res.json();
     updateLoadingText("차트를 렌더링하는 중...");
@@ -601,15 +613,16 @@ function renderPortfolioSection(bt) {
 }
 
 function renderIndicatorsTable(ind, price) {
+  const fmt = (v, decimals=4) => v != null ? v.toLocaleString(undefined, {maximumFractionDigits: decimals}) : "N/A";
   const rows = [
-    ["현재 가격", "$" + price.toLocaleString(undefined, {maximumFractionDigits:4}), ""],
-    ["RSI (14)", ind.rsi ? ind.rsi.toFixed(2) : "N/A", ind.rsi > 70 ? "과매수" : ind.rsi < 30 ? "과매도 (매수 기회)" : "중립"],
-    ["MACD", ind.macd ? ind.macd.toFixed(4) : "N/A", ind.macd > ind.macd_signal ? "골든크로스" : "데드크로스"],
-    ["MACD Signal", ind.macd_signal ? ind.macd_signal.toFixed(4) : "N/A", ""],
-    ["볼린저 상단", ind.bb_upper ? "$" + ind.bb_upper.toLocaleString(undefined, {maximumFractionDigits:4}) : "N/A", price > ind.bb_upper ? "상단 돌파" : ""],
-    ["볼린저 하단", ind.bb_lower ? "$" + ind.bb_lower.toLocaleString(undefined, {maximumFractionDigits:4}) : "N/A", price < ind.bb_lower ? "하단 지지" : ""],
-    ["EMA 20", ind.ema20 ? "$" + ind.ema20.toLocaleString(undefined, {maximumFractionDigits:4}) : "N/A", price > ind.ema20 ? "상향" : "하향"],
-    ["EMA 50", ind.ema50 ? "$" + ind.ema50.toLocaleString(undefined, {maximumFractionDigits:4}) : "N/A", price > ind.ema50 ? "상향" : "하향"],
+    ["현재 가격", "$" + fmt(price), ""],
+    ["RSI (14)", ind.rsi != null ? ind.rsi.toFixed(2) : "N/A", ind.rsi > 70 ? "과매수" : ind.rsi < 30 ? "과매도 (매수 기회)" : "중립"],
+    ["MACD", ind.macd != null ? ind.macd.toFixed(6) : "N/A", ind.macd != null && ind.macd_signal != null ? (ind.macd > ind.macd_signal ? "골든크로스" : "데드크로스") : ""],
+    ["MACD Signal", ind.macd_signal != null ? ind.macd_signal.toFixed(6) : "N/A", ""],
+    ["볼린저 상단", ind.bb_upper != null ? "$" + fmt(ind.bb_upper) : "N/A", price > ind.bb_upper ? "상단 돌파" : ""],
+    ["볼린저 하단", ind.bb_lower != null ? "$" + fmt(ind.bb_lower) : "N/A", price < ind.bb_lower ? "하단 지지" : ""],
+    ["EMA 20", ind.ema20 != null ? "$" + fmt(ind.ema20) : "N/A", price > ind.ema20 ? "상향" : "하향"],
+    ["EMA 50", ind.ema50 != null ? "$" + fmt(ind.ema50) : "N/A", price > ind.ema50 ? "상향" : "하향"],
   ];
   document.getElementById("indicators-content").innerHTML =
     '<table><thead><tr><th>지표</th><th>값</th><th>해석</th></tr></thead><tbody>' +
@@ -618,6 +631,7 @@ function renderIndicatorsTable(ind, price) {
 }
 
 function renderCharts(chartData, ticker) {
+  if (!chartData || chartData.length === 0) return;
   const dates = chartData.map(d => d.Date);
   const opens = chartData.map(d => d.Open);
   const highs = chartData.map(d => d.High);
@@ -665,10 +679,10 @@ function renderCharts(chartData, ticker) {
     type: "scatter", x: dates, y: Array(dates.length).fill(30), name: "과매도(30)", line: { color: "#27AE60", dash: "dash", width: 1 }
   }], Object.assign({}, layout_base, { title: "RSI (14)", yaxis: { gridcolor: "#F0F0F0", range: [0, 100] } }), { responsive: true });
 
-  const macdHist = macd.map((v, i) => v - macdSig[i]);
+  const macdHist = macd.map((v, i) => (v != null && macdSig[i] != null) ? v - macdSig[i] : null);
   Plotly.newPlot("plotly-macd", [{
     type: "bar", x: dates, y: macdHist, name: "MACD Histogram",
-    marker: { color: macdHist.map(v => v >= 0 ? "#27AE60" : "#E74C3C") }
+    marker: { color: macdHist.map(v => v == null ? "#95A5A6" : v >= 0 ? "#27AE60" : "#E74C3C") }
   }, {
     type: "scatter", x: dates, y: macd, name: "MACD", line: { color: "#3498DB", width: 2 }
   }, {
@@ -758,22 +772,56 @@ class FullAnalysisResponse(BaseModel):
     chart_data: List[Dict[str, Any]]
 
 # ─────────────────────────────────────────────────────────────
+# interval별 최대 허용 일수 (yfinance 제약)
+# ─────────────────────────────────────────────────────────────
+INTERVAL_MAX_DAYS: Dict[str, int] = {
+    "1m":  7,
+    "2m":  60,
+    "5m":  60,
+    "15m": 60,
+    "30m": 60,
+    "60m": 730,
+    "1h":  730,
+    "1d":  1825,
+    "1wk": 1825,
+    "1mo": 1825,
+}
+
+# interval별 연간 거래 캔들 수 (샤프 비율 annualization 계수)
+ANNUALIZE_FACTOR: Dict[str, float] = {
+    "1m":  525600,
+    "2m":  262800,
+    "5m":  105120,
+    "15m": 35040,
+    "30m": 17520,
+    "60m": 8760,
+    "1h":  8760,
+    "1d":  365,
+    "1wk": 52,
+    "1mo": 12,
+}
+
+# ─────────────────────────────────────────────────────────────
 # 라우트
 # ─────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 def serve_index():
-    """메인 페이지 - HTML 직접 서빙 (Vercel 공식 방식)"""
+    """메인 페이지 - HTML 직접 서빙"""
     return HTMLResponse(content=HTML_CONTENT)
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "version": "9.0.0"}
+    return {"status": "ok", "version": "9.1.0"}
 
 @app.get("/api/fear-greed", response_model=FearGreedResponse)
 def get_fear_greed_index():
     try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        r = requests.get(
+            "https://api.alternative.me/fng/?limit=1",
+            timeout=8,
+            headers={"User-Agent": "SignalCoin/9.1.0"}
+        )
         r.raise_for_status()
         data = r.json()["data"][0]
         return {"value": int(data["value"]), "classification": data["value_classification"]}
@@ -783,21 +831,44 @@ def get_fear_greed_index():
 @app.get("/api/analyze", response_model=FullAnalysisResponse)
 def get_full_analysis(
     ticker: str = Query("BTC-USD", description="yfinance 티커 (예: BTC-USD)"),
-    days: int = Query(365, ge=90, le=1825, description="분석 기간(일)")
+    days: int = Query(365, ge=1, le=1825, description="분석 기간(일)"),
+    interval: str = Query("1d", description="시간 프레임 (1m/5m/1h/1d 등)")
 ):
+    # interval 유효성 검사
+    allowed_intervals = {"1m","2m","5m","15m","30m","60m","1h","1d","1wk","1mo"}
+    if interval not in allowed_intervals:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 interval: {interval}")
+
+    # interval별 최대 일수 강제 적용
+    max_days = INTERVAL_MAX_DAYS.get(interval, 1825)
+    days = min(days, max_days)
+
     try:
-        df = _fetch_ohlcv(ticker, days)
+        df = _fetch_ohlcv(ticker, days, interval)
         df_ind = _calculate_all_indicators(df.copy())
+        ann_factor = ANNUALIZE_FACTOR.get(interval, 365)
         signal_result = _calculate_signal_score(df_ind)
-        backtest_result = _run_simple_backtest(df)
+        backtest_result = _run_simple_backtest(df, ann_factor)
         metrics_result = _calculate_trading_metrics(df)
 
         df_chart = df_ind.reset_index()
-        if "Date" in df_chart.columns:
-            df_chart["Date"] = df_chart["Date"].dt.strftime("%Y-%m-%d")
-        elif "Datetime" in df_chart.columns:
-            df_chart["Date"] = df_chart["Datetime"].dt.strftime("%Y-%m-%d %H:%M")
-            df_chart.drop(columns=["Datetime"], inplace=True)
+
+        # 날짜 컬럼 정규화 (일봉=Date, 분/시간봉=Datetime)
+        if "Datetime" in df_chart.columns:
+            df_chart["Date"] = pd.to_datetime(df_chart["Datetime"]).dt.strftime("%Y-%m-%d %H:%M")
+            df_chart.drop(columns=["Datetime"], errors="ignore", inplace=True)
+        elif "Date" in df_chart.columns:
+            df_chart["Date"] = pd.to_datetime(df_chart["Date"]).dt.strftime("%Y-%m-%d")
+        else:
+            # 인덱스가 날짜인 경우 (reset_index 후 첫 번째 컬럼)
+            first_col = df_chart.columns[0]
+            df_chart["Date"] = pd.to_datetime(df_chart[first_col]).dt.strftime("%Y-%m-%d %H:%M")
+            df_chart.drop(columns=[first_col], errors="ignore", inplace=True)
+
+        # 필요한 컬럼만 선택 (불필요한 컬럼 제거로 응답 크기 최소화)
+        keep_cols = ["Date", "Open", "High", "Low", "Close", "Volume",
+                     "rsi", "macd", "macd_signal", "bb_upper", "bb_lower", "ema20", "ema50"]
+        df_chart = df_chart[[c for c in keep_cols if c in df_chart.columns]]
         chart_data = _sanitize_chart_data(df_chart)
 
         latest = df_ind.iloc[-1]
@@ -811,9 +882,15 @@ def get_full_analysis(
             ema50=_safe_float(latest.get("ema50")),
         )
 
+        # 현재 가격: Close 컬럼에서 안전하게 추출
+        close_series = df["Close"]
+        if isinstance(close_series, pd.DataFrame):
+            close_series = close_series.iloc[:, 0]
+        current_price = float(close_series.iloc[-1])
+
         return FullAnalysisResponse(
             ticker=ticker,
-            current_price=float(df["Close"].squeeze().iloc[-1]),
+            current_price=current_price,
             indicators=indicators,
             signal=SignalData(**signal_result),
             backtest=BacktestResult(**backtest_result),
@@ -823,22 +900,26 @@ def get_full_analysis(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"분석 오류: {str(e)}")
+        import traceback
+        detail = f"분석 오류: {str(e)}"
+        raise HTTPException(status_code=500, detail=detail)
 
 # ─────────────────────────────────────────────────────────────
 # 헬퍼 함수
 # ─────────────────────────────────────────────────────────────
 
 def _safe_float(val) -> Optional[float]:
+    """NaN/Inf/None을 None으로 안전하게 변환"""
     if val is None:
         return None
     try:
         f = float(val)
-        return None if math.isnan(f) or math.isinf(f) else f
+        return None if (math.isnan(f) or math.isinf(f)) else f
     except (TypeError, ValueError):
         return None
 
 def _sanitize_chart_data(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """DataFrame을 JSON 직렬화 가능한 형태로 변환 (NaN → None)"""
     records = []
     for _, row in df.iterrows():
         record = {}
@@ -847,58 +928,112 @@ def _sanitize_chart_data(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 record[col] = _safe_float(val)
             elif isinstance(val, (np.integer,)):
                 record[col] = int(val)
+            elif isinstance(val, (np.bool_,)):
+                record[col] = bool(val)
             else:
                 record[col] = val
         records.append(record)
     return records
 
-def _fetch_ohlcv(ticker: str, days: int) -> pd.DataFrame:
+def _fetch_ohlcv(ticker: str, days: int, interval: str = "1d") -> pd.DataFrame:
+    """yfinance로 OHLCV 데이터 다운로드 및 컬럼 정규화"""
     end = datetime.now()
     start = end - timedelta(days=days)
-    df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"데이터 없음: '{ticker}'. 올바른 yfinance 티커인지 확인하세요.")
+
+    try:
+        df = yf.download(
+            ticker,
+            start=start,
+            end=end,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"yfinance 데이터 수신 실패: {str(e)}")
+
+    if df is None or df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"데이터 없음: '{ticker}' (interval={interval}). 올바른 yfinance 티커와 기간인지 확인하세요."
+        )
+
+    # MultiIndex 컬럼 평탄화 (yfinance 0.2.x 이상에서 발생)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+
+    # 컬럼명 중복 제거 (동일 이름이 있을 경우)
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    # 필수 컬럼 확인
+    required = {"Open", "High", "Low", "Close", "Volume"}
+    missing = required - set(df.columns)
+    if missing:
+        raise HTTPException(status_code=500, detail=f"데이터 컬럼 누락: {missing}")
+
     return df
 
+def _get_close_series(df: pd.DataFrame) -> pd.Series:
+    """Close 컬럼을 1차원 Series로 안전하게 추출"""
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    return close.squeeze()
+
 def _calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    close = df["Close"].squeeze()
+    """기술적 지표 계산 (RSI, MACD, 볼린저밴드, EMA)"""
+    close = _get_close_series(df)
+
+    # RSI (14)
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
     df["rsi"] = 100 - (100 / (1 + gain / (loss + 1e-10)))
+
+    # MACD (12, 26, 9)
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     df["macd"] = ema12 - ema26
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+
+    # 볼린저 밴드 (20, 2σ)
     sma20 = close.rolling(20).mean()
-    std20 = close.rolling(20).std()
+    std20 = close.rolling(20).std(ddof=0)
     df["bb_upper"] = sma20 + 2 * std20
     df["bb_lower"] = sma20 - 2 * std20
+
+    # EMA
     df["ema20"] = close.ewm(span=20, adjust=False).mean()
     df["ema50"] = close.ewm(span=50, adjust=False).mean()
-    return df.dropna()
+
+    # NaN 행 제거 (초기 계산 불가 구간)
+    df = df.dropna(subset=["rsi", "macd", "macd_signal", "bb_upper", "bb_lower", "ema20", "ema50"])
+    return df
 
 def _calculate_signal_score(df: pd.DataFrame) -> dict:
+    """AI 종합 신호 점수 계산"""
     latest = df.iloc[-1]
     rsi = float(latest["rsi"])
-    close = float(latest["Close"])
+    close = float(_get_close_series(df).iloc[-1])
     ema20 = float(latest["ema20"])
     ema50 = float(latest["ema50"])
 
+    # RSI 기반 점수 (0~100)
     rsi_score = (100 - rsi) * 0.8 if rsi > 50 else rsi * 1.2
+
+    # 추세 기반 점수 (EMA 배열 분석)
     trend_score = 50.0
     if close > ema20 > ema50:
-        trend_score = 85.0
+        trend_score = 85.0   # 강한 상승 추세
     elif close > ema20:
-        trend_score = 65.0
+        trend_score = 65.0   # 약한 상승 추세
     elif close < ema20 < ema50:
-        trend_score = 15.0
+        trend_score = 15.0   # 강한 하락 추세
     elif close < ema20:
-        trend_score = 35.0
+        trend_score = 35.0   # 약한 하락 추세
 
     total = float(np.clip(rsi_score * 0.5 + trend_score * 0.5, 0, 100))
+
     if total >= 75:
         signal = "STRONG_BUY"
     elif total >= 60:
@@ -913,23 +1048,30 @@ def _calculate_signal_score(df: pd.DataFrame) -> dict:
     return {
         "signal": signal,
         "total_score": total,
-        "confidence": float(abs(total - 50) * 2),
+        "confidence": float(min(abs(total - 50) * 2, 100)),
         "rsi_score": float(rsi_score),
         "trend_score": float(trend_score),
     }
 
-def _run_simple_backtest(df: pd.DataFrame) -> dict:
-    returns = df["Close"].squeeze().pct_change().dropna()
+def _run_simple_backtest(df: pd.DataFrame, ann_factor: float = 365) -> dict:
+    """Buy & Hold 전략 백테스트"""
+    close = _get_close_series(df)
+    returns = close.pct_change().dropna()
+
     if len(returns) < 2:
-        return {"total_return_pct": 0.0, "sharpe_ratio": 0.0,
-                "max_drawdown_pct": 0.0, "win_rate_pct": 0.0, "final_capital": 1000.0}
+        return {
+            "total_return_pct": 0.0, "sharpe_ratio": 0.0,
+            "max_drawdown_pct": 0.0, "win_rate_pct": 0.0, "final_capital": 1000.0
+        }
+
     cum = (1 + returns).cumprod()
     total_return = float((cum.iloc[-1] - 1) * 100)
-    sharpe = float((returns.mean() / (returns.std() + 1e-10)) * np.sqrt(252))
+    sharpe = float((returns.mean() / (returns.std() + 1e-10)) * math.sqrt(ann_factor))
     running_max = cum.cummax()
     max_dd = float(((cum - running_max) / (running_max + 1e-10)).min() * 100)
     win_rate = float((returns > 0).sum() / len(returns) * 100)
     final_cap = float(1000 * cum.iloc[-1])
+
     return {
         "total_return_pct": total_return,
         "sharpe_ratio": sharpe,
@@ -939,17 +1081,26 @@ def _run_simple_backtest(df: pd.DataFrame) -> dict:
     }
 
 def _calculate_trading_metrics(df: pd.DataFrame) -> dict:
-    close = df["Close"].squeeze()
+    """기간별 수익률 및 매매 비율 계산"""
+    close = _get_close_series(df)
     n = len(close)
     returns = {}
-    for period, days in {"1w": 7, "1m": 30, "3m": 90}.items():
-        if n > days:
-            returns[period] = float((close.iloc[-1] - close.iloc[-days]) / close.iloc[-days] * 100)
+    for period, pd_days in {"1w": 7, "1m": 30, "3m": 90}.items():
+        if n > pd_days:
+            base = float(close.iloc[-pd_days])
+            curr = float(close.iloc[-1])
+            returns[period] = float((curr - base) / base * 100) if base != 0 else 0.0
         else:
             returns[period] = 0.0
 
-    vol_recent = float(df["Volume"].squeeze().iloc[-5:].mean())
-    vol_avg = float(df["Volume"].squeeze().mean())
+    vol_series = df["Volume"]
+    if isinstance(vol_series, pd.DataFrame):
+        vol_series = vol_series.iloc[:, 0]
+    vol_series = vol_series.squeeze()
+
+    vol_recent = float(vol_series.iloc[-5:].mean())
+    vol_avg = float(vol_series.mean())
     buy_ratio = float(np.clip(50 + (vol_recent / (vol_avg + 1e-10) - 1) * 50, 0, 100))
     sentiment = "BULLISH" if buy_ratio > 60 else "BEARISH" if buy_ratio < 40 else "NEUTRAL"
+
     return {"returns": returns, "buy_sell_ratio": buy_ratio, "sentiment": sentiment}
