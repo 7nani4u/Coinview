@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-CoinOracle - Binance 기반 암호화폐 AI 분석 시스템
+CoinOracle - Binance 기반 암호화폐 규칙 기반 분석 시스템
 ===================================================
 [구조 설명]
 - StockOracle(주식 분석)을 암호화폐 전용으로 완전 변환
@@ -65,88 +65,35 @@ try:
 except ImportError:
     FEEDPARSER_AVAILABLE = False
 
-# =============================================================================
-# TTL 캐시 (st.cache_data 대체)
-# =============================================================================
-_CACHE: Dict[str, Tuple[Any, float]] = {}
+from api import config
+from api.backtesting import (
+    calc_directional_accuracy,
+    calc_mape,
+    safe_pct_change,
+    summarize_leverage_outcomes,
+    summarize_signal_outcomes,
+)
+from api.cache_backend import cache_meta, ttl_cache
+from api.validators import (
+    normalize_interval,
+    normalize_limit,
+    normalize_validation_horizon,
+    normalize_validation_window,
+    validate_interval,
+    validate_ticker,
+)
 
-def ttl_cache(ttl: int):
-    def deco(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
-            key = f"{fn.__name__}|{args}|{sorted(kwargs.items())}"
-            now = time.time()
-            if key in _CACHE and now - _CACHE[key][1] < ttl:
-                return _CACHE[key][0]
-            r = fn(*args, **kwargs)
-            _CACHE[key] = (r, now)
-            return r
-        return wrapper
-    return deco
+# =============================================================================
+# 캐시 / 설정 / 검증 모듈
+# =============================================================================
 
 # =============================================================================
 # ── 코인 심볼 매핑 (한국어/영어 별칭 → Binance USDT 심볼)
 # =============================================================================
-COIN_ALIASES: Dict[str, str] = {
-    # 메이저
-    "비트코인": "BTCUSDT", "BTC": "BTCUSDT", "비트": "BTCUSDT",
-    "이더리움": "ETHUSDT", "ETH": "ETHUSDT", "이더": "ETHUSDT",
-    "바이낸스코인": "BNBUSDT", "BNB": "BNBUSDT",
-    "리플": "XRPUSDT", "XRP": "XRPUSDT",
-    "솔라나": "SOLUSDT", "SOL": "SOLUSDT",
-    "에이다": "ADAUSDT", "ADA": "ADAUSDT", "카르다노": "ADAUSDT",
-    "도지": "DOGEUSDT", "DOGE": "DOGEUSDT", "도지코인": "DOGEUSDT",
-    "아발란체": "AVAXUSDT", "AVAX": "AVAXUSDT",
-    "시바이누": "SHIBUSDT", "SHIB": "SHIBUSDT",
-    "폴카닷": "DOTUSDT", "DOT": "DOTUSDT",
-    "체인링크": "LINKUSDT", "LINK": "LINKUSDT",
-    "유니스왑": "UNIUSDT", "UNI": "UNIUSDT",
-    "아톰": "ATOMUSDT", "ATOM": "ATOMUSDT",
-    "리테라코인": "LTCUSDT", "LTC": "LTCUSDT", "라이트코인": "LTCUSDT",
-    "이더리움클래식": "ETCUSDT", "ETC": "ETCUSDT",
-    "비트코인캐시": "BCHUSDT", "BCH": "BCHUSDT",
-    "수이": "SUIUSDT", "SUI": "SUIUSDT",
-    "아비트럼": "ARBUSDT", "ARB": "ARBUSDT",
-    "옵티미즘": "OPUSDT", "OP": "OPUSDT",
-    "매틱": "POLUSDT", "MATIC": "MATICUSDT", "폴리곤": "POLUSDT",
-    "니어": "NEARUSDT", "NEAR": "NEARUSDT",
-    "인젝티브": "INJUSDT", "INJ": "INJUSDT",
-    "셀레스티아": "TIAUSDT", "TIA": "TIAUSDT",
-    "아이오타": "IOTAUSDT", "IOTA": "IOTAUSDT",
-    "앱토스": "APTUSDT", "APT": "APTUSDT",
-    "필코인": "FILUSDT", "FIL": "FILUSDT",
-    "샌드박스": "SANDUSDT", "SAND": "SANDUSDT",
-    "디센트럴랜드": "MANAUSDT", "MANA": "MANAUSDT",
-    "아이오에스티": "IOSTUSDT", "IOST": "IOSTUSDT",
-    "트론": "TRXUSDT", "TRX": "TRXUSDT",
-    "스텔라": "XLMUSDT", "XLM": "XLMUSDT",
-    "에이브": "AAVEUSDT", "AAVE": "AAVEUSDT",
-    "커브": "CRVUSDT", "CRV": "CRVUSDT",
-    "렌더": "RENDERUSDT", "RENDER": "RENDERUSDT",
-    "월드코인": "WLDUSDT", "WLD": "WLDUSDT",
-    "페페": "PEPEUSDT", "PEPE": "PEPEUSDT",
-    "봉크": "BONKUSDT", "BONK": "BONKUSDT",
-    "플로키": "FLOKIUSDT", "FLOKI": "FLOKIUSDT",
-    "비트텐서": "TAOUSDT", "TAO": "TAOUSDT",
-    "에테나": "ENAUSDT", "ENA": "ENAUSDT",
-    "제트로": "ZROUSDT", "ZRO": "ZROUSDT",
-    "세이": "SEIUSDT", "SEI": "SEIUSDT",
-    "칠리즈": "CHZUSDT", "CHZ": "CHZUSDT",
-    "펜구": "PENGUUSDT", "PENGU": "PENGUUSDT",
-    "트럼프": "TRUMPUSDT", "TRUMP": "TRUMPUSDT",
-}
+COIN_ALIASES = config.COIN_ALIASES
 
-# 스크리너용 주요 코인 유니버스 (Binance 상장 주요 코인)
-COIN_UNIVERSE = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","XRPUSDT","SOLUSDT",
-    "ADAUSDT","DOGEUSDT","AVAXUSDT","DOTUSDT","LINKUSDT",
-    "UNIUSDT","ATOMUSDT","LTCUSDT","ETCUSDT","BCHUSDT",
-    "SUIUSDT","ARBUSDT","OPUSDT","NEARUSDT","INJUSDT",
-    "TIAUSDT","APTUSDT","FILUSDT","AAVEUSDT","CRVUSDT",
-    "RENDERUSDT","WLDUSDT","PEPEUSDT","BONKUSDT","TAOUSDT",
-    "ENAUSDT","SEIUSDT","CHZUSDT","TRXUSDT","XLMUSDT",
-    "SANDUSDT","MANAUSDT","MATICUSDT","SHIBUSDT","FLOKIUSDT",
-]
+# 스크리너용 주요 코인 유니버스
+COIN_UNIVERSE = config.COIN_UNIVERSE
 
 def resolve_symbol(q: str) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -181,50 +128,46 @@ def resolve_symbol(q: str) -> Tuple[Optional[str], Optional[str]]:
 # ── Binance API 데이터 수집 모듈
 # =============================================================================
 
-BINANCE_BASES = [
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://data-api.binance.vision"
-]
-BINANCE_FAPI   = "https://fapi.binance.com"
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+BINANCE_BASES = config.BINANCE_BASES
+BINANCE_FAPI = config.BINANCE_FAPI
+COINGECKO_BASE = config.COINGECKO_BASE
+_HEADERS = config.REQUEST_HEADERS
+REQUEST_TIMEOUT = config.DEFAULT_TIMEOUT
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-def _get(url: str, params: dict = None, timeout: int = 10) -> Any:
+def _get(url: str, params: dict = None, timeout: int = REQUEST_TIMEOUT) -> Any:
     """공통 GET 요청 (오류 시 None 반환)"""
     try:
         r = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.json()
-    except Exception as e:
-        print(f"[API Error] GET {url} params={params} failed: {e}")
-        return None
+    except requests.exceptions.Timeout:
+        print(f"[API Timeout] GET {url} params={params} timed out")
+    except requests.exceptions.HTTPError as e:
+        print(f"[API HTTPError] GET {url} params={params} failed: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"[API RequestError] GET {url} params={params} failed: {e}")
+    except ValueError as e:
+        print(f"[API JSONError] GET {url} params={params} failed: {e}")
+    return None
 
-def _get_binance(endpoint: str, params: dict = None, timeout: int = 10) -> Any:
+def _get_binance(endpoint: str, params: dict = None, timeout: int = REQUEST_TIMEOUT) -> Any:
     """Binance 현물 API 요청 (여러 엔드포인트 폴백 지원)"""
     for base in BINANCE_BASES:
         url = f"{base}{endpoint}"
         try:
             r = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
             if r.status_code == 200:
-                try:
-                    return r.json()
-                except ValueError:
-                    print(f"[API Error] {url} returned invalid JSON")
-                    continue
-            elif r.status_code in (403, 451):
-                # IP 차단 가능성 (Vercel US IP 등) - 다음 엔드포인트 시도
+                return r.json()
+            if r.status_code in (403, 429, 451):
                 print(f"[API Warning] {url} returned {r.status_code}, trying next...")
                 continue
-            else:
-                print(f"[API Warning] {url} returned {r.status_code}, trying next...")
-                continue
-        except Exception as e:
+            print(f"[API Warning] {url} returned {r.status_code}, trying next...")
+        except requests.exceptions.Timeout:
+            print(f"[API Timeout] GET {url} params={params} timed out")
+        except requests.exceptions.RequestException as e:
             print(f"[API Warning] GET {url} failed: {e}, trying next...")
-            continue
+        except ValueError:
+            print(f"[API Error] {url} returned invalid JSON")
     print(f"[API Error] All Binance base endpoints failed for {endpoint}")
     return None
 
@@ -1034,7 +977,7 @@ def linear_forecast(dd: Dict, days: int):
         return None
 
 
-def xgb_forecast(dd: Dict, days: int = 30):
+def momentum_sim_forecast(dd: Dict, days: int = 30):
     """
     모멘텀 기반 시뮬레이션 예측
     [변경] 코인 고변동성 반영 — decay 0.95 → 0.90
@@ -1062,78 +1005,62 @@ def xgb_forecast(dd: Dict, days: int = 30):
     except Exception:
         return None
 
+
+def xgb_forecast(dd: Dict, days: int = 30):
+    """하위 호환용 별칭. 실제 로직은 모멘텀 시뮬레이션이다."""
+    return momentum_sim_forecast(dd, days)
+
 # =============================================================================
 # ── 코인 스크리너 (기존 주식 스크리너 완전 대체)
 # =============================================================================
 
-SCREENER_INTERVALS = {
-    "1d": 90,   # 일봉 90개
-    "4h": 120,  # 4시간봉 120개
-}
+SCREENER_INTERVALS = config.SCREENER_INTERVALS
 
-def fetch_coin_screener_item(symbol: str) -> Optional[Dict]:
-    """
-    단일 코인 스크리너 데이터 수집
-    [대체] fetch_toss_metrics (주식 재무 지표) → 코인 시장 지표
-    필터 조건:
-      - 거래량/시총 비율 ≥ 5%
-      - 펀딩비 절대값 < 0.1% (과도한 쏠림 제외)
-      - RSI 30~70 (극단값 제외 — 반전 위험)
-      - ATR_Pct 기반 변동성 등급
-    """
+def fetch_coin_screener_item(symbol: str, prefetched_ticker: Optional[Dict] = None, funding_rate: Optional[float] = None) -> Optional[Dict]:
+    """단일 코인 스크리너 데이터 수집"""
     try:
-        # 24h 티커
-        ticker = fetch_ticker_24h(symbol)
+        ticker = prefetched_ticker or fetch_ticker_24h(symbol)
         if not ticker:
             return None
 
-        price      = float(ticker.get("lastPrice", 0))
+        price = float(ticker.get("lastPrice", 0))
         change_pct = float(ticker.get("priceChangePercent", 0))
-        volume_24h = float(ticker.get("quoteVolume", 0))  # USDT 기준 거래량
-
+        volume_24h = float(ticker.get("quoteVolume", 0))
         if price <= 0 or volume_24h <= 0:
             return None
 
-        # 일봉 OHLCV (지표 계산용)
         df = fetch_coin_klines(symbol, interval="1d", limit=60)
         if df is None or len(df) < 20:
             return None
         df = add_indicators(df)
         df = df.dropna(subset=["Close", "RSI", "ATR"])
+        if df.empty:
+            return None
 
-        rsi     = float(df["RSI"].iloc[-1])
-        atr     = float(df["ATR"].iloc[-1])
+        rsi = float(df["RSI"].iloc[-1])
+        atr = float(df["ATR"].iloc[-1])
         atr_pct = float(df["ATR_Pct"].iloc[-1])
-        ma20    = float(df["MA20"].iloc[-1])
+        ma20 = float(df["MA20"].iloc[-1])
         vol_30d = float(df["Volatility_30d"].iloc[-1]) if "Volatility_30d" in df.columns and not pd.isna(df["Volatility_30d"].iloc[-1]) else 0
-        macd    = float(df["MACD"].iloc[-1]) if "MACD" in df.columns and not pd.isna(df["MACD"].iloc[-1]) else 0.0
+        macd = float(df["MACD"].iloc[-1]) if "MACD" in df.columns and not pd.isna(df["MACD"].iloc[-1]) else 0.0
         macd_signal = float(df["Signal_Line"].iloc[-1]) if "Signal_Line" in df.columns and not pd.isna(df["Signal_Line"].iloc[-1]) else 0.0
         bb_upper = float(df["BB_Upper"].iloc[-1]) if "BB_Upper" in df.columns and not pd.isna(df["BB_Upper"].iloc[-1]) else 0.0
         bb_lower = float(df["BB_Lower"].iloc[-1]) if "BB_Lower" in df.columns and not pd.isna(df["BB_Lower"].iloc[-1]) else 0.0
-        ema12   = float(df["EMA12"].iloc[-1]) if "EMA12" in df.columns and not pd.isna(df["EMA12"].iloc[-1]) else 0.0
-        ema26   = float(df["EMA26"].iloc[-1]) if "EMA26" in df.columns and not pd.isna(df["EMA26"].iloc[-1]) else 0.0
-
-        # 거래량 비율 (현재 / 20일 평균)
+        ema12 = float(df["EMA12"].iloc[-1]) if "EMA12" in df.columns and not pd.isna(df["EMA12"].iloc[-1]) else 0.0
+        ema26 = float(df["EMA26"].iloc[-1]) if "EMA26" in df.columns and not pd.isna(df["EMA26"].iloc[-1]) else 0.0
         avg_vol = float(df["Volume"].rolling(20).mean().iloc[-1])
         vol_ratio = float(df["Volume"].iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
+        funding = funding_rate if funding_rate is not None else fetch_funding_rate(symbol)
 
-        # 펀딩비
-        funding = fetch_funding_rate(symbol)
-
-        # AI 종합 점수(간이) 계산 (Screener에서는 전체 AI 분석을 돌리기 무거울 수 있으므로 임의로 50으로 두거나, 스크리너 로직에 맞춰 기본값 사용)
-        score = 50 
-
-        # 레버리지 예측
         lev_info = calc_leverage_recommendation(
             price=price, atr=atr, atr_pct=atr_pct,
             volatility_30d=vol_30d, funding_rate=funding,
             rsi=rsi, volume_ratio=vol_ratio,
-            macd=macd, macd_signal=macd_signal, score=score,
+            macd=macd, macd_signal=macd_signal, score=50,
             bb_upper=bb_upper, bb_lower=bb_lower,
             ema12=ema12, ema26=ema26
         )
 
-        # 신호 판단
         signal = "중립"
         if rsi < 25:
             signal = "적극 매수"
@@ -1145,88 +1072,79 @@ def fetch_coin_screener_item(symbol: str) -> Optional[Dict]:
             signal = "매도"
 
         base = symbol.replace("USDT", "")
-
         return {
-            "symbol":       symbol,
-            "name":         base,
-            "ticker":       base,
-            "price":        (f"${price:,.2f}" if price >= 1000 else f"${price:.4f}" if price >= 1 else f"${price:.6f}" if price >= 0.001 else f"${price:.8f}"),
-            "price_val":    price,
-            "change":       change_pct,
-            "volume_24h":   volume_24h,
+            "symbol": symbol,
+            "name": base,
+            "ticker": base,
+            "price": (f"${price:,.2f}" if price >= 1000 else f"${price:.4f}" if price >= 1 else f"${price:.6f}" if price >= 0.001 else f"${price:.8f}"),
+            "price_val": price,
+            "change": change_pct,
+            "volume_24h": volume_24h,
             "volume_ratio": round(vol_ratio, 2),
-            "rsi":          round(rsi, 1),
-            "atr_pct":      round(atr_pct, 2),
-            "volatility":   round(vol_30d, 1),
-            "funding_rate": round(funding, 4) if funding else None,
+            "rsi": round(rsi, 1),
+            "atr_pct": round(atr_pct, 2),
+            "volatility": round(vol_30d, 1),
+            "funding_rate": round(funding, 4) if funding is not None else None,
             "leverage_rec": lev_info["recommended_leverage"],
-            "risk_grade":   lev_info["risk_grade"],
-            "signal":       signal,
-            "category":     _categorize_coin(base),
+            "risk_grade": lev_info["risk_grade"],
+            "signal": signal,
+            "category": _categorize_coin(base),
         }
-    except Exception:
+    except Exception as e:
+        print(f"[Screener Item Error] {symbol}: {e}")
         return None
 
 
-def _categorize_coin(base: str) -> str:
-    """코인 카테고리 분류"""
-    cats = {
-        "Layer1":   ["BTC","ETH","SOL","ADA","AVAX","DOT","ATOM","NEAR","APT","SUI","TRX","XLM"],
-        "Layer2":   ["ARB","OP","MATIC","POL","ZRO","TIA"],
-        "DeFi":     ["UNI","AAVE","CRV","LINK","MKR","SNX","COMP","BAL","1INCH"],
-        "Meme":     ["DOGE","SHIB","PEPE","BONK","FLOKI","TRUMP","PENGU"],
-        "GameFi":   ["SAND","MANA","AXS","GALA","IMX","ENJ"],
-        "AI/Data":  ["FET","OCEAN","RNDR","RENDER","TAO","WLD","GRT"],
-        "Exchange": ["BNB","OKB","CRO","HT"],
-        "Storage":  ["FIL","AR","STORJ"],
-    }
-    for cat, coins in cats.items():
-        if base.upper() in coins:
-            return cat
-    return "Altcoin"
-
-
-@ttl_cache(300)
+@ttl_cache(config.CACHE_TTL_SCREENER)
 def fetch_coin_screener(sort_by: str = "volume", sort_order: str = "desc") -> Dict:
-    """
-    코인 스크리너 (기존 fetch_screener 대체)
-    [대체] 주식 재무 필터 → 코인 시장 필터
-    """
+    """배치 호출 중심 코인 스크리너"""
+    ticker_list = fetch_all_tickers_24h() or []
+    funding_map = fetch_all_funding_rates()
+    ticker_map = {item.get("symbol"): item for item in ticker_list if item.get("symbol") in COIN_UNIVERSE}
+
+    ranked_symbols = sorted(
+        [sym for sym in COIN_UNIVERSE if sym in ticker_map],
+        key=lambda sym: float(ticker_map[sym].get("quoteVolume", 0) or 0),
+        reverse=True,
+    )[: config.SCREENER_TOP_N]
+
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(fetch_coin_screener_item, sym): sym for sym in COIN_UNIVERSE}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=config.SCREENER_MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_coin_screener_item, sym, ticker_map.get(sym), funding_map.get(sym)): sym for sym in ranked_symbols}
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res is not None:
                 results.append(res)
 
-    # 정렬
     sort_map = {
-        "price":    "price_val",
-        "change":   "change",
-        "volume":   "volume_24h",
-        "rsi":      "rsi",
+        "name": "name",
+        "price": "price_val",
+        "change": "change",
+        "volume": "volume_24h",
+        "rsi": "rsi",
         "leverage": "leverage_rec",
     }
     sort_field = sort_map.get(sort_by, "volume_24h")
-    ascending  = (sort_order == "asc")
-    results.sort(key=lambda x: (x.get(sort_field) or 0), reverse=not ascending)
-
-    filter_conditions = {
-        "거래소":     "Binance (현물/선물)",
-        "거래량":     "24시간 USDT 거래량 > 0",
-        "RSI":        "0 ~ 100 (전체 표시)",
-        "펀딩비":     "절대값 < 0.1% 권장",
-        "레버리지":   "ATR/변동성 기반 자동 계산",
-        "데이터":     "Binance REST API (실시간)",
-    }
+    results.sort(key=lambda x: (x.get(sort_field) or 0), reverse=(sort_order != "asc"))
 
     return {
-        "data":              results,
-        "total":             len(results),
-        "sort_by":           sort_by,
-        "sort_order":        sort_order,
-        "filter_conditions": filter_conditions,
+        "data": results,
+        "total": len(results),
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+        "batch_strategy": {
+            "tickers_24h": "all-symbol single request",
+            "funding_rates": "all-symbol single request",
+            "klines": f"top {len(ranked_symbols)} symbols only",
+            "workers": config.SCREENER_MAX_WORKERS,
+        },
+        "filter_conditions": {
+            "거래소": "Binance (현물/선물)",
+            "호출 최적화": "24h ticker 1회 + funding 1회 + 심볼별 klines",
+            "정렬": sort_by,
+            "리스크": "ATR/변동성 기반 자동 계산",
+            "데이터": "Binance REST API (실시간)",
+        },
     }
 
 # =============================================================================
@@ -1275,21 +1193,110 @@ def fetch_market_sentiment(market: str = "CRYPTO") -> Dict:
     }
 
 # =============================================================================
-# ── 라우팅
+# ── 검증 / 라우팅
 # =============================================================================
 
-def route(path: str, params: Dict) -> Optional[Dict]:
-    # ── /api/coin (기존 /api/stock 대체) ──────────────────────────
-    if path in ("/api/coin", "/api/stock"):
-        raw      = params.get("ticker", "BTCUSDT")
-        interval = params.get("interval", "1d")
-        limit    = int(params.get("limit", 365))
+def build_validation_report(symbol: str, interval: str = "1d", window: int = 180, horizon: int = 7) -> Dict:
+    raw = fetch_coin_klines(symbol, interval=interval, limit=min(window + horizon + 120, config.MAX_LIMIT))
+    if raw is None or len(raw) < max(90, horizon + 60):
+        return {"error": "검증에 필요한 캔들 데이터가 부족합니다."}
 
-        # interval 유효성 검사
-        valid_intervals = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w","1M"}
-        if interval not in valid_intervals:
-            interval = "1d"
-        limit = max(50, min(1000, limit))
+    df = add_indicators(raw.copy()).reset_index(drop=True)
+    start_idx = max(60, len(df) - window)
+    hw_pred, hw_actual, hw_base = [], [], []
+    mm_pred, mm_actual, mm_base = [], [], []
+    score_outcomes = []
+    leverage_outcomes = []
+
+    for end_idx in range(start_idx, len(df) - horizon):
+        hist = df.iloc[: end_idx + 1].copy()
+        future_price = float(df["Close"].iloc[end_idx + horizon])
+        base_price = float(hist["Close"].iloc[-1])
+        dd = hist.to_dict(orient="list")
+
+        hw = holt_winters_forecast(dd, days=horizon)
+        if hw and hw.get("yhat") and len(hw["yhat"]) >= horizon:
+            hw_pred.append(float(hw["yhat"][horizon - 1]))
+            hw_actual.append(future_price)
+            hw_base.append(base_price)
+
+        mm = momentum_sim_forecast(dd, days=horizon)
+        if mm and len(mm) >= horizon:
+            mm_pred.append(float(mm[horizon - 1]))
+            mm_actual.append(future_price)
+            mm_base.append(base_price)
+
+        score, _, _, _ = analyze_score(dd)
+        future_ret = safe_pct_change(base_price, future_price)
+        if score >= 60:
+            score_outcomes.append({"future_return_pct": future_ret})
+        elif score <= 40:
+            score_outcomes.append({"future_return_pct": -future_ret})
+
+        row = hist.iloc[-1]
+        vols = hist["Volume"].tail(20)
+        avg_vol = float(vols.mean()) if len(vols) else 1.0
+        lev = calc_leverage_recommendation(
+            price=base_price,
+            atr=float(row.get("ATR", 0) or 0),
+            atr_pct=float(row.get("ATR_Pct", 0) or 0),
+            volatility_30d=float(row.get("Volatility_30d", 0) or 0),
+            funding_rate=fetch_funding_rate(symbol),
+            rsi=float(row.get("RSI", 50) or 50),
+            volume_ratio=float(row.get("Volume", 0) or 0) / avg_vol if avg_vol > 0 else 1.0,
+            macd=float(row.get("MACD", 0) or 0),
+            macd_signal=float(row.get("Signal_Line", 0) or 0),
+            score=score,
+            bb_upper=float(row.get("BB_Upper", 0) or 0),
+            bb_lower=float(row.get("BB_Lower", 0) or 0),
+            ema12=float(row.get("EMA12", 0) or 0),
+            ema26=float(row.get("EMA26", 0) or 0),
+        )
+        leverage_outcomes.append({
+            "future_return_pct": future_ret,
+            "realized_abs_return_pct": abs(future_ret),
+            "stop_loss_pct": lev.get("stop_loss_pct", 0),
+            "recommended_leverage": lev.get("recommended_leverage", 1),
+        })
+
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "window": window,
+        "horizon": horizon,
+        "methodology": {
+            "forecast": "rolling walk-forward; horizon 시점의 종가 방향성과 MAPE를 확인",
+            "score": "score>=60은 long, score<=40은 short로 간주하여 horizon 수익률 평가",
+            "leverage": "추천 손절폭(stop_loss_pct) 대비 실제 절대수익률 초과율을 추적",
+        },
+        "forecast_validation": {
+            "holt_winters": {
+                "samples": len(hw_pred),
+                "directional_accuracy": calc_directional_accuracy(hw_pred, hw_actual, hw_base),
+                "mape": calc_mape(hw_pred, hw_actual),
+            },
+            "momentum_sim": {
+                "samples": len(mm_pred),
+                "directional_accuracy": calc_directional_accuracy(mm_pred, mm_actual, mm_base),
+                "mape": calc_mape(mm_pred, mm_actual),
+            },
+        },
+        "score_validation": summarize_signal_outcomes(score_outcomes),
+        "leverage_validation": summarize_leverage_outcomes(leverage_outcomes),
+        "notes": [
+            "현재 검증은 규칙 기반 휴리스틱 품질 측정용이며 실거래 성능을 보장하지 않음",
+            "슬리피지·수수료·체결 실패는 보수적으로 별도 반영 필요",
+        ],
+    }
+
+def route(path: str, params: Dict) -> Optional[Dict]:
+    if path == "/api/stock":
+        return {"error": "Deprecated endpoint. Use /api/coin", "replacement": "/api/coin", "status": "deprecated"}
+
+    if path == "/api/coin":
+        raw = params.get("ticker", "BTCUSDT")
+        interval = normalize_interval(params.get("interval", config.DEFAULT_INTERVAL))
+        limit = normalize_limit(params.get("limit", str(config.DEFAULT_LIMIT)))
 
         symbol, display = resolve_symbol(raw)
         if not symbol:
@@ -1297,131 +1304,117 @@ def route(path: str, params: Dict) -> Optional[Dict]:
 
         dd, news, sym = fetch_coin_data(symbol, interval=interval, limit=limit)
         if dd is None:
-            # USDT로 못 찾았을 경우 대비 fallback (일부 코인은 BUSD나 다른 페어일 수 있으나 기본은 USDT)
             return {"error": f"데이터 조회 실패: 데이터 없음: {sym}"}
 
         closes = dd.get("Close", [])
         last_ohlcv = float(closes[-1]) if closes else 0
-        prev   = float(closes[-2]) if len(closes) > 1 else last_ohlcv
-        
-        # 실시간 Ticker 24h 정보 우선 사용 (현재가 및 변동률 정확도 향상)
+        prev = float(closes[-2]) if len(closes) > 1 else last_ohlcv
         ticker_24h = dd.get("ticker_24h", {})
         if ticker_24h and "price" in ticker_24h:
             last = float(ticker_24h["price"])
             pct = float(ticker_24h.get("change_pct", (last - prev) / prev * 100 if prev else 0))
         else:
             last = last_ohlcv
-            pct  = (last - prev) / prev * 100 if prev else 0
+            pct = (last - prev) / prev * 100 if prev else 0
 
-        # 지표값 추출
         def v(k):
             a = dd.get(k, [])
             val = a[-1] if a else None
             return float(val) if val is not None else 0.0
 
-        rsi     = v("RSI")
-        atr     = v("ATR")
+        rsi = v("RSI")
+        atr = v("ATR")
         atr_pct = v("ATR_Pct")
         vol_30d = v("Volatility_30d")
-        macd    = v("MACD")
+        macd = v("MACD")
         macd_signal = v("Signal_Line")
         bb_upper = v("BB_Upper")
         bb_lower = v("BB_Lower")
-        ema12   = v("EMA12")
-        ema26   = v("EMA26")
-        vols    = dd.get("Volume", [])
+        ema12 = v("EMA12")
+        ema26 = v("EMA26")
+        vols = dd.get("Volume", [])
         cur_vol = float(vols[-1]) if vols else 0
         avg_vol = float(np.mean([x for x in vols[-20:] if x])) if vols else 1
         vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
         funding = dd.get("funding_rate")
 
-        # AI 분석
         score, steps, patterns, geo_patterns = analyze_score(dd)
         for gp in geo_patterns:
             direction = "상승" if gp.get("signal") == "매수" else "하락" if gp.get("signal") == "매도" else "중립"
             patterns.append({"name": gp.get("name"), "desc": gp.get("desc"), "direction": direction, "conf": 100})
 
-        # 예측
         forecast = holt_winters_forecast(dd)
-        xgbp     = xgb_forecast(dd)
-
-        # 레버리지 예측 (신규)
+        momentum = momentum_sim_forecast(dd)
         leverage_info = calc_leverage_recommendation(
             price=last, atr=atr, atr_pct=atr_pct,
             volatility_30d=vol_30d, funding_rate=funding,
             rsi=rsi, volume_ratio=vol_ratio,
             macd=macd, macd_signal=macd_signal, score=score,
-            bb_upper=bb_upper, bb_lower=bb_lower,
-            ema12=ema12, ema26=ema26
+            bb_upper=bb_upper, bb_lower=bb_lower, ema12=ema12, ema26=ema26
         )
-
-        # 리스크 시나리오
         risk = calc_risk(last, atr, leverage_info)
 
-        # 24h 티커 정보
-        ticker_24h = dd.get("ticker_24h", {})
-
         return {
-            "symbol":       sym,
-            "company":      display or sym.replace("USDT", ""),
-            "market":       "CRYPTO",
-            "last_close":   round(last, 8),
-            "prev_close":   round(prev, 8),
-            "pct_change":   round(pct, 2),
-            "rsi":          round(rsi, 1),
-            "volume":       int(cur_vol),
+            "symbol": sym,
+            "company": display or sym.replace("USDT", ""),
+            "market": "CRYPTO",
+            "analysis_engine": "rules-based signal engine",
+            "forecast_model_note": "예측 값은 규칙 기반 참고치이며 확정적 투자 신호가 아님",
+            "last_close": round(last, 8),
+            "prev_close": round(prev, 8),
+            "pct_change": round(pct, 2),
+            "rsi": round(rsi, 1),
+            "volume": int(cur_vol),
             "volume_ratio": round(vol_ratio, 2),
-            "atr":          round(atr, 8),
-            "atr_pct":      round(atr_pct, 2),
+            "atr": round(atr, 8),
+            "atr_pct": round(atr_pct, 2),
             "volatility_30d": round(vol_30d, 1),
-            "funding_rate": round(funding, 4) if funding else None,
-            "ticker_24h":   ticker_24h,
-            "score":        score,
-            "analysis_steps":      steps,
+            "funding_rate": round(funding, 4) if funding is not None else None,
+            "ticker_24h": ticker_24h,
+            "score": score,
+            "analysis_steps": steps,
             "candlestick_patterns": patterns,
             "chart_data": {
-                "dates":       dd.get("Date", []),
-                "open":        dd.get("Open", []),
-                "high":        dd.get("High", []),
-                "low":         dd.get("Low", []),
-                "close":       dd.get("Close", []),
-                "volume":      dd.get("Volume", []),
-                "ma20":        dd.get("MA20", []),
-                "ma60":        dd.get("MA60", []),
-                "bb_upper":    dd.get("BB_Upper", []),
-                "bb_lower":    dd.get("BB_Lower", []),
-                "rsi":         dd.get("RSI", []),
-                "macd":        dd.get("MACD", []),
+                "dates": dd.get("Date", []),
+                "open": dd.get("Open", []),
+                "high": dd.get("High", []),
+                "low": dd.get("Low", []),
+                "close": dd.get("Close", []),
+                "volume": dd.get("Volume", []),
+                "ma20": dd.get("MA20", []),
+                "ma60": dd.get("MA60", []),
+                "bb_upper": dd.get("BB_Upper", []),
+                "bb_lower": dd.get("BB_Lower", []),
+                "rsi": dd.get("RSI", []),
+                "macd": dd.get("MACD", []),
                 "signal_line": dd.get("Signal_Line", []),
-                "vwap":        dd.get("VWAP", []),
+                "vwap": dd.get("VWAP", []),
             },
-            "forecast":         forecast,
-            "xgb_forecast":     xgbp,
-            "risk_scenarios":   risk,
-            "leverage_info":    leverage_info,
-            "news":             news or [],
+            "forecast": forecast,
+            "momentum_forecast": momentum,
+            "xgb_forecast": momentum,
+            "risk_scenarios": risk,
+            "leverage_info": leverage_info,
+            "news": news or [],
         }
 
-    # ── /api/screener ─────────────────────────────────────────────
     if path == "/api/screener":
-        sort_by    = params.get("sort_by",    "volume")
+        sort_by = params.get("sort_by", "volume")
         sort_order = params.get("sort_order", "desc")
-        if sort_by    not in {"price","change","volume","rsi","leverage"}: sort_by = "volume"
-        if sort_order not in {"asc","desc"}: sort_order = "desc"
+        if sort_by not in config.SCREENER_VALID_SORT:
+            sort_by = "volume"
+        if sort_order not in config.SCREENER_VALID_ORDER:
+            sort_order = "desc"
         return fetch_coin_screener(sort_by=sort_by, sort_order=sort_order)
 
-    # ── /api/sentiment ────────────────────────────────────────────
     if path == "/api/sentiment":
-        m = params.get("market", "CRYPTO")
-        return fetch_market_sentiment(m)
+        return fetch_market_sentiment(params.get("market", "CRYPTO"))
 
-    # ── /api/resolve ──────────────────────────────────────────────
     if path == "/api/resolve":
         q = params.get("q", "")
         sym, display = resolve_symbol(q)
         return {"symbol": sym, "display": display} if sym else {"error": f"'{q}' 미발견"}
 
-    # ── /api/leverage ─────────────────────────────────────────────
     if path == "/api/leverage":
         sym_raw = params.get("symbol", "BTCUSDT")
         symbol, _ = resolve_symbol(sym_raw)
@@ -1434,28 +1427,46 @@ def route(path: str, params: Dict) -> Optional[Dict]:
             a = dd.get(k, [])
             val = a[-1] if a else None
             return float(val) if val is not None else 0.0
-        closes  = dd.get("Close", [])
-        last    = float(closes[-1]) if closes else 0
-        vols    = dd.get("Volume", [])
+        closes = dd.get("Close", [])
+        last = float(closes[-1]) if closes else 0
+        vols = dd.get("Volume", [])
         cur_vol = float(vols[-1]) if vols else 0
         avg_vol = float(np.mean([x for x in vols[-20:] if x])) if vols else 1
-        lev = calc_leverage_recommendation(
-            price=last, atr=v("ATR"), atr_pct=v("ATR_Pct"),
-            volatility_30d=v("Volatility_30d"),
-            funding_rate=dd.get("funding_rate"),
-            rsi=v("RSI"), volume_ratio=cur_vol/avg_vol if avg_vol > 0 else 1
-        )
+        lev = calc_leverage_recommendation(price=last, atr=v("ATR"), atr_pct=v("ATR_Pct"), volatility_30d=v("Volatility_30d"), funding_rate=dd.get("funding_rate"), rsi=v("RSI"), volume_ratio=cur_vol/avg_vol if avg_vol > 0 else 1)
         return {"symbol": symbol, "leverage_info": lev}
 
-    # ── /api/cron (캐시 워밍) ─────────────────────────────────────
-    if path == "/api/cron":
-        try:
-            fetch_coin_screener()
-            return {"status": "ok", "message": "Cache warmed (coin screener)"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+    if path == "/api/validation":
+        raw = params.get("ticker", params.get("symbol", "BTCUSDT"))
+        interval = normalize_interval(params.get("interval", config.DEFAULT_INTERVAL))
+        window = normalize_validation_window(params.get("window", str(config.VALIDATION_DEFAULT_WINDOW)))
+        horizon = normalize_validation_horizon(params.get("horizon", str(config.VALIDATION_DEFAULT_HORIZON)))
+        symbol, _ = resolve_symbol(raw)
+        if not symbol:
+            return {"error": "심볼 없음"}
+        return build_validation_report(symbol=symbol, interval=interval, window=window, horizon=horizon)
 
-    return None  # HTML 반환
+    if path == "/api/health":
+        return {
+            "status": "ok",
+            "service": config.APP_NAME,
+            "version": config.APP_VERSION,
+            "runtime": {"python": sys.version.split()[0], "serverless": bool(os.getenv("VERCEL"))},
+            "cache": cache_meta(),
+            "features": {"screener_batch": True, "validation_endpoint": True, "frontend": "public/index.html"},
+        }
+
+    if path == "/api/cron":
+        warmed = []
+        fetch_market_sentiment("CRYPTO")
+        warmed.append("/api/sentiment?market=CRYPTO")
+        fetch_coin_screener()
+        warmed.append("/api/screener")
+        for symbol in ["BTCUSDT", "ETHUSDT", "SOLUSDT"]:
+            fetch_coin_data(symbol, interval="1d", limit=120)
+            warmed.append(f"/api/coin?ticker={symbol}&interval=1d&limit=120")
+        return {"status": "ok", "message": "warm paths executed", "warmed": warmed, "cache": cache_meta(), "cron_strategy": "15분 주기 캐시 워밍 + 짧은 TTL 병행"}
+
+    return None
 
 # =============================================================================
 # ── HTML 프론트엔드 (기존 UI 구조 유지, 코인 특화 수정)
@@ -1465,7 +1476,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CoinOracle — Binance AI 분석 시스템</title>
+<title>CoinOracle — Binance 규칙 기반 분석 시스템</title>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1647,7 +1658,7 @@ input::placeholder{color:#484f58}
 <div id="sidebar">
   <div class="sb-header">
     <h1>🪙 CoinOracle</h1>
-    <p>Binance AI 암호화폐 분석 시스템</p>
+    <p>Binance 규칙 기반 암호화폐 분석 시스템</p>
   </div>
 
   <div class="sb-section">
@@ -1698,7 +1709,7 @@ input::placeholder{color:#484f58}
   <div id="page-analysis">
     <div id="state-empty" class="center-state">
       <div class="icon">🪙</div>
-      <h2>CoinOracle — Binance AI 분석</h2>
+      <h2>CoinOracle — Binance 규칙 기반 분석</h2>
       <p>왼쪽 패널에서 코인명 또는 심볼을 입력하고<br><strong style="color:#388bfd">분석 시작</strong> 버튼을 누르세요.</p>
       <div class="sample-tags">
         <span class="sample-tag" onclick="quickSearch('BTC')">₿ BTC</span>
@@ -1711,7 +1722,7 @@ input::placeholder{color:#484f58}
     </div>
     <div id="state-loading" class="center-state" style="display:none">
       <div class="spinner"></div>
-      <p style="color:#8b949e">Binance 데이터 수집 중...<br><span style="font-size:12px;color:#484f58">AI 모델이 기술적 지표를 계산하고 있습니다</span></p>
+      <p style="color:#8b949e">Binance 데이터 수집 중...<br><span style="font-size:12px;color:#484f58">규칙 기반 엔진이 기술적 지표를 계산하고 있습니다</span></p>
     </div>
     <div id="state-error" class="center-state" style="display:none">
       <div class="icon">⚠️</div>
@@ -1790,7 +1801,7 @@ input::placeholder{color:#484f58}
       <!-- 탭 -->
       <div class="tabs">
         <button class="tab-btn active" id="tab-chart"    onclick="switchTab('chart')">📈 차트</button>
-        <button class="tab-btn"        id="tab-ai"       onclick="switchTab('ai')">🤖 AI 진단</button>
+        <button class="tab-btn"        id="tab-ai"       onclick="switchTab('ai')">🧭 시그널 진단</button>
         <button class="tab-btn"        id="tab-leverage" onclick="switchTab('leverage')">⚡ 레버리지</button>
         <button class="tab-btn"        id="tab-forecast" onclick="switchTab('forecast')">🔮 예측</button>
         <button class="tab-btn"        id="tab-news"     onclick="switchTab('news')">📰 뉴스</button>
@@ -1815,7 +1826,7 @@ input::placeholder{color:#484f58}
       <!-- AI 진단 탭 -->
       <div id="tab-content-ai" style="display:none">
         <div class="card">
-          <div class="card-title">🤖 AI 종합 점수</div>
+          <div class="card-title">🧭 종합 점수</div>
           <div class="score-wrap">
             <div class="score-num" id="ai-score">-</div>
             <div style="flex:1">
@@ -1868,7 +1879,7 @@ input::placeholder{color:#484f58}
       <!-- 예측 탭 -->
       <div id="tab-content-forecast" style="display:none">
         <div class="card">
-          <div class="card-title">🔮 AI 앙상블 예측 (30일)</div>
+          <div class="card-title">🔮 참고 시나리오 예측 (30일)</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px" id="forecast-summary"></div>
         </div>
       </div>
@@ -2231,7 +2242,7 @@ function renderForecast(d) {
       <div style="font-size:15px;font-weight:700;color:#d29922">${fmtPrice(xgbF)}</div>
     </div>` : ''}
     <div style="background:#0d1f4f;border:1px solid #1f4f8e;border-radius:10px;padding:12px;text-align:center;flex:1;min-width:120px">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">🤖 AI 앙상블</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">📌 참고 시나리오</div>
       <div style="font-size:17px;font-weight:800;color:#fff">${fmtPrice(ens)}</div>
       <div style="font-size:12px;color:${clr}">${ensUp?'▲':'▼'} ${Math.abs(ensChg).toFixed(2)}%</div>
     </div>`;
@@ -2474,12 +2485,14 @@ def replace_nan_with_none(obj):
         return obj.isoformat()
     return obj
 
-VALID_INTERVALS = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w","1M"}
+VALID_INTERVALS = config.VALID_INTERVALS
 
 def _send(handler_self, data: Any, status: int = 200, content_type: str = "application/json"):
     path = getattr(handler_self, 'path', '/').split('?')[0].rstrip('/') or '/'
     if content_type == "application/json":
         data = replace_nan_with_none(data)
+        if isinstance(data, dict) and "api_version" not in data:
+            data["api_version"] = config.APP_VERSION
         body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
     else:
         body = data if isinstance(data, bytes) else data.encode("utf-8")
@@ -2494,13 +2507,17 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
     cache_control = "no-store, no-cache, must-revalidate, proxy-revalidate"
     if status == 200:
         if path in ("/api/screener",):
-            cache_control = "public, s-maxage=300, stale-while-revalidate=3600"
-        elif path in ("/api/coin", "/api/stock"):
+            cache_control = "public, s-maxage=300, stale-while-revalidate=900"
+        elif path in ("/api/coin",):
             cache_control = "public, s-maxage=30, stale-while-revalidate=120"
+        elif path in ("/api/validation",):
+            cache_control = "public, s-maxage=300, stale-while-revalidate=600"
+        elif path in ("/api/health",):
+            cache_control = "no-store"
         elif path in ("/", "/index.html"):
             cache_control = "public, s-maxage=3600"
         elif path.startswith("/api/"):
-            cache_control = "public, s-maxage=10, stale-while-revalidate=60"
+            cache_control = "public, s-maxage=30, stale-while-revalidate=120"
 
     handler_self.send_header("Cache-Control", cache_control)
     handler_self.send_header("X-Content-Type-Options", "nosniff")
@@ -2508,9 +2525,7 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
     handler_self.send_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
     handler_self.send_header(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-        "connect-src 'self' https://api.binance.com https://fapi.binance.com https://api.coingecko.com https://news.google.com;"
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.binance.com https://api1.binance.com https://api2.binance.com https://api3.binance.com https://data-api.binance.vision https://fapi.binance.com https://api.coingecko.com https://news.google.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
     )
     handler_self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
     handler_self.end_headers()
@@ -2531,14 +2546,14 @@ class handler(BaseHTTPRequestHandler):
             path   = parsed.path.rstrip("/") or "/"
 
             # 입력 검증
-            if path in ("/api/coin", "/api/stock"):
-                ticker = params.get("ticker", "")
-                if len(ticker) > 30 or (ticker and not re.match(r"^[a-zA-Z0-9가-힣.\-\s]+$", ticker)):
-                    _send(self, {"error": "Invalid ticker format"}, 400)
+            if path in ("/api/coin", "/api/stock", "/api/validation"):
+                ok, ticker_or_error = validate_ticker(params.get("ticker", params.get("symbol", "")))
+                if not ok:
+                    _send(self, {"error": ticker_or_error}, 400)
                     return
-                interval = params.get("interval", "1d")
-                if interval not in VALID_INTERVALS:
-                    _send(self, {"error": f"Invalid interval. Allowed: {', '.join(sorted(VALID_INTERVALS))}"}, 400)
+                ok, interval_or_error = validate_interval(params.get("interval", config.DEFAULT_INTERVAL))
+                if not ok:
+                    _send(self, {"error": interval_or_error}, 400)
                     return
 
             # API 라우팅 처리
@@ -2549,8 +2564,13 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     _send(self, result)
             else:
-                # 루트 또는 HTML 요청
-                _send(self, HTML, 200, "text/html")
+                # 루트 또는 HTML 요청은 public/index.html 우선 사용
+                try:
+                    public_index = os.path.join(os.path.dirname(os.path.dirname(__file__)), "public", "index.html")
+                    with open(public_index, "r", encoding="utf-8") as f:
+                        _send(self, f.read(), 200, "text/html")
+                except Exception:
+                    _send(self, HTML, 200, "text/html")
         except Exception as e:
             print(f"Server Error: {str(e)}\n{traceback.format_exc()}")
             _send(self, {"error": "Internal Server Error"}, 500)

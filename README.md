@@ -1,95 +1,118 @@
-# 🪙 CoinOracle: Binance AI 암호화폐 분석 시스템 가이드
+# CoinOracle
 
-본 문서는 기존 주식 분석 스크립트(StockOracle)를 암호화폐 시장에 맞게 변환한 **CoinOracle** 시스템의 주요 변경 사항과 핵심 로직을 설명합니다.
+CoinOracle는 Binance 공개 REST API를 이용해 암호화폐 가격·거래량·펀딩비·기술지표를 분석하는 **규칙 기반 시그널 시스템**입니다. 이 프로젝트는 확률적 참고 정보를 제공하며, 특정 수익이나 방향을 보장하는 자동매매 시스템이 아닙니다.
 
----
+## 1. 정보 무결성 기준
+- 기존의 "AI 예측" 표현은 `규칙 기반 분석`, `시그널 엔진`, `참고용 예측 시나리오`로 수정했습니다.
+- `xgb_forecast`라는 이름은 하위 호환을 위해 유지하지만, 실제 구현은 XGBoost가 아니라 **모멘텀 시뮬레이션**입니다.
+- `/api/stock`은 더 이상 권장하지 않으며 `/api/coin` 사용을 안내합니다.
 
-## 1. 주요 변경 사항 (Before → After)
+## 2. 현재 구조
+- `public/index.html`: 프런트엔드 UI
+- `api/index.py`: 데이터 수집, 지표 계산, 시그널·레버리지·검증 라우팅
+- `api/config.py`: 상수·타임아웃·유효 범위 설정
+- `api/validators.py`: 입력 검증
+- `api/backtesting.py`: 검증 지표 계산
+- `api/health.py`, `api/validation.py`: 상태 확인 및 로직 검증 엔드포인트
 
-| 구분 | 기존 (StockOracle - 주식) | 변경 (CoinOracle - 암호화폐) |
-| :--- | :--- | :--- |
-| **데이터 소스** | `yfinance` (Yahoo Finance) | **Binance REST API** (`requests` 직접 호출) |
-| **시장 구조** | 평일 개장/마감 시간 존재 | **24시간 365일 연속 거래** 반영 |
-| **심볼 체계** | 주식 티커 (예: `005930.KS`, `AAPL`) | **Binance 심볼** (예: `BTCUSDT`, `ETHUSDT`) |
-| **시장 지표** | 코스피/나스닥 지수, VIX | **비트코인(BTC) 가격 및 시장 심리** |
-| **재무 정보** | 시가총액, PER, PBR, 배당률 | **24h 거래량, 펀딩비, 30일 변동성, 체결 건수** |
-| **리스크 관리** | 단순 손절/익절 비율 제시 | **ATR 기반 동적 손절/익절 및 레버리지 예측** |
-| **UI 테마** | 주식 시장 중심 텍스트 | **암호화폐 특화 텍스트 및 레버리지 패널 추가** |
+## 3. 주요 엔드포인트
+- `/api/coin?ticker=BTC&interval=1d&limit=365`
+- `/api/screener?sort_by=volume&sort_order=desc`
+- `/api/leverage?symbol=BTCUSDT`
+- `/api/sentiment?market=CRYPTO`
+- `/api/validation?ticker=BTCUSDT&interval=1d&window=180&horizon=7`
+- `/api/health`
+- `/api/cron`
 
----
+## 4. Vercel 최적화안 반영
+### cron
+- `vercel.json`에서 `/api/cron`을 **15분 주기(`*/15 * * * *`)**로 실행하도록 조정했습니다.
+- cron은 `sentiment`, `screener`, `BTC/ETH/SOL` 대표 심볼의 일봉 데이터를 미리 워밍합니다.
 
-## 2. 레버리지 예측 로직 상세 설명 (신규 추가)
+### cache
+- 외부 Redis/KV는 도입하지 않고, **짧은 TTL 메모리 캐시 + Vercel CDN 캐시 제어 헤더** 조합으로 유지했습니다.
+- `/api/coin`: `s-maxage=30`
+- `/api/screener`: `s-maxage=300`
+- `/api/validation`: `s-maxage=300`
+- `/api/health`: `no-store`
 
-암호화폐 시장의 고변동성 특성을 반영하여, 사용자가 과도한 레버리지를 사용하지 않도록 **적정 레버리지 수준을 자동으로 계산**하는 엔진을 추가했습니다.
+### timeout
+- `vercel.json`의 Python 함수 `maxDuration`을 15초로 명시했습니다.
+- 네트워크 요청 기본 타임아웃은 6초, 스크리너용 배치 호출은 8초 기준으로 설계했습니다.
 
-### 2.1. 계산 프로세스
-1. **기본 레버리지 산출**: 
-   - `기본 레버리지 = 20 / ATR 백분율(%)`
-   - 변동성(ATR)이 클수록 기본 레버리지가 낮아집니다.
-2. **변동성 페널티 적용**:
-   - 최근 30일 연율화 변동성이 80%를 초과하면 레버리지를 0.7배로 축소
-   - 120%를 초과하면 0.5배로 대폭 축소
-3. **펀딩비 리스크 반영**:
-   - 선물 펀딩비의 절대값이 0.05% 이상일 경우 과열 상태로 간주하여 레버리지 0.8배 축소
-4. **RSI 과열/침체 페널티**:
-   - RSI가 75 이상(과매수)이거나 25 이하(과매도)일 경우 변동성 확대 위험으로 레버리지 0.8배 축소
-5. **최종 보정 및 상한선 적용**:
-   - 계산된 레버리지를 반올림하여 정수로 산출
-   - **최대 허용 레버리지 상한선(Max Leverage)**: 20x (극단적 변동성 시 더 낮게 제한)
+### batch 호출
+- 스크리너는 심볼별로 `ticker/24hr`와 `premiumIndex`를 반복 호출하지 않습니다.
+- `24hr ticker 전체 1회`, `funding 전체 1회`, `klines는 상위 심볼만 병렬 호출` 구조로 재설계했습니다.
+- 병렬 워커는 4개로 제한해 Vercel 실행 시간과 Binance rate-limit 위험을 낮췄습니다.
 
-### 2.2. 위험도 등급 (Risk Grade)
-산출된 추천 레버리지와 시장 변동성을 종합하여 4단계 등급을 부여합니다.
-- **Low (안전)**: 변동성이 낮고 추세가 안정적 (추천 레버리지 10x 이상)
-- **Medium (주의)**: 일반적인 시장 상태 (추천 레버리지 5x ~ 9x)
-- **High (위험)**: 변동성이 높음, 레버리지 축소 권장 (추천 레버리지 3x ~ 4x)
-- **Extreme (극도 위험)**: 극심한 변동성, 현물 거래 권장 (추천 레버리지 1x ~ 2x)
+## 5. 백테스트 설계안 반영
+`/api/validation` 엔드포인트는 현재 forecast/score/leverage 로직을 다음 방식으로 검증합니다.
 
----
+### forecast 검증
+- 방법: rolling walk-forward
+- 입력: `window`, `horizon`
+- 지표:
+  - 방향 정확도(direction accuracy)
+  - MAPE
+- 대상:
+  - Holt-Winters 예측
+  - 모멘텀 시뮬레이션 예측
 
-## 3. 리스크 관리 및 포지션 사이징 로직
+### score 검증
+- 규칙:
+  - `score >= 60` → long 시그널
+  - `score <= 40` → short 시그널
+- 검증값:
+  - hit rate
+  - 평균/중앙값 미래 수익률
 
-단순한 비율이 아닌, 시장의 실제 변동폭(ATR)을 기반으로 리스크를 관리합니다.
+### leverage 검증
+- 규칙:
+  - 시점별 추천 레버리지와 `stop_loss_pct` 계산
+  - horizon 시점 실제 절대 수익률이 손절폭을 초과했는지 집계
+- 검증값:
+  - stop breach rate
+  - 평균/중앙값 추천 레버리지
 
-- **손절 기준 (Stop Loss)**: `ATR * 1.5`
-  - 시장의 일상적인 노이즈(1 ATR)에 의해 포지션이 청산되는 것을 방지합니다.
-- **익절 기준 (Take Profit)**: `손절폭 * 2`
-  - 손익비(Risk-Reward Ratio)를 1:2로 고정하여 장기적으로 유리한 트레이딩을 유도합니다.
-- **권장 포지션 크기**:
-  - 위험도 등급에 따라 총 자산의 `1% ~ 5%` 내에서만 진입하도록 권장합니다.
-  - 레버리지 적용 시 실제 계좌에 미치는 손실률(Lev Stop Loss)을 함께 표시하여 경각심을 줍니다.
+### 해석 주의
+- 이 검증은 **휴리스틱 로직 품질 확인용**입니다.
+- 슬리피지, 수수료, 체결 실패, 포지션 동시 보유, 레버리지 청산 메커니즘은 별도 리스크 모델로 추가 검증해야 합니다.
 
----
+## 6. 보안 점검표 및 반영 내용
+### CSP
+- `unsafe-eval` 제거
+- `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'` 추가
+- 현재 UI가 인라인 스크립트를 사용하므로 `script-src`의 `unsafe-inline`은 유지했습니다. 완전 제거를 원하면 프런트엔드 스크립트를 외부 파일로 분리해야 합니다.
 
-## 4. Binance API 연동 방식
+### XSS
+- 프런트엔드에서 API 응답 문자열을 `sanitizePayload()`로 HTML escape 처리합니다.
+- 뉴스 링크는 `safeUrl()`로 `http/https`만 허용합니다.
+- 외부 링크에는 `rel="noopener noreferrer"`를 추가했습니다.
 
-외부 라이브러리 의존성을 줄이고 속도를 높이기 위해 `requests` 모듈을 사용하여 Binance REST API를 직접 호출하도록 설계했습니다.
+### 입력 검증
+- `ticker`, `interval`, `window`, `horizon`, `limit`에 대한 정규식 및 범위 검증을 중앙화했습니다.
+- `/api/coin`, `/api/stock`, `/api/validation` 모두 동일 검증 규칙을 사용합니다.
 
-- **현물/선물 통합 데이터**:
-  - 캔들(Klines) 데이터: `https://api.binance.com/api/v3/klines`
-  - 24시간 티커 정보: `https://api.binance.com/api/v3/ticker/24hr`
-  - 선물 펀딩비: `https://fapi.binance.com/fapi/v1/premiumIndex`
-- **심볼 자동 완성**:
-  - 사용자가 `BTC`, `비트코인` 등으로 검색해도 내부적으로 `BTCUSDT`로 자동 변환하여 API를 호출합니다.
-- **스크리너 병렬 처리**:
-  - 주요 코인 40개의 데이터를 수집할 때, `ThreadPoolExecutor`를 사용하여 병렬로 API를 호출함으로써 응답 시간을 최적화했습니다.
+### 에러 노출
+- 사용자에게는 일반화된 에러 메시지를 반환하고, 세부 네트워크 예외는 서버 로그에 남기도록 정리했습니다.
+- `/api/health`에서 런타임·캐시 메타 정보만 노출하고 내부 스택트레이스는 반환하지 않습니다.
 
----
-
-## 5. 아키텍처 개요
-
-- **Backend (Python)**:
-  - `http.server.BaseHTTPRequestHandler`를 상속받아 Vercel Serverless Function 환경과 100% 호환되도록 작성되었습니다.
-  - 라우팅: `/api/coin` (단일 분석), `/api/screener` (다중 스크리닝), `/api/leverage` (레버리지 계산 전용)
-  - 데이터 캐싱: API 호출 제한(Rate Limit)을 방지하기 위해 메모리 캐시(`lru_cache` 및 커스텀 TTL 캐시)를 적극 활용합니다.
-- **Frontend (HTML/JS/CSS)**:
-  - 단일 파일(`index.py` 내에 HTML 문자열로 포함)로 구성되어 배포가 매우 간편합니다.
-  - `Lightweight Charts` 라이브러리를 사용하여 트레이딩뷰(TradingView) 스타일의 전문적인 차트를 렌더링합니다.
-  - 비동기 `fetch`를 통해 백엔드 API와 통신하며, 페이지 새로고침 없이 동적으로 UI를 업데이트합니다.
-
----
-**실행 방법 (로컬 테스트)**
+## 7. 로컬 실행
 ```bash
 pip install -r requirements.txt
-python dev_server.py
+python api/index.py
+# 또는 python dev_server.py
 ```
-브라우저에서 `http://localhost:3000` 접속
+브라우저에서 `http://localhost:8000` 또는 `http://localhost:3000` 접속
+
+## 8. 테스트 및 품질 게이트
+- `tests/`에 입력 검증 및 backtesting 요약 함수에 대한 단위 테스트를 추가했습니다.
+- GitHub Actions CI는 다음을 수행합니다.
+  - 의존성 설치
+  - `unittest` 실행
+  - `compileall`로 API 모듈 컴파일 검증
+
+## 9. 한계
+- 메모리 캐시는 서버리스 인스턴스 간 공유되지 않습니다.
+- 현재 예측 로직은 통계적 참고치이며, 학습형 ML 모델이 아닙니다.
+- Binance 공개 엔드포인트 가용성과 지역별 차단 여부에 따라 응답 품질이 달라질 수 있습니다.

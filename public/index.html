@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CoinOracle — Binance AI 분석 시스템</title>
+<title>CoinOracle — Binance 규칙 기반 분석 시스템</title>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -185,7 +185,7 @@ input::placeholder{color:#484f58}
 <div id="sidebar">
   <div class="sb-header">
     <h1>🪙 CoinOracle</h1>
-    <p>Binance AI 암호화폐 분석 시스템</p>
+    <p>Binance 규칙 기반 암호화폐 분석 시스템</p>
   </div>
 
   <div class="sb-section">
@@ -236,7 +236,7 @@ input::placeholder{color:#484f58}
   <div id="page-analysis">
     <div id="state-empty" class="center-state">
       <div class="icon">🪙</div>
-      <h2>CoinOracle — Binance AI 분석</h2>
+      <h2>CoinOracle — Binance 규칙 기반 분석</h2>
       <p>왼쪽 패널에서 코인명 또는 심볼을 입력하고<br><strong style="color:#388bfd">분석 시작</strong> 버튼을 누르세요.</p>
       <div class="sample-tags">
         <span class="sample-tag" onclick="quickSearch('BTC')">₿ BTC</span>
@@ -249,7 +249,7 @@ input::placeholder{color:#484f58}
     </div>
     <div id="state-loading" class="center-state" style="display:none">
       <div class="spinner"></div>
-      <p style="color:#8b949e">Binance 데이터 수집 중...<br><span style="font-size:12px;color:#484f58">AI 모델이 기술적 지표를 계산하고 있습니다</span></p>
+      <p style="color:#8b949e">Binance 데이터 수집 중...<br><span style="font-size:12px;color:#484f58">규칙 기반 엔진이 기술적 지표를 계산하고 있습니다</span></p>
     </div>
     <div id="state-error" class="center-state" style="display:none">
       <div class="icon">⚠️</div>
@@ -328,7 +328,7 @@ input::placeholder{color:#484f58}
       <!-- 탭 -->
       <div class="tabs">
         <button class="tab-btn active" id="tab-chart"    onclick="switchTab('chart')">📈 차트</button>
-        <button class="tab-btn"        id="tab-ai"       onclick="switchTab('ai')">🤖 AI 진단</button>
+        <button class="tab-btn"        id="tab-ai"       onclick="switchTab('ai')">🧭 시그널 진단</button>
         <button class="tab-btn"        id="tab-leverage" onclick="switchTab('leverage')">⚡ 레버리지</button>
         <button class="tab-btn"        id="tab-forecast" onclick="switchTab('forecast')">🔮 예측</button>
         <button class="tab-btn"        id="tab-news"     onclick="switchTab('news')">📰 뉴스</button>
@@ -353,7 +353,7 @@ input::placeholder{color:#484f58}
       <!-- AI 진단 탭 -->
       <div id="tab-content-ai" style="display:none">
         <div class="card">
-          <div class="card-title">🤖 AI 종합 점수</div>
+          <div class="card-title">🧭 종합 점수</div>
           <div class="score-wrap">
             <div class="score-num" id="ai-score">-</div>
             <div style="flex:1">
@@ -406,7 +406,7 @@ input::placeholder{color:#484f58}
       <!-- 예측 탭 -->
       <div id="tab-content-forecast" style="display:none">
         <div class="card">
-          <div class="card-title">🔮 AI 앙상블 예측 (30일)</div>
+          <div class="card-title">🔮 참고 시나리오 예측 (30일)</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px" id="forecast-summary"></div>
         </div>
       </div>
@@ -471,6 +471,30 @@ let screenerData = [];
 let scrnSort = {key:'volume', dir:'desc'};
 let chartInstances = {};
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function sanitizePayload(value) {
+  if (Array.isArray(value)) return value.map(sanitizePayload);
+  if (value && typeof value === 'object') {
+    const out = {};
+    Object.entries(value).forEach(([k, v]) => { out[k] = sanitizePayload(v); });
+    return out;
+  }
+  if (typeof value === 'string') return escapeHtml(value);
+  return value;
+}
+
+function safeUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '#';
+  } catch (e) {
+    return '#';
+  }
+}
+
 // ── 페이지 전환 ──
 function showPage(page) {
   document.getElementById('page-analysis').style.display = page === 'analysis' ? 'block' : 'none';
@@ -500,7 +524,7 @@ async function loadSentiment() {
   w.innerHTML = '<div class="sent-name">로딩 중...</div>';
   try {
     const r = await fetch('/api/sentiment?market=CRYPTO');
-    const d = await r.json();
+    const d = sanitizePayload(await r.json());
     if (d.error) { w.innerHTML = '<div class="sent-name" style="color:#484f58">조회 실패</div>'; return; }
     const isUp = d.change >= 0;
     const clr = isUp ? '#3fb950' : '#f85149';
@@ -522,7 +546,7 @@ async function analyze() {
   destroyCharts();
   try {
     const r = await fetch(`/api/coin?ticker=${encodeURIComponent(ticker)}&interval=${currentInterval}&limit=${limit}`);
-    const d = await r.json();
+    const d = sanitizePayload(await r.json());
     if (d.error) { setState('error'); document.getElementById('error-msg').textContent = d.error; return; }
     currentData = d;
     renderResult(d);
@@ -769,7 +793,7 @@ function renderForecast(d) {
       <div style="font-size:15px;font-weight:700;color:#d29922">${fmtPrice(xgbF)}</div>
     </div>` : ''}
     <div style="background:#0d1f4f;border:1px solid #1f4f8e;border-radius:10px;padding:12px;text-align:center;flex:1;min-width:120px">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">🤖 AI 앙상블</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">📌 참고 시나리오</div>
       <div style="font-size:17px;font-weight:800;color:#fff">${fmtPrice(ens)}</div>
       <div style="font-size:12px;color:${clr}">${ensUp?'▲':'▼'} ${Math.abs(ensChg).toFixed(2)}%</div>
     </div>`;
@@ -785,7 +809,7 @@ function renderNews(d) {
     <div class="news-item">
       <div class="news-dot">●</div>
       <div>
-        <a class="news-a" href="${n.link}" target="_blank">${n.title}</a>
+        <a class="news-a" href="${safeUrl(n.link)}" target="_blank" rel="noopener noreferrer">${n.title}</a>
         <div class="news-meta">${n.publisher || ''} ${n.published ? '· ' + n.published.substring(0,16) : ''}</div>
       </div>
     </div>`).join('');
@@ -930,7 +954,7 @@ async function loadScreener(sortBy, sortOrder) {
     const sb = sortBy    || scrnSort.key;
     const so = sortOrder || scrnSort.dir;
     const r  = await fetch(`/api/screener?sort_by=${sb}&sort_order=${so}`);
-    const d  = await r.json();
+    const d  = sanitizePayload(await r.json());
     screenerData = d.data || [];
     document.getElementById('scrn-count').textContent = `총 ${screenerData.length}개 코인`;
 
