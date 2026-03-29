@@ -103,7 +103,7 @@ input::placeholder{color:#484f58}
 .pattern-neu{background:#21262d;border:1px solid #30363d}
 
 /* 차트 */
-#price-chart,#rsi-chart,#macd-chart,#forecast-chart{width:100%;border-radius:8px;overflow:hidden}
+#price-chart,#rsi-chart,#macd-chart{width:100%;border-radius:8px;overflow:hidden}
 
 /* 레버리지 카드 (신규) */
 .lev-card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px;margin-bottom:14px}
@@ -375,12 +375,17 @@ input::placeholder{color:#484f58}
           <div class="card-title">⚡ 레버리지 예측 엔진</div>
           <div class="lev-main">
             <div>
+              <div style="font-size:12px;color:#8b949e;margin-bottom:4px">추천 포지션</div>
+              <div class="lev-num" id="lev-pos" style="font-size:42px">-</div>
+            </div>
+            <div>
               <div style="font-size:12px;color:#8b949e;margin-bottom:4px">추천 레버리지</div>
               <div class="lev-num" id="lev-num" style="color:#1f6feb">-x</div>
             </div>
             <div class="lev-info">
               <div class="lev-grade" id="lev-grade">-</div>
               <div class="lev-desc" id="lev-desc"></div>
+              <div class="lev-desc" id="lev-pos-desc" style="margin-top:4px;color:#8b949e;font-size:12px"></div>
             </div>
           </div>
           <div class="lev-factors" id="lev-factors"></div>
@@ -403,10 +408,6 @@ input::placeholder{color:#484f58}
         <div class="card">
           <div class="card-title">🔮 AI 앙상블 예측 (30일)</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px" id="forecast-summary"></div>
-        </div>
-        <div class="card">
-          <div class="card-title">예측 차트</div>
-          <div id="forecast-chart" style="height:280px"></div>
         </div>
       </div>
 
@@ -651,6 +652,17 @@ function renderLeverage(d) {
   const levEl = document.getElementById('lev-num');
   levEl.textContent = lev.recommended_leverage + 'x';
   levEl.style.color = lev.risk_color;
+
+  // 포지션 방향
+  const posEl = document.getElementById('lev-pos');
+  if(posEl) {
+    posEl.textContent = lev.position || '-';
+    posEl.style.color = lev.position === 'Long' ? '#3fb950' : (lev.position === 'Short' ? '#f85149' : '#8b949e');
+  }
+  const posDescEl = document.getElementById('lev-pos-desc');
+  if(posDescEl) {
+    posDescEl.textContent = lev.position_desc ? `방향성: ${lev.position_desc}` : '';
+  }
 
   // 위험도 등급
   const gradeEl = document.getElementById('lev-grade');

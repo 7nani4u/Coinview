@@ -481,6 +481,9 @@ def calc_leverage_recommendation(
     funding_rate: Optional[float],
     rsi: float,
     volume_ratio: float,
+    macd: float = 0.0,
+    macd_signal: float = 0.0,
+    score: int = 50
 ) -> Dict:
     """
     적정 레버리지 자동 계산 엔진
@@ -587,6 +590,25 @@ def calc_leverage_recommendation(
         # Extreme 등급: 1 ~ 2
         recommended = int(max(1, min(2, round(final_lev))))
 
+    # ── 포지션 방향(Long/Short) 예측 ─────────────────────────────────
+    if score >= 60:
+        position = "Long"
+        position_desc = "상승 추세 (AI 종합점수 우수)"
+    elif score <= 40:
+        position = "Short"
+        position_desc = "하락 추세 (AI 종합점수 약세)"
+    else:
+        # 중립 구간에서는 MACD와 RSI 기반 단기 모멘텀 판단
+        if macd > macd_signal and rsi > 50:
+            position = "Long"
+            position_desc = "단기 상승 모멘텀 (중립 구간)"
+        elif macd < macd_signal and rsi < 50:
+            position = "Short"
+            position_desc = "단기 하락 모멘텀 (중립 구간)"
+        else:
+            position = "Neutral"
+            position_desc = "추세 불분명 (관망 권장)"
+
     # ── 포지션 크기 및 손절/익절 계산 ──────────────────────────────
     # 켈리 기준 변형: 포지션 크기 = 10% / 레버리지 (보수적)
     position_size_pct = round(min(10.0, 10.0 / max(recommended, 1)), 1)
@@ -600,6 +622,8 @@ def calc_leverage_recommendation(
     lev_stop_loss_pct = round(stop_loss_pct * recommended, 1)
 
     return {
+        "position":             position,
+        "position_desc":        position_desc,
         "recommended_leverage": recommended,
         "max_leverage":         min(recommended * 2, 20),
         "risk_grade":           risk_grade,
@@ -1254,6 +1278,8 @@ def route(path: str, params: Dict) -> Optional[Dict]:
         atr     = v("ATR")
         atr_pct = v("ATR_Pct")
         vol_30d = v("Volatility_30d")
+        macd    = v("MACD")
+        macd_signal = v("Signal_Line")
         vols    = dd.get("Volume", [])
         cur_vol = float(vols[-1]) if vols else 0
         avg_vol = float(np.mean([x for x in vols[-20:] if x])) if vols else 1
@@ -1274,7 +1300,8 @@ def route(path: str, params: Dict) -> Optional[Dict]:
         leverage_info = calc_leverage_recommendation(
             price=last, atr=atr, atr_pct=atr_pct,
             volatility_30d=vol_30d, funding_rate=funding,
-            rsi=rsi, volume_ratio=vol_ratio
+            rsi=rsi, volume_ratio=vol_ratio,
+            macd=macd, macd_signal=macd_signal, score=score
         )
 
         # 리스크 시나리오
@@ -1487,7 +1514,7 @@ input::placeholder{color:#484f58}
 .pattern-neu{background:#21262d;border:1px solid #30363d}
 
 /* 차트 */
-#price-chart,#rsi-chart,#macd-chart,#forecast-chart{width:100%;border-radius:8px;overflow:hidden}
+#price-chart,#rsi-chart,#macd-chart{width:100%;border-radius:8px;overflow:hidden}
 
 /* 레버리지 카드 (신규) */
 .lev-card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:18px;margin-bottom:14px}
@@ -1759,12 +1786,17 @@ input::placeholder{color:#484f58}
           <div class="card-title">⚡ 레버리지 예측 엔진</div>
           <div class="lev-main">
             <div>
+              <div style="font-size:12px;color:#8b949e;margin-bottom:4px">추천 포지션</div>
+              <div class="lev-num" id="lev-pos" style="font-size:42px">-</div>
+            </div>
+            <div>
               <div style="font-size:12px;color:#8b949e;margin-bottom:4px">추천 레버리지</div>
               <div class="lev-num" id="lev-num" style="color:#1f6feb">-x</div>
             </div>
             <div class="lev-info">
               <div class="lev-grade" id="lev-grade">-</div>
               <div class="lev-desc" id="lev-desc"></div>
+              <div class="lev-desc" id="lev-pos-desc" style="margin-top:4px;color:#8b949e;font-size:12px"></div>
             </div>
           </div>
           <div class="lev-factors" id="lev-factors"></div>
@@ -1787,10 +1819,6 @@ input::placeholder{color:#484f58}
         <div class="card">
           <div class="card-title">🔮 AI 앙상블 예측 (30일)</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px" id="forecast-summary"></div>
-        </div>
-        <div class="card">
-          <div class="card-title">예측 차트</div>
-          <div id="forecast-chart" style="height:280px"></div>
         </div>
       </div>
 
@@ -2035,6 +2063,17 @@ function renderLeverage(d) {
   const levEl = document.getElementById('lev-num');
   levEl.textContent = lev.recommended_leverage + 'x';
   levEl.style.color = lev.risk_color;
+
+  // 포지션 방향
+  const posEl = document.getElementById('lev-pos');
+  if(posEl) {
+    posEl.textContent = lev.position || '-';
+    posEl.style.color = lev.position === 'Long' ? '#3fb950' : (lev.position === 'Short' ? '#f85149' : '#8b949e');
+  }
+  const posDescEl = document.getElementById('lev-pos-desc');
+  if(posDescEl) {
+    posDescEl.textContent = lev.position_desc ? `방향성: ${lev.position_desc}` : '';
+  }
 
   // 위험도 등급
   const gradeEl = document.getElementById('lev-grade');
