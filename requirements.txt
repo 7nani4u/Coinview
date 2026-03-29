@@ -1,17 +1,9 @@
 # CoinOracle - Binance AI 암호화폐 분석 시스템
-# [변경] yfinance 제거 → Binance REST API (requests로 직접 호출)
-# [유지] numpy, pandas, requests, beautifulsoup4, feedparser, lxml
+# Vercel Python Runtime(3.12) 기준 검증용 버전 고정
 
-# 데이터 처리
-numpy
-pandas
-
-# HTTP 요청 (Binance API, CoinGecko API)
-requests
-
-# 뉴스 수집 (Google RSS)
-feedparser
-lxml
-
-# HTML 파싱 (필요 시)
-beautifulsoup4
+numpy==2.1.3
+pandas==2.2.3
+requests==2.32.3
+feedparser==6.0.11
+lxml==5.3.0
+beautifulsoup4==4.12.3

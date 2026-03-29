@@ -1,14 +1,19 @@
 {
+  "version": 2,
   "crons": [
     {
       "path": "/api/cron",
       "schedule": "0 * * * *"
     }
   ],
-  "rewrites": [
+  "routes": [
     {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
     }
   ],
   "functions": {
