@@ -65,6 +65,12 @@ try:
 except ImportError:
     FEEDPARSER_AVAILABLE = False
 
+try:
+    from googlenewsdecoder import gnewsdecoder
+    GNEWSDECODER_AVAILABLE = True
+except ImportError:
+    GNEWSDECODER_AVAILABLE = False
+
 from api import config
 from api.backtesting import (
     calc_directional_accuracy,
@@ -260,13 +266,26 @@ def fetch_coin_news(symbol_base: str) -> List[Dict]:
     try:
         q = f"{symbol_base} cryptocurrency"
         url = f"https://news.google.com/rss/search?q={quote(q)}&hl=ko&gl=KR&ceid=KR:ko"
-        for e in feedparser.parse(url).entries[:5]:
-            news.append({
+        entries = feedparser.parse(url).entries[:5]
+        
+        def process_entry(e):
+            link = e.link
+            if GNEWSDECODER_AVAILABLE:
+                try:
+                    res = gnewsdecoder(link)
+                    if res.get("status") and res.get("decoded_url"):
+                        link = res["decoded_url"]
+                except Exception:
+                    pass
+            return {
                 "title": e.title,
-                "link": e.link,
+                "link": link,
                 "publisher": getattr(e, "source", type("", (), {"title": "Google News"})()).title,
                 "published": getattr(e, "published", ""),
-            })
+            }
+            
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            news = list(executor.map(process_entry, entries))
     except Exception:
         pass
     return news
