@@ -371,6 +371,13 @@ input::placeholder{color:#484f58}
 
       <!-- 레버리지 탭 (신규) -->
       <div id="tab-content-leverage" style="display:none">
+        
+        <!-- 투자금 입력란 -->
+        <div class="card" style="margin-bottom:12px; background:#161b22; display:flex; align-items:center; gap:12px; padding:12px 16px;">
+          <label for="invest-amount" style="font-size:14px; font-weight:600;">💰 나의 투자 원금 (USDT):</label>
+          <input type="number" id="invest-amount" value="1000" style="background:#0d1117; border:1px solid #30363d; color:#fff; padding:6px 12px; border-radius:6px; width:120px; outline:none;" oninput="updateTradingSignals()">
+        </div>
+
         <div class="lev-card">
           <div class="card-title">⚡ 레버리지 예측 엔진</div>
           <div class="lev-main">
@@ -390,6 +397,12 @@ input::placeholder{color:#484f58}
           </div>
           <div class="lev-factors" id="lev-factors"></div>
           <div class="lev-warning" id="lev-warning"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🎯 실전 진입 타점 (Stop-Limit) 및 주문 규모(Amount)</div>
+          <p style="font-size:12px; color:#8b949e; margin-bottom:12px;">※ 바이낸스 선물 Stop-Limit 주문 시 아래 값을 그대로 입력하세요.</p>
+          <div id="trading-signals-grid" style="display:flex; flex-direction:column; gap:12px;"></div>
         </div>
 
         <div class="card">
@@ -763,6 +776,81 @@ function renderLeverage(d) {
       </div>`).join('');
     document.getElementById('risk-grid').innerHTML = riskHtml;
   }
+
+  // Trading Signals 렌더링을 위해 전역 변수 저장
+  window.currentTradingSignals = lev.trading_signals;
+  updateTradingSignals();
+}
+
+function updateTradingSignals() {
+  const ts = window.currentTradingSignals;
+  const gridEl = document.getElementById('trading-signals-grid');
+  if (!ts || !gridEl) return;
+
+  const investInput = document.getElementById('invest-amount');
+  const investAmt = parseFloat(investInput ? investInput.value : 0) || 0;
+
+  // Amount 산출 기준 (투자금 기준)
+  // 안전형: 2%, 중간형: 5%, 공격형: 10%
+  const safeAmt = investAmt * 0.02;
+  const midAmt = investAmt * 0.05;
+  const aggAmt = investAmt * 0.10;
+
+  const fmtAmt = (val) => {
+    if (val === 0) return '0.00';
+    return val.toFixed(2);
+  };
+
+  const renderCard = (type, data, title, color) => {
+    return `
+      <div style="background:#21262d; border:1px solid #30363d; border-radius:8px; padding:16px;">
+        <div style="font-size:16px; font-weight:700; color:${color}; margin-bottom:12px; border-bottom:1px solid #30363d; padding-bottom:8px;">
+          ${title}
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+          <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
+            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Stop (트리거)</div>
+            <div style="font-size:15px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.stop)}</div>
+          </div>
+          <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
+            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Limit (주문가)</div>
+            <div style="font-size:15px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.limit)}</div>
+          </div>
+          <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
+            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Stop Loss</div>
+            <div style="font-size:15px; font-weight:600; color:#f85149;">${fmtPrice(data.sl)}</div>
+          </div>
+        </div>
+        <div style="font-size:13px; font-weight:600; color:#c9d1d9; margin-bottom:8px;">
+          💰 Amount (주문 규모) - 레버리지 ${data.leverage}x
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <div style="background:#161b22; border:1px solid #3fb950; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#3fb950; margin-bottom:2px;">안전형 (2%)</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(safeAmt * data.leverage)}</div>
+          </div>
+          <div style="background:#161b22; border:1px solid #d29922; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#d29922; margin-bottom:2px;">중간형 (5%)</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(midAmt * data.leverage)}</div>
+          </div>
+          <div style="background:#161b22; border:1px solid #f85149; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#f85149; margin-bottom:2px;">공격형 (10%)</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(aggAmt * data.leverage)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  let html = '';
+  if (ts.long) {
+    html += renderCard('long', ts.long, '📈 Long (상승장 진입)', '#3fb950');
+  }
+  if (ts.short) {
+    html += renderCard('short', ts.short, '📉 Short (하락장 진입)', '#f85149');
+  }
+
+  gridEl.innerHTML = html;
 }
 
 function renderForecast(d) {
