@@ -1,12 +1,18 @@
 {
   "version": 2,
   "cleanUrls": true,
-  "functions": {
-    "api/*.py": {
-      "runtime": "python3.12",
-      "maxDuration": 15
+  "builds": [
+    {
+      "src": "api/*.py",
+      "use": "@vercel/python"
     }
-  },
+  ],
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
+    }
+  ],
   "crons": [
     {
       "path": "/api/cron",
