@@ -181,11 +181,17 @@ def resolve_symbol(q: str) -> Tuple[Optional[str], Optional[str]]:
 # ── Binance API 데이터 수집 모듈
 # =============================================================================
 
-BINANCE_BASE   = "https://api.binance.com"
+BINANCE_BASES = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://data-api.binance.vision"
+]
 BINANCE_FAPI   = "https://fapi.binance.com"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
-_HEADERS = {"User-Agent": "CoinOracle/1.0"}
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def _get(url: str, params: dict = None, timeout: int = 10) -> Any:
     """공통 GET 요청 (오류 시 None 반환)"""
@@ -193,8 +199,34 @@ def _get(url: str, params: dict = None, timeout: int = 10) -> Any:
         r = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
         r.raise_for_status()
         return r.json()
-    except Exception:
+    except Exception as e:
+        print(f"[API Error] GET {url} params={params} failed: {e}")
         return None
+
+def _get_binance(endpoint: str, params: dict = None, timeout: int = 10) -> Any:
+    """Binance 현물 API 요청 (여러 엔드포인트 폴백 지원)"""
+    for base in BINANCE_BASES:
+        url = f"{base}{endpoint}"
+        try:
+            r = requests.get(url, params=params, headers=_HEADERS, timeout=timeout)
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except ValueError:
+                    print(f"[API Error] {url} returned invalid JSON")
+                    continue
+            elif r.status_code in (403, 451):
+                # IP 차단 가능성 (Vercel US IP 등) - 다음 엔드포인트 시도
+                print(f"[API Warning] {url} returned {r.status_code}, trying next...")
+                continue
+            else:
+                print(f"[API Warning] {url} returned {r.status_code}, trying next...")
+                continue
+        except Exception as e:
+            print(f"[API Warning] GET {url} failed: {e}, trying next...")
+            continue
+    print(f"[API Error] All Binance base endpoints failed for {endpoint}")
+    return None
 
 @ttl_cache(60)
 def fetch_coin_klines(symbol: str, interval: str = "1d", limit: int = 365) -> Optional[pd.DataFrame]:
@@ -202,8 +234,8 @@ def fetch_coin_klines(symbol: str, interval: str = "1d", limit: int = 365) -> Op
     Binance 현물 OHLCV 수집
     interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
     """
-    data = _get(f"{BINANCE_BASE}/api/v3/klines",
-                {"symbol": symbol, "interval": interval, "limit": limit})
+    data = _get_binance("/api/v3/klines",
+                        {"symbol": symbol, "interval": interval, "limit": limit})
     if not data:
         return None
     df = pd.DataFrame(data, columns=[
@@ -224,12 +256,12 @@ def fetch_coin_klines(symbol: str, interval: str = "1d", limit: int = 365) -> Op
 @ttl_cache(30)
 def fetch_ticker_24h(symbol: str) -> Optional[Dict]:
     """Binance 24시간 티커 (현재가, 변동률, 거래량)"""
-    return _get(f"{BINANCE_BASE}/api/v3/ticker/24hr", {"symbol": symbol})
+    return _get_binance("/api/v3/ticker/24hr", {"symbol": symbol})
 
 @ttl_cache(30)
 def fetch_all_tickers_24h() -> Optional[List[Dict]]:
     """Binance 전체 24시간 티커"""
-    return _get(f"{BINANCE_BASE}/api/v3/ticker/24hr")
+    return _get_binance("/api/v3/ticker/24hr")
 
 @ttl_cache(30)
 def fetch_funding_rate(symbol: str) -> Optional[float]:
@@ -392,12 +424,20 @@ def fetch_coin_data(symbol: str, interval: str = "1d", limit: int = 365):
 
     # OHLCV 수집
     df = fetch_coin_klines(symbol, interval=interval, limit=limit)
-    if df is None or df.empty:
+    if df is None:
+        print(f"[Data Error] fetch_coin_klines returned None for {symbol} ({interval})")
+        return None, None, symbol
+    if df.empty:
+        print(f"[Data Error] fetch_coin_klines returned empty DataFrame for {symbol} ({interval})")
         return None, None, symbol
 
     # 지표 계산
     df = add_indicators(df)
     df = df.dropna(subset=["Close", "MA20", "RSI"])
+    
+    if df.empty:
+        print(f"[Data Error] DataFrame became empty after dropna for {symbol} (not enough data for indicators)")
+        return None, None, symbol
 
     # 24h 티커
     ticker = fetch_ticker_24h(symbol)
