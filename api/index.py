@@ -505,26 +505,41 @@ def calc_leverage_recommendation(
 
     # ── 최종 레버리지 계산 ──────────────────────────────────────────
     final_lev = base_lev * vol_factor * funding_factor * rsi_factor * vol_spike_factor
-    final_lev = max(1.0, min(20.0, final_lev))
-    recommended = round(final_lev)
-
-    # ── 위험도 등급 ─────────────────────────────────────────────────
-    if recommended >= 10:
+    
+    # ── 위험도 등급 및 레버리지 세부 조정 (요청사항 반영) ───────────────────
+    # 기존에는 최종 레버리지 값에 따라 등급을 나눴으나, 
+    # 이제는 산출된 추천 레버리지(final_lev)와 시장 변동성(volatility_30d)을 종합하여 등급을 부여하고
+    # 각 등급에 맞는 지정된 범위 내에서 레버리지를 세밀하게 결정합니다.
+    
+    # 1. 등급 판별 기준 설정 (변동성과 산출된 레버리지 종합)
+    if volatility_30d < 40 and final_lev >= 10:
         risk_grade = "Low"
         risk_color = "#3fb950"
-        risk_desc  = "변동성 낮음 — 레버리지 활용 가능"
-    elif recommended >= 5:
+        risk_desc  = "안전: 변동성이 낮고 추세가 안정적"
+        # Low 등급: 10 ~ 20 (final_lev가 20을 넘지 않도록 제한)
+        recommended = int(max(10, min(20, round(final_lev))))
+        
+    elif volatility_30d < 70 and final_lev >= 5:
         risk_grade = "Medium"
         risk_color = "#d29922"
-        risk_desc  = "중간 변동성 — 신중한 레버리지 사용"
-    elif recommended >= 3:
+        risk_desc  = "주의: 일반적인 시장 상태"
+        # Medium 등급: 5 ~ 9
+        # final_lev 값을 5~9 사이로 매핑
+        recommended = int(max(5, min(9, round(final_lev))))
+        
+    elif volatility_30d < 120 or final_lev >= 3:
         risk_grade = "High"
         risk_color = "#f85149"
-        risk_desc  = "고변동성 — 레버리지 최소화 권장"
+        risk_desc  = "위험: 변동성이 높음, 레버리지 축소 권장"
+        # High 등급: 3 ~ 4
+        recommended = int(max(3, min(4, round(final_lev))))
+        
     else:
         risk_grade = "Extreme"
         risk_color = "#ff0000"
-        risk_desc  = "극고변동성 — 레버리지 사용 비권장"
+        risk_desc  = "극도 위험: 극심한 변동성, 현물 거래 권장"
+        # Extreme 등급: 1 ~ 2
+        recommended = int(max(1, min(2, round(final_lev))))
 
     # ── 포지션 크기 및 손절/익절 계산 ──────────────────────────────
     # 켈리 기준 변형: 포지션 크기 = 10% / 레버리지 (보수적)
