@@ -32,7 +32,16 @@ def ttl_cache(ttl: int):
             if item and item[1] > now:
                 return item[0]
             value = fn(*args, **kwargs)
-            _CACHE[key] = (value, now + ttl)
+            
+            # 실패 응답(None, Exception을 포함한 dict, 에러 메시지 등)은 캐시하지 않음
+            should_cache = True
+            if value is None:
+                should_cache = False
+            elif isinstance(value, dict) and ("error" in value or "status" in value and value["status"] == "error"):
+                should_cache = False
+                
+            if should_cache:
+                _CACHE[key] = (value, now + ttl)
             return value
         return wrapper
     return deco
