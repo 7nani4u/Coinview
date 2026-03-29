@@ -1,6 +1,17 @@
-fastapi
-uvicorn
-pandas
+# CoinOracle - Binance AI 암호화폐 분석 시스템
+# [변경] yfinance 제거 → Binance REST API (requests로 직접 호출)
+# [유지] numpy, pandas, requests, beautifulsoup4, feedparser, lxml
+
+# 데이터 처리
 numpy
-yfinance
+pandas
+
+# HTTP 요청 (Binance API, CoinGecko API)
 requests
+
+# 뉴스 수집 (Google RSS)
+feedparser
+lxml
+
+# HTML 파싱 (필요 시)
+beautifulsoup4
