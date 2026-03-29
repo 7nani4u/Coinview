@@ -1016,6 +1016,23 @@ def xgb_forecast(dd: Dict, days: int = 30):
 
 SCREENER_INTERVALS = config.SCREENER_INTERVALS
 
+def _categorize_coin(base: str) -> str:
+    """간단한 코인 카테고리 분류"""
+    base = base.upper()
+    if base in ["BTC", "ETH"]:
+        return "메이저 (Major)"
+    if base in ["BNB", "SOL", "ADA", "XRP", "DOT", "AVAX", "LINK", "MATIC", "POL", "TRX"]:
+        return "알트 대장 (Large Alt)"
+    if base in ["DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "PENGU", "TRUMP"]:
+        return "밈 (Meme)"
+    if base in ["UNI", "AAVE", "CRV", "RUNE", "MKR", "LDO", "SNX"]:
+        return "디파이 (DeFi)"
+    if base in ["OP", "ARB", "MATIC", "POL", "MANTLE"]:
+        return "L2 (레이어2)"
+    if base in ["SUI", "APT", "SEI", "TIA", "INJ", "TAO"]:
+        return "신흥 알트 (New Alt)"
+    return "기타 (Others)"
+
 def fetch_coin_screener_item(symbol: str, prefetched_ticker: Optional[Dict] = None, funding_rate: Optional[float] = None) -> Optional[Dict]:
     """단일 코인 스크리너 데이터 수집"""
     try:
@@ -1050,7 +1067,8 @@ def fetch_coin_screener_item(symbol: str, prefetched_ticker: Optional[Dict] = No
         ema26 = float(df["EMA26"].iloc[-1]) if "EMA26" in df.columns and not pd.isna(df["EMA26"].iloc[-1]) else 0.0
         avg_vol = float(df["Volume"].rolling(20).mean().iloc[-1])
         vol_ratio = float(df["Volume"].iloc[-1]) / avg_vol if avg_vol > 0 else 1.0
-        funding = funding_rate if funding_rate is not None else fetch_funding_rate(symbol)
+        funding = funding_rate
+        # 밈코인 등 1000이 붙는 선물 심볼로 인해 못 찾은 경우 개별 호출 생략 (속도 및 에러 방지)
 
         lev_info = calc_leverage_recommendation(
             price=price, atr=atr, atr_pct=atr_pct,
@@ -1110,7 +1128,15 @@ def fetch_coin_screener(sort_by: str = "volume", sort_order: str = "desc") -> Di
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=config.SCREENER_MAX_WORKERS) as executor:
-        futures = {executor.submit(fetch_coin_screener_item, sym, ticker_map.get(sym), funding_map.get(sym)): sym for sym in ranked_symbols}
+        futures = {
+            executor.submit(
+                fetch_coin_screener_item, 
+                sym, 
+                ticker_map.get(sym), 
+                funding_map.get(sym) or funding_map.get(f"1000{sym}")
+            ): sym 
+            for sym in ranked_symbols
+        }
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res is not None:
