@@ -483,7 +483,11 @@ def calc_leverage_recommendation(
     volume_ratio: float,
     macd: float = 0.0,
     macd_signal: float = 0.0,
-    score: int = 50
+    score: int = 50,
+    bb_upper: float = 0.0,
+    bb_lower: float = 0.0,
+    ema12: float = 0.0,
+    ema26: float = 0.0
 ) -> Dict:
     """
     적정 레버리지 자동 계산 엔진
@@ -590,21 +594,42 @@ def calc_leverage_recommendation(
         # Extreme 등급: 1 ~ 2
         recommended = int(max(1, min(2, round(final_lev))))
 
-    # ── 포지션 방향(Long/Short) 예측 ─────────────────────────────────
-    if score >= 60:
-        position = "Long"
-        position_desc = "상승 추세 (AI 종합점수 우수)"
-    elif score <= 40:
-        position = "Short"
-        position_desc = "하락 추세 (AI 종합점수 약세)"
-    else:
-        # 중립 구간에서는 MACD와 RSI 기반 단기 모멘텀 판단
-        if macd > macd_signal and rsi > 50:
+    # ── 포지션 방향(Long/Short) 예측 (볼린저 밴드, EMA 추가 반영) ─────────────────────────────────
+    is_ema_bullish = ema12 > ema26 if ema12 and ema26 else False
+    is_macd_bullish = macd > macd_signal
+    is_overbought = rsi > 70 or (bb_upper > 0 and price >= bb_upper)
+    is_oversold = rsi < 30 or (bb_lower > 0 and price <= bb_lower)
+
+    if score >= 65:
+        if is_overbought:
+            position = "Neutral"
+            position_desc = "강한 상승이나 단기 과열 (조정 주의)"
+        else:
             position = "Long"
-            position_desc = "단기 상승 모멘텀 (중립 구간)"
-        elif macd < macd_signal and rsi < 50:
+            position_desc = "강한 상승 추세 (AI 및 지표 우수)"
+    elif score <= 35:
+        if is_oversold:
+            position = "Neutral"
+            position_desc = "강한 하락이나 단기 투매 (반등 주의)"
+        else:
             position = "Short"
-            position_desc = "단기 하락 모멘텀 (중립 구간)"
+            position_desc = "강한 하락 추세 (AI 및 지표 약세)"
+    else:
+        # 종합 점수 중립 구간 (35 ~ 65): EMA, MACD, BB를 통한 세밀한 모멘텀 판단
+        if is_ema_bullish and is_macd_bullish and rsi > 50:
+            if bb_upper > 0 and price >= bb_upper:
+                position = "Short"
+                position_desc = "볼린저 상단 저항 (단기 하락 전환 예상)"
+            else:
+                position = "Long"
+                position_desc = "단기 상승 모멘텀 (EMA 정배열 및 MACD 호조)"
+        elif not is_ema_bullish and not is_macd_bullish and rsi < 50:
+            if bb_lower > 0 and price <= bb_lower:
+                position = "Long"
+                position_desc = "볼린저 하단 지지 (단기 반등 예상)"
+            else:
+                position = "Short"
+                position_desc = "단기 하락 모멘텀 (EMA 역배열 및 MACD 약세)"
         else:
             position = "Neutral"
             position_desc = "추세 불분명 (관망 권장)"
@@ -1081,6 +1106,12 @@ def fetch_coin_screener_item(symbol: str) -> Optional[Dict]:
         atr_pct = float(df["ATR_Pct"].iloc[-1])
         ma20    = float(df["MA20"].iloc[-1])
         vol_30d = float(df["Volatility_30d"].iloc[-1]) if "Volatility_30d" in df.columns and not pd.isna(df["Volatility_30d"].iloc[-1]) else 0
+        macd    = float(df["MACD"].iloc[-1]) if "MACD" in df.columns and not pd.isna(df["MACD"].iloc[-1]) else 0.0
+        macd_signal = float(df["Signal_Line"].iloc[-1]) if "Signal_Line" in df.columns and not pd.isna(df["Signal_Line"].iloc[-1]) else 0.0
+        bb_upper = float(df["BB_Upper"].iloc[-1]) if "BB_Upper" in df.columns and not pd.isna(df["BB_Upper"].iloc[-1]) else 0.0
+        bb_lower = float(df["BB_Lower"].iloc[-1]) if "BB_Lower" in df.columns and not pd.isna(df["BB_Lower"].iloc[-1]) else 0.0
+        ema12   = float(df["EMA12"].iloc[-1]) if "EMA12" in df.columns and not pd.isna(df["EMA12"].iloc[-1]) else 0.0
+        ema26   = float(df["EMA26"].iloc[-1]) if "EMA26" in df.columns and not pd.isna(df["EMA26"].iloc[-1]) else 0.0
 
         # 거래량 비율 (현재 / 20일 평균)
         avg_vol = float(df["Volume"].rolling(20).mean().iloc[-1])
@@ -1089,11 +1120,17 @@ def fetch_coin_screener_item(symbol: str) -> Optional[Dict]:
         # 펀딩비
         funding = fetch_funding_rate(symbol)
 
+        # AI 종합 점수(간이) 계산 (Screener에서는 전체 AI 분석을 돌리기 무거울 수 있으므로 임의로 50으로 두거나, 스크리너 로직에 맞춰 기본값 사용)
+        score = 50 
+
         # 레버리지 예측
         lev_info = calc_leverage_recommendation(
             price=price, atr=atr, atr_pct=atr_pct,
             volatility_30d=vol_30d, funding_rate=funding,
-            rsi=rsi, volume_ratio=vol_ratio
+            rsi=rsi, volume_ratio=vol_ratio,
+            macd=macd, macd_signal=macd_signal, score=score,
+            bb_upper=bb_upper, bb_lower=bb_lower,
+            ema12=ema12, ema26=ema26
         )
 
         # 신호 판단
@@ -1280,6 +1317,10 @@ def route(path: str, params: Dict) -> Optional[Dict]:
         vol_30d = v("Volatility_30d")
         macd    = v("MACD")
         macd_signal = v("Signal_Line")
+        bb_upper = v("BB_Upper")
+        bb_lower = v("BB_Lower")
+        ema12   = v("EMA12")
+        ema26   = v("EMA26")
         vols    = dd.get("Volume", [])
         cur_vol = float(vols[-1]) if vols else 0
         avg_vol = float(np.mean([x for x in vols[-20:] if x])) if vols else 1
@@ -1301,7 +1342,9 @@ def route(path: str, params: Dict) -> Optional[Dict]:
             price=last, atr=atr, atr_pct=atr_pct,
             volatility_30d=vol_30d, funding_rate=funding,
             rsi=rsi, volume_ratio=vol_ratio,
-            macd=macd, macd_signal=macd_signal, score=score
+            macd=macd, macd_signal=macd_signal, score=score,
+            bb_upper=bb_upper, bb_lower=bb_lower,
+            ema12=ema12, ema26=ema26
         )
 
         # 리스크 시나리오
