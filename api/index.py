@@ -157,18 +157,23 @@ def resolve_symbol(q: str) -> Tuple[Optional[str], Optional[str]]:
     if not q:
         return None, None
 
-    # 직접 USDT 심볼 입력 (예: BTCUSDT)
-    if q.endswith("USDT") and len(q) > 4:
-        return q, q.replace("USDT", "")
-
-    # 별칭 매핑
+    # 별칭 매핑 (먼저 확인하여 한글 등 매핑)
     q_orig = q
     q_lower = q.lower()
     for alias, sym in COIN_ALIASES.items():
         if alias.upper() == q_orig or alias.lower() == q_lower:
             return sym, sym.replace("USDT", "")
 
+    # 직접 USDT 심볼 입력 (예: BTCUSDT)
+    if q.endswith("USDT") and len(q) > 4:
+        return q, q.replace("USDT", "")
+        
+    # 직접 BUSD, USDC 등 다른 페어 입력시 그대로 반환
+    if q.endswith("BUSD") or q.endswith("USDC"):
+        return q, q
+
     # 순수 심볼 입력 (예: BTC → BTCUSDT)
+    # 이미 영문+숫자 조합인 경우 기본적으로 USDT를 붙임
     candidate = q + "USDT"
     return candidate, q
 
@@ -381,13 +386,14 @@ def fetch_coin_data(symbol: str, interval: str = "1d", limit: int = 365):
     - 뉴스
     """
     symbol = symbol.upper()
-    if not symbol.endswith("USDT"):
+    # resolve_symbol에서 이미 USDT를 붙여서 주지만 혹시 몰라 방어코드 유지
+    if not symbol.endswith("USDT") and not symbol.endswith("BUSD") and not symbol.endswith("USDC"):
         symbol = symbol + "USDT"
 
     # OHLCV 수집
     df = fetch_coin_klines(symbol, interval=interval, limit=limit)
     if df is None or df.empty:
-        return None, None, f"데이터 없음: {symbol}"
+        return None, None, symbol
 
     # 지표 계산
     df = add_indicators(df)
@@ -1190,7 +1196,8 @@ def route(path: str, params: Dict) -> Optional[Dict]:
 
         dd, news, sym = fetch_coin_data(symbol, interval=interval, limit=limit)
         if dd is None:
-            return {"error": f"데이터 조회 실패: {sym}"}
+            # USDT로 못 찾았을 경우 대비 fallback (일부 코인은 BUSD나 다른 페어일 수 있으나 기본은 USDT)
+            return {"error": f"데이터 조회 실패: 데이터 없음: {sym}"}
 
         closes = dd.get("Close", [])
         last   = float(closes[-1]) if closes else 0
