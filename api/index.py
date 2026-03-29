@@ -1301,9 +1301,17 @@ def route(path: str, params: Dict) -> Optional[Dict]:
             return {"error": f"데이터 조회 실패: 데이터 없음: {sym}"}
 
         closes = dd.get("Close", [])
-        last   = float(closes[-1]) if closes else 0
-        prev   = float(closes[-2]) if len(closes) > 1 else last
-        pct    = (last - prev) / prev * 100 if prev else 0
+        last_ohlcv = float(closes[-1]) if closes else 0
+        prev   = float(closes[-2]) if len(closes) > 1 else last_ohlcv
+        
+        # 실시간 Ticker 24h 정보 우선 사용 (현재가 및 변동률 정확도 향상)
+        ticker_24h = dd.get("ticker_24h", {})
+        if ticker_24h and "price" in ticker_24h:
+            last = float(ticker_24h["price"])
+            pct = float(ticker_24h.get("change_pct", (last - prev) / prev * 100 if prev else 0))
+        else:
+            last = last_ohlcv
+            pct  = (last - prev) / prev * 100 if prev else 0
 
         # 지표값 추출
         def v(k):
