@@ -2417,3 +2417,15 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Server Error: {str(e)}\n{traceback.format_exc()}")
             _send(self, {"error": "Internal Server Error"}, 500)
+
+if __name__ == "__main__":
+    from http.server import HTTPServer
+    port = 8000
+    server = HTTPServer(("", port), handler)
+    print(f"Starting local dev server on port {port}...")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    server.server_close()
+    print("Server stopped.")
