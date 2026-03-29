@@ -2389,11 +2389,16 @@ class handler(BaseHTTPRequestHandler):
                     _send(self, {"error": f"Invalid interval. Allowed: {', '.join(sorted(VALID_INTERVALS))}"}, 400)
                     return
 
-            result = route(path, params)
-            if result is None:
-                _send(self, HTML, 200, "text/html")
+            # API 라우팅 처리
+            if path.startswith("/api/"):
+                result = route(path, params)
+                if result is None:
+                    _send(self, {"error": "Not Found"}, 404)
+                else:
+                    _send(self, result)
             else:
-                _send(self, result)
+                # 루트 또는 HTML 요청
+                _send(self, HTML, 200, "text/html")
         except Exception as e:
             print(f"Server Error: {str(e)}\n{traceback.format_exc()}")
             _send(self, {"error": "Internal Server Error"}, 500)
