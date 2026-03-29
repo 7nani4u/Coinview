@@ -608,6 +608,32 @@ def calc_leverage_recommendation(
     # 레버리지별 실질 손실 계산
     lev_stop_loss_pct = round(stop_loss_pct * recommended, 1)
 
+    # ── Long / Short 2가지 진입 전략 (Stop Limit용) 추가 ───────────────────
+    # Long 진입 (상향 돌파)
+    long_stop = price + (atr * 0.5)
+    long_limit = long_stop * 1.001
+    long_sl = price - (atr * 1.5)
+    
+    # Short 진입 (하향 돌파)
+    short_stop = price - (atr * 0.5)
+    short_limit = short_stop * 0.999
+    short_sl = price + (atr * 1.5)
+    
+    trading_signals = {
+        "long": {
+            "stop": round(long_stop, 6),
+            "limit": round(long_limit, 6),
+            "sl": round(long_sl, 6),
+            "leverage": recommended
+        },
+        "short": {
+            "stop": round(short_stop, 6),
+            "limit": round(short_limit, 6),
+            "sl": round(short_sl, 6),
+            "leverage": recommended
+        }
+    }
+
     return {
         "position":             position,
         "position_desc":        position_desc,
@@ -620,6 +646,7 @@ def calc_leverage_recommendation(
         "stop_loss_pct":        stop_loss_pct,
         "take_profit_pct":      take_profit_pct,
         "lev_stop_loss_pct":    lev_stop_loss_pct,
+        "trading_signals":      trading_signals,
         # 계산 근거 (UI 표시용)
         "factors": {
             "base_leverage":    round(base_lev, 2),
