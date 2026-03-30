@@ -613,23 +613,27 @@ def calc_leverage_recommendation(
     long_stop = price + (atr * 0.5)
     long_limit = long_stop * 1.001
     long_sl = price - (atr * 1.5)
+    long_tp = price * (1 + take_profit_pct / 100)
     
     # Short 진입 (하향 돌파)
     short_stop = price - (atr * 0.5)
     short_limit = short_stop * 0.999
     short_sl = price + (atr * 1.5)
+    short_tp = price * (1 - take_profit_pct / 100)
     
     trading_signals = {
         "long": {
             "stop": round(long_stop, 6),
             "limit": round(long_limit, 6),
             "sl": round(long_sl, 6),
+            "tp": round(long_tp, 6),
             "leverage": recommended
         },
         "short": {
             "stop": round(short_stop, 6),
             "limit": round(short_limit, 6),
             "sl": round(short_sl, 6),
+            "tp": round(short_tp, 6),
             "leverage": recommended
         }
     }
@@ -2444,23 +2448,32 @@ function updateTradingSignals() {
   };
 
   const renderCard = (type, data, title, color) => {
+    const tpPrice = data.tp || 0;
+    const coinQtySafe = data.limit > 0 ? (safeAmt * data.leverage / data.limit).toFixed(4) : '0';
+    const coinQtyMid = data.limit > 0 ? (midAmt * data.leverage / data.limit).toFixed(4) : '0';
+    const coinQtyAgg = data.limit > 0 ? (aggAmt * data.leverage / data.limit).toFixed(4) : '0';
+
     return `
       <div style="background:#21262d; border:1px solid #30363d; border-radius:8px; padding:16px;">
         <div style="font-size:16px; font-weight:700; color:${color}; margin-bottom:12px; border-bottom:1px solid #30363d; padding-bottom:8px;">
           ${title}
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:12px; margin-bottom:12px;">
           <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
-            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Stop (트리거)</div>
-            <div style="font-size:15px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.stop)}</div>
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">Stop (트리거)</div>
+            <div style="font-size:14px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.stop)}</div>
           </div>
           <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
-            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Limit (주문가)</div>
-            <div style="font-size:15px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.limit)}</div>
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">Limit (주문가)</div>
+            <div style="font-size:14px; font-weight:600; color:#c9d1d9;">${fmtPrice(data.limit)}</div>
           </div>
           <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center;">
-            <div style="font-size:12px; color:#8b949e; margin-bottom:4px;">Stop Loss</div>
-            <div style="font-size:15px; font-weight:600; color:#f85149;">${fmtPrice(data.sl)}</div>
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">Stop Loss</div>
+            <div style="font-size:14px; font-weight:600; color:#f85149;">${fmtPrice(data.sl)}</div>
+          </div>
+          <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center; border:1px solid #3fb95033;">
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">Take Profit (목표가)</div>
+            <div style="font-size:14px; font-weight:600; color:#3fb950;">${fmtPrice(tpPrice)}</div>
           </div>
         </div>
         <div style="font-size:13px; font-weight:600; color:#c9d1d9; margin-bottom:8px;">
@@ -2468,16 +2481,19 @@ function updateTradingSignals() {
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
           <div style="background:#161b22; border:1px solid #3fb950; padding:8px; border-radius:6px; text-align:center;">
-            <div style="font-size:11px; color:#3fb950; margin-bottom:2px;">안전형 (2%)</div>
+            <div style="font-size:11px; color:#3fb950; margin-bottom:2px;">안전형 (마진 $${fmtAmt(safeAmt)})</div>
             <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(safeAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtySafe} 개</div>
           </div>
           <div style="background:#161b22; border:1px solid #d29922; padding:8px; border-radius:6px; text-align:center;">
-            <div style="font-size:11px; color:#d29922; margin-bottom:2px;">중간형 (5%)</div>
+            <div style="font-size:11px; color:#d29922; margin-bottom:2px;">중간형 (마진 $${fmtAmt(midAmt)})</div>
             <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(midAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtyMid} 개</div>
           </div>
           <div style="background:#161b22; border:1px solid #f85149; padding:8px; border-radius:6px; text-align:center;">
-            <div style="font-size:11px; color:#f85149; margin-bottom:2px;">공격형 (10%)</div>
+            <div style="font-size:11px; color:#f85149; margin-bottom:2px;">공격형 (마진 $${fmtAmt(aggAmt)})</div>
             <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(aggAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtyAgg} 개</div>
           </div>
         </div>
       </div>
@@ -2490,6 +2506,31 @@ function updateTradingSignals() {
   }
   if (ts.short) {
     html += renderCard('short', ts.short, '📉 Short (하락장 진입)', '#f85149');
+  }
+
+  // 매도 타이밍 요약 추가 (한 눈에 보이도록)
+  if (window.currentSellPrediction) {
+    const sp = window.currentSellPrediction;
+    html += `
+      <div style="background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-top:4px;">
+        <div style="font-size:14px; font-weight:700; color:#e6edf3; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+          ⏱️ 스마트 매도/청산 타이밍 예측
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+          <div style="background:#0d1117; padding:12px; border-radius:8px; text-align:center;">
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">예상 매도 날짜</div>
+            <div style="font-size:15px; font-weight:700; color:#c9d1d9;">${sp.sellDate}</div>
+          </div>
+          <div style="background:#0d1117; padding:12px; border-radius:8px; text-align:center;">
+            <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">예상 매도 시간</div>
+            <div style="font-size:15px; font-weight:700; color:#c9d1d9;">${sp.sellTime}</div>
+          </div>
+        </div>
+        <div style="font-size:12px; color:#8b949e; margin-top:10px; text-align:center;">
+          * 예측 탭에서 더 자세한 매도 근거를 확인할 수 있습니다.
+        </div>
+      </div>
+    `;
   }
 
   gridEl.innerHTML = html;
