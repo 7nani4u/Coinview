@@ -762,23 +762,19 @@ function renderLeverage(d) {
       <div style="font-size:11px;color:#484f58;margin-top:4px">총 자산 대비</div>
     </div>`;
 
-  // 리스크 시나리오
-  if (risk) {
-    const riskHtml = Object.entries(risk).map(([key, sc]) => `
-      <div class="risk-card ${key}">
-        <div class="risk-icon">${sc.icon}</div>
-        <div class="risk-name">${sc.label}</div>
-        <div class="risk-desc">${sc.desc}</div>
-        <div class="risk-row"><span class="risk-lbl">목표가</span><span class="risk-tgt">${fmtPrice(sc.target)}</span></div>
-        <div class="risk-row"><span class="risk-lbl">손절가</span><span class="risk-stp">${fmtPrice(sc.stop)}</span></div>
-        <div class="risk-row"><span class="risk-lbl">레버리지</span><span style="color:#388bfd;font-weight:700">${sc.lev}</span></div>
-        <div class="risk-ratio">RR ${sc.ratio} | 레버 수익 +${sc.lev_gain}% / 손실 -${sc.lev_loss}%</div>
-      </div>`).join('');
-    document.getElementById('risk-grid').innerHTML = riskHtml;
-  }
+  // 리스크 시나리오는 동적으로 렌더링 (updateTradingSignals 내에서 호출됨)
 
   // Trading Signals 렌더링을 위해 전역 변수 저장
   window.currentTradingSignals = lev.trading_signals;
+  window.currentRiskData = {
+    price: d.last_close,
+    position: lev.position,
+    recommended_leverage: lev.recommended_leverage,
+    max_leverage: lev.max_leverage,
+    stop_loss_pct: lev.stop_loss_pct,
+    risk_grade: lev.risk_grade,
+    volatility: lev.factors ? lev.factors.volatility_30d : 50
+  };
   updateTradingSignals();
 }
 
@@ -851,6 +847,88 @@ function updateTradingSignals() {
   }
 
   gridEl.innerHTML = html;
+
+  // Update Risk Scenarios based on position and leverage
+  updateRiskScenario();
+}
+
+function updateRiskScenario() {
+  const riskData = window.currentRiskData;
+  if (!riskData) return;
+
+  const investInput = document.getElementById('invest-amount');
+  const investAmt = parseFloat(investInput ? investInput.value : 0) || 0;
+
+  const price = riskData.price;
+  const position = riskData.position; // "Long", "Short", "Neutral"
+  const lev = riskData.recommended_leverage;
+  const maxLev = riskData.max_leverage;
+  const stopLossPct = riskData.stop_loss_pct; // e.g., 2.5
+  
+  // 1. 투자금액 산출 (안전형 2%, 중간형 5%, 공격형 10%)
+  const safeAmt = investAmt * 0.02;
+  const midAmt = investAmt * 0.05;
+  const aggAmt = investAmt * 0.10;
+
+  // 2. 변동성에 따른 위험 수준 분류
+  let volRiskText = "보통";
+  if (riskData.risk_grade === "Low") volRiskText = "낮음";
+  else if (riskData.risk_grade === "High" || riskData.risk_grade === "Extreme") volRiskText = "높음";
+
+  // 3. 예상 손실 범위 계산 함수 (투자금 * 레버리지 * 손절률)
+  const calcLoss = (amt, leverage) => {
+    return (amt * leverage * (stopLossPct / 100)).toFixed(2);
+  };
+
+  const safeLoss = calcLoss(safeAmt, lev);
+  const midLoss = calcLoss(midAmt, lev);
+  const aggLoss = calcLoss(aggAmt, maxLev);
+
+  // 4. 청산 가능 가격 계산 함수 (유지 증거금을 제외한 단순 청산가)
+  const calcLiqPrice = (entryPrice, pos, leverage) => {
+    if (pos === "Long" || pos === "Buy") return entryPrice * (1 - 1 / leverage);
+    if (pos === "Short" || pos === "Sell") return entryPrice * (1 + 1 / leverage);
+    return null;
+  };
+
+  const safeLiqPrice = calcLiqPrice(price, position, lev);
+  const midLiqPrice = calcLiqPrice(price, position, lev);
+  const aggLiqPrice = calcLiqPrice(price, position, maxLev);
+
+  // 청산가 포맷팅 헬퍼 함수
+  const formatLiqPrice = (p) => p ? '$' + p.toFixed(2) : '-';
+
+  // 5. 조건 분기 로직에 따라 생성된 동적 HTML 렌더링
+  const riskHtml = `
+    <div class="risk-card conservative">
+      <div class="risk-icon">🛡️</div>
+      <div class="risk-name">안전 (Safe)</div>
+      <div class="risk-desc">리스크 최소화 시나리오</div>
+      <div class="risk-row"><span class="risk-lbl">추천 레버리지</span><span style="color:#388bfd;font-weight:700">${lev}x</span></div>
+      <div class="risk-row"><span class="risk-lbl">예상 손실</span><span class="risk-stp">-$${safeLoss} (${(stopLossPct * lev).toFixed(1)}%)</span></div>
+      <div class="risk-row"><span class="risk-lbl">청산가 (위험도)</span><span style="color:#3fb950;font-weight:700">${formatLiqPrice(safeLiqPrice)} (매우 낮음)</span></div>
+      <div class="risk-ratio">위험 수준: ${volRiskText}</div>
+    </div>
+    <div class="risk-card balanced">
+      <div class="risk-icon">⚖️</div>
+      <div class="risk-name">중간 (Balanced)</div>
+      <div class="risk-desc">일반적인 스윙 트레이딩</div>
+      <div class="risk-row"><span class="risk-lbl">추천 레버리지</span><span style="color:#388bfd;font-weight:700">${lev}x</span></div>
+      <div class="risk-row"><span class="risk-lbl">예상 손실</span><span class="risk-stp">-$${midLoss} (${(stopLossPct * lev).toFixed(1)}%)</span></div>
+      <div class="risk-row"><span class="risk-lbl">청산가 (위험도)</span><span style="color:#d29922;font-weight:700">${formatLiqPrice(midLiqPrice)} (낮음)</span></div>
+      <div class="risk-ratio">위험 수준: ${volRiskText}</div>
+    </div>
+    <div class="risk-card aggressive">
+      <div class="risk-icon">🚀</div>
+      <div class="risk-name">공격 (Aggressive)</div>
+      <div class="risk-desc">최대 허용 레버리지 사용</div>
+      <div class="risk-row"><span class="risk-lbl">최대 레버리지</span><span style="color:#388bfd;font-weight:700">${maxLev}x</span></div>
+      <div class="risk-row"><span class="risk-lbl">예상 손실</span><span class="risk-stp">-$${aggLoss} (${(stopLossPct * maxLev).toFixed(1)}%)</span></div>
+      <div class="risk-row"><span class="risk-lbl">청산가 (위험도)</span><span style="color:#f85149;font-weight:700">${formatLiqPrice(aggLiqPrice)} (높음)</span></div>
+      <div class="risk-ratio">위험 수준: ${volRiskText}</div>
+    </div>
+  `;
+  document.getElementById('risk-grid').innerHTML = riskHtml;
 }
 
 function renderForecast(d) {
@@ -859,7 +937,7 @@ function renderForecast(d) {
   const last = d.last_close;
   const sumEl = document.getElementById('forecast-summary');
 
-  if (!fc) {
+  if (!fc || !fc.dates || fc.dates.length === 0) {
     sumEl.innerHTML = '<p style="color:#484f58;font-size:13px">예측 데이터 부족 (최소 30개 캔들 필요)</p>';
     return;
   }
@@ -870,6 +948,51 @@ function renderForecast(d) {
   const ensChg = (ens - last) / last * 100;
   const ensUp  = ensChg >= 0;
   const clr    = ensUp ? '#3fb950' : '#f85149';
+
+  // --- [언제 매도해야 하는지 예측하는 로직] ---
+  // 1. 동적 타겟 가격 설정 (ATR 기반)
+  // ATR 데이터가 있으면 1.5배 ATR을 목표 수익/손실폭으로 설정, 없으면 기본 5% 사용
+  const targetChange = d.atr ? (d.atr * 1.5) : (last * 0.05);
+  const targetPrice = ensUp ? last + targetChange : last - targetChange;
+  
+  // 기본 매도 날짜는 예측의 마지막 날짜
+  let sellDate = fc.dates[fc.dates.length - 1];
+  let sellTime = "00:00"; // 일봉 기준이므로 시간은 기본값으로 설정
+  
+  // 2. 매도 근거 텍스트 생성
+  let sellReason = ensUp 
+    ? `예측 모델(Holt-Winters) 기준 단기 상승 추세가 예상됩니다. 현재가 대비 1.5 ATR(변동성 지표) 상승한 목표가 도달 시 분할 수익 실현을 권장합니다.` 
+    : `예측 모델(Holt-Winters) 기준 단기 하락 추세가 예상됩니다. 리스크 관리를 위해 1.5 ATR 하락한 가격 도달 전후로 비중 축소를 권장합니다.`;
+  let targetFound = false;
+
+  // 3. 예측 데이터(yhat)를 순회하며 타겟 가격을 돌파하는 시점 찾기
+  for (let i = 0; i < fc.yhat.length; i++) {
+    // 상승 예측 시 타겟 가격 이상, 하락 예측 시 타겟 가격 이하인 시점을 찾음
+    if ((ensUp && fc.yhat[i] >= targetPrice) || (!ensUp && fc.yhat[i] <= targetPrice)) {
+      sellDate = fc.dates[i];
+      // 날짜 데이터 파싱 (YYYY-MM-DD HH:MM 형식 지원)
+      if (sellDate.includes(" ")) {
+        const parts = sellDate.split(" ");
+        sellDate = parts[0];
+        sellTime = parts[1].substring(0, 5);
+      } else if (sellDate.includes("T")) {
+        const parts = sellDate.split("T");
+        sellDate = parts[0];
+        sellTime = parts[1].substring(0, 5);
+      }
+      // 타겟 도달 시 매도 근거 업데이트
+      sellReason = ensUp 
+        ? `예측 가격이 단기 목표가(${fmtPrice(targetPrice)})에 도달하는 시점입니다. (추세 강세 유지 시 홀딩, 꺾임 시 매도)`
+        : `예측 가격이 단기 손절가/하락목표가(${fmtPrice(targetPrice)})에 도달하는 시점입니다. (리스크 관리 차원의 매도)`;
+      targetFound = true;
+      break;
+    }
+  }
+
+  // 예측 데이터의 날짜 형식이 YYYY-MM-DD 인 경우, 하루의 끝(23:59)으로 시간 설정
+  if (!sellDate.includes(" ") && !sellDate.includes("T")) {
+    sellTime = "23:59";
+  }
 
   sumEl.innerHTML = `
     <div style="background:#21262d;border-radius:10px;padding:12px;text-align:center;flex:1;min-width:120px">
@@ -884,6 +1007,31 @@ function renderForecast(d) {
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px">📌 참고 시나리오</div>
       <div style="font-size:17px;font-weight:800;color:#fff">${fmtPrice(ens)}</div>
       <div style="font-size:12px;color:${clr}">${ensUp?'▲':'▼'} ${Math.abs(ensChg).toFixed(2)}%</div>
+    </div>
+    
+    <div style="width:100%; background:#161b22; border:1px solid #30363d; border-radius:10px; padding:16px; margin-top:8px;">
+      <div style="font-size:14px; font-weight:700; color:#e6edf3; margin-bottom:12px; display:flex; align-items:center; gap:6px;">
+        ⏱️ 스마트 매도 타이밍 예측
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px;">
+        <div style="background:#0d1117; padding:12px; border-radius:8px;">
+          <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">예상 매도 날짜</div>
+          <div style="font-size:16px; font-weight:700; color:#c9d1d9;">${sellDate}</div>
+        </div>
+        <div style="background:#0d1117; padding:12px; border-radius:8px;">
+          <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">예상 매도 시간</div>
+          <div style="font-size:16px; font-weight:700; color:#c9d1d9;">${sellTime}</div>
+        </div>
+      </div>
+      <div style="background:#21262d; padding:12px; border-radius:8px;">
+        <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">매도 근거 (예측 로직)</div>
+        <div style="font-size:13px; color:#e6edf3; line-height:1.5;">
+          ${sellReason}<br>
+          <span style="color:#8b949e; font-size:11px; margin-top:4px; display:block;">
+            * 기준: Holt-Winters 시계열 예측 모델 및 모멘텀 기반 동적 타겟 가격(${fmtPrice(targetPrice)}) 돌파 여부
+          </span>
+        </div>
+      </div>
     </div>`;
 }
 
