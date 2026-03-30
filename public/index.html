@@ -931,6 +931,9 @@ function updateTradingSignals() {
 
   const renderCard = (type, data, title, color) => {
     const tpPrice = data.tp || 0;
+    const coinQtySafe = data.limit > 0 ? (safeAmt * data.leverage / data.limit).toFixed(4) : '0';
+    const coinQtyMid = data.limit > 0 ? (midAmt * data.leverage / data.limit).toFixed(4) : '0';
+    const coinQtyAgg = data.limit > 0 ? (aggAmt * data.leverage / data.limit).toFixed(4) : '0';
 
     return `
       <div style="background:#21262d; border:1px solid #30363d; border-radius:8px; padding:16px;">
@@ -953,6 +956,26 @@ function updateTradingSignals() {
           <div style="background:#0d1117; padding:10px; border-radius:6px; text-align:center; border:1px solid #3fb95033;">
             <div style="font-size:11px; color:#8b949e; margin-bottom:4px;">Take Profit (목표가)</div>
             <div style="font-size:14px; font-weight:600; color:#3fb950;">${fmtPrice(tpPrice)}</div>
+          </div>
+        </div>
+        <div style="font-size:13px; font-weight:600; color:#c9d1d9; margin-bottom:8px;">
+          💰 Amount (주문 규모) - 레버리지 ${data.leverage}x
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <div style="background:#161b22; border:1px solid #3fb950; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#3fb950; margin-bottom:2px;">안전형 (마진 $${fmtAmt(safeAmt)})</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(safeAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtySafe} 개</div>
+          </div>
+          <div style="background:#161b22; border:1px solid #d29922; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#d29922; margin-bottom:2px;">중간형 (마진 $${fmtAmt(midAmt)})</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(midAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtyMid} 개</div>
+          </div>
+          <div style="background:#161b22; border:1px solid #f85149; padding:8px; border-radius:6px; text-align:center;">
+            <div style="font-size:11px; color:#f85149; margin-bottom:2px;">공격형 (마진 $${fmtAmt(aggAmt)})</div>
+            <div style="font-size:14px; font-weight:600; color:#fff;">$${fmtAmt(aggAmt * data.leverage)}</div>
+            <div style="font-size:10px; color:#8b949e; margin-top:2px;">≈ ${coinQtyAgg} 개</div>
           </div>
         </div>
       </div>
@@ -1000,74 +1023,62 @@ function updateTradingSignals() {
 
 function updateRiskScenario() {
   const riskData = window.currentRiskData;
-  const ts = window.currentTradingSignals;
-  if (!riskData || !ts) return;
+  if (!riskData) return;
 
   const investInput = document.getElementById('invest-amount');
   const investAmt = parseFloat(investInput ? investInput.value : 0) || 0;
+  const recommendedLev = riskData.recommended_leverage;
+  const maxLev = riskData.max_leverage;
+  const takeProfitPct = riskData.take_profit_pct || 0;
+  const volatility = riskData.volatility || 0;
   const positionInfo = getPositionContext(riskData.position);
+  const scenarios = getScenarioConfigs(positionInfo.label, recommendedLev, maxLev);
+
+  const isLong = positionInfo.label === 'Long';
+  const isShort = positionInfo.label === 'Short';
   
-  let signalData = null;
-  if (positionInfo.label === 'Long') {
-    signalData = ts.long;
-  } else if (positionInfo.label === 'Short') {
-    signalData = ts.short;
-  } else {
-    signalData = ts.long || ts.short;
-  }
+  // 포지션에 따른 동적 라벨 및 색상
+  const profitLabel = isLong ? '예상 수익 (Long)' : isShort ? '예상 수익 (Short)' : '예상 수익 (대기)';
+  const profitColor = isLong ? '#3fb950' : isShort ? '#f85149' : '#8b949e';
 
-  if (!signalData) {
-    document.getElementById('risk-grid').innerHTML = '<div style="color:#8b949e;">해당 포지션의 시그널 데이터가 없습니다.</div>';
-    return;
-  }
+  const riskHtml = scenarios.map((scenario) => {
+    const leverageRatio = maxLev > 0 ? scenario.leverage / maxLev : 0;
+    const riskLevel = getVolatilityRiskLabel(volatility, leverageRatio);
 
-  const fmtAmt = (val) => {
-    if (val === 0) return '0.00';
-    return val.toFixed(2);
-  };
+    // 주문 규모 (Amount) = 투자원금 * 자본비중 * 레버리지
+    const positionNotional = investAmt * scenario.capitalRatio * scenario.leverage;
+    // 예상 수익 = 주문 규모 * (익절 퍼센트 / 100)
+    const expectedProfit = positionNotional * (takeProfitPct / 100);
 
-  const safeAmt = investAmt * 0.02;
-  const midAmt = investAmt * 0.05;
-  const aggAmt = investAmt * 0.10;
-  
-  const limitPrice = signalData.limit || 0;
-  const tpPrice = signalData.tp || 0;
-  const leverage = signalData.leverage || 1;
-  
-  let profitPct = 0;
-  if (limitPrice > 0) {
-    if (positionInfo.label === 'Long') {
-      profitPct = (tpPrice / limitPrice - 1) * leverage;
-    } else {
-      profitPct = (limitPrice - tpPrice) / limitPrice * leverage;
-    }
-  }
-
-  const configs = [
-    { key: 'conservative', name: '안전형', icon: '🛡️', margin: safeAmt, color: '#3fb950' },
-    { key: 'moderate', name: '중간형', icon: '⚖️', margin: midAmt, color: '#d29922' },
-    { key: 'aggressive', name: '공격형', icon: '🔥', margin: aggAmt, color: '#f85149' }
-  ];
-
-  const riskHtml = configs.map(cfg => {
-    const orderSize = cfg.margin * leverage;
-    const coinQty = limitPrice > 0 ? (orderSize / limitPrice).toFixed(4) : '0';
-    const expectedProfit = cfg.margin * profitPct;
-    
     return `
-      <div class="risk-card ${cfg.key}">
-        <div class="risk-icon">${cfg.icon}</div>
-        <div class="risk-name">${cfg.name} (마진 $${fmtAmt(cfg.margin)})</div>
-        <div class="risk-desc">투자금의 ${cfg.margin === safeAmt ? 2 : cfg.margin === midAmt ? 5 : 10}% 활용</div>
+      <div class="risk-card ${scenario.key}">
+        <div class="risk-icon">${scenario.icon}</div>
+        <div class="risk-name">${scenario.name}</div>
+        <div class="risk-desc" style="min-height: 36px;">${scenario.desc}</div>
         
-        <div class="risk-row"><span class="risk-lbl">운용 레버리지</span><span style="color:#388bfd;font-weight:700">${leverage}x</span></div>
-        <div class="risk-row"><span class="risk-lbl">주문 규모</span><span style="color:#c9d1d9;font-weight:700">$${fmtAmt(orderSize)}</span></div>
-        <div class="risk-row"><span class="risk-lbl">예상 코인 수량</span><span style="color:#c9d1d9;font-weight:700">≈ ${coinQty} 개</span></div>
-        <div class="risk-row"><span class="risk-lbl">예상 수익금</span><span style="color:#3fb950;font-weight:700">+$${fmtAmt(expectedProfit)} (${(profitPct * 100).toFixed(2)}%)</span></div>
+        <div style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed #30363d;">
+          <div class="risk-row" style="margin-bottom: 12px;">
+            <span class="risk-lbl">운용 레버리지</span>
+            <span style="color:#388bfd;font-weight:700;font-size:14px;">${scenario.leverage}x</span>
+          </div>
+          
+          <div class="risk-row" style="margin-bottom: 12px;">
+            <span class="risk-lbl">Amount (주문 규모)</span>
+            <span style="color:#c9d1d9;font-weight:700;font-size:14px;">${fmtUsd(positionNotional)}</span>
+          </div>
+          
+          <div style="background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+            <span class="risk-lbl" style="font-size: 13px;">${profitLabel}</span>
+            <span style="color:${profitColor}; font-weight:800; font-size: 16px;">+${fmtUsd(expectedProfit)}</span>
+          </div>
+        </div>
+        
+        <div class="risk-ratio" style="margin-top: 16px; padding-top: 12px; border-top: 1px solid #30363d; font-size: 11px; color: #8b949e; text-align: center;">
+          변동성 위험 수준: <span style="color:#c9d1d9; font-weight:600;">${riskLevel}</span>
+        </div>
       </div>
     `;
   }).join('');
-
   document.getElementById('risk-grid').innerHTML = riskHtml;
 }
 
