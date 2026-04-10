@@ -2582,6 +2582,9 @@ function updateRiskScenario() {
     const leverageRatio = maxLev > 0 ? scenario.leverage / maxLev : 0;
     const riskLevel = getVolatilityRiskLabel(volatility, leverageRatio);
 
+    // 각 시나리오별 레버리지에 따른 예상 수익률 재계산 (기본 takeProfitPct에 레버리지 배수 곱 적용)
+    const scenarioExpectedProfitPct = takeProfitPct * scenario.leverage;
+
     return `
       <div class="risk-card ${scenario.key}">
         <div class="risk-icon">${scenario.icon}</div>
@@ -2606,7 +2609,7 @@ function updateRiskScenario() {
           
           <div style="background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
             <span class="risk-lbl" style="font-size: 13px;">예상 수익률</span>
-            <span style="color:#3fb950; font-weight:800; font-size: 16px;">+${takeProfitPct.toFixed(1)}%</span>
+            <span style="color:#3fb950; font-weight:800; font-size: 16px;">+${scenarioExpectedProfitPct.toFixed(1)}%</span>
           </div>
         </div>
         
