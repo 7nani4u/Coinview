@@ -2575,15 +2575,22 @@ function updateRiskScenario() {
   const isLong = positionInfo.label === 'Long';
   const isShort = positionInfo.label === 'Short';
   
-  const takeProfitPrice = isLong ? price * (1 + takeProfitPct / 100) : isShort ? price * (1 - takeProfitPct / 100) : 0;
-  const stopLossPrice = isLong ? price * (1 - stopLossPct / 100) : isShort ? price * (1 + stopLossPct / 100) : 0;
+  // 각 시나리오별로 목표가와 손절가를 다시 계산하기 위해 여기서 공통 변수 계산은 생략
 
   const riskHtml = scenarios.map((scenario) => {
     const leverageRatio = maxLev > 0 ? scenario.leverage / maxLev : 0;
     const riskLevel = getVolatilityRiskLabel(volatility, leverageRatio);
 
-    // 각 시나리오별 레버리지에 따른 예상 수익률 재계산 (기본 takeProfitPct에 레버리지 배수 곱 적용)
+    // 각 시나리오별 레버리지에 따른 예상 수익률 및 손절률 재계산
+    const scenarioTakeProfitPct = takeProfitPct; // 목표가 자체는 변하지 않음 (레버리지는 수익'률'에 곱해짐)
+    const scenarioStopLossPct = stopLossPct; // 손절가 자체는 변하지 않음
+
+    // 시나리오별 레버리지가 적용된 예상 수익률(%)
     const scenarioExpectedProfitPct = takeProfitPct * scenario.leverage;
+
+    // 현재가 기반 목표가/손절가 계산 (레버리지 배수 무관하게 목표가/손절가 자체의 가격 도달 기준)
+    const takeProfitPrice = isLong ? price * (1 + scenarioTakeProfitPct / 100) : isShort ? price * (1 - scenarioTakeProfitPct / 100) : 0;
+    const stopLossPrice = isLong ? price * (1 - scenarioStopLossPct / 100) : isShort ? price * (1 + scenarioStopLossPct / 100) : 0;
 
     return `
       <div class="risk-card ${scenario.key}">
