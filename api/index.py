@@ -2589,8 +2589,20 @@ function updateRiskScenario() {
     const scenarioExpectedProfitPct = takeProfitPct * scenario.leverage;
 
     // 현재가 기반 목표가/손절가 계산 (레버리지 배수 무관하게 목표가/손절가 자체의 가격 도달 기준)
-    const takeProfitPrice = isLong ? price * (1 + scenarioTakeProfitPct / 100) : isShort ? price * (1 - scenarioTakeProfitPct / 100) : 0;
-    const stopLossPrice = isLong ? price * (1 - scenarioStopLossPct / 100) : isShort ? price * (1 + scenarioStopLossPct / 100) : 0;
+    let takeProfitPrice = 0;
+    let stopLossPrice = 0;
+    
+    // getPositionContext에서 설정된 label(Short, Long, Neutral)을 기준으로 처리
+    if (positionInfo.label === 'Long' || positionInfo.label === 'Buy') {
+        takeProfitPrice = price * (1 + scenarioTakeProfitPct / 100);
+        stopLossPrice = price * (1 - scenarioStopLossPct / 100);
+    } else if (positionInfo.label === 'Short' || positionInfo.label === 'Sell') {
+        takeProfitPrice = price * (1 - scenarioTakeProfitPct / 100);
+        stopLossPrice = price * (1 + scenarioStopLossPct / 100);
+    } else {
+        takeProfitPrice = 0;
+        stopLossPrice = 0;
+    }
 
     return `
       <div class="risk-card ${scenario.key}">
