@@ -811,26 +811,28 @@ function renderLeverage(d) {
     const totalSignals = steps.length;
 
     levBuySection.innerHTML = `
-      <div class="buy-price-grid" style="grid-template-columns: repeat(2, 1fr);">
-        <div class="buy-card aggressive">
-          <div class="buy-label">⚡ 공격적 매수</div>
-          <div class="buy-price-val" style="color:#f97316;font-size:14px">${fmtPrice(aggR[0])} ~ ${fmtPrice(aggR[1])}</div>
-          <div class="buy-basis-box">현재가 대비 단기 눌림 구간<br>ATR 0.5배 기반 · 빠른 진입</div>
+      <div class="buy-price-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+        <div class="buy-card aggressive" style="border-radius:12px;padding:16px;border:1px solid #4d3615;background:#2d200a;">
+          <div class="buy-label" style="font-size:11px;color:#f97316;margin-bottom:8px;font-weight:600;display:flex;align-items:center;gap:6px;">⚡ 공격적 매수</div>
+          <div class="buy-price-val" style="color:#f97316;font-size:20px;font-weight:800;margin-bottom:12px;">${fmtPrice(aggR[0])} ~ ${fmtPrice(aggR[1])}</div>
+          <div class="buy-basis-box" style="font-size:12px;color:#8b949e;line-height:1.5;border-top:1px solid rgba(255,255,255,0.05);padding-top:12px;">현재가 대비 단기 눌림 구간<br>ATR 0.5배 기반 · 빠른 진입</div>
         </div>
-        <div class="buy-card recommended">
-          <div class="buy-label">✅ 추천 매수 구간</div>
-          <div class="buy-price-val" style="color:#3fb950;font-size:14px">${fmtPrice(recR[0])} ~ ${fmtPrice(recR[1])}</div>
-          <div class="buy-basis-box">ATR 기반 최적 진입 구간<br>분할 매수 권장</div>
+        <div class="buy-card recommended" style="border-radius:12px;padding:16px;border:1px solid #1a4730;background:#0d2d1a;">
+          <div class="buy-label" style="font-size:11px;color:#3fb950;margin-bottom:8px;font-weight:600;display:flex;align-items:center;gap:6px;">✅ 추천 매수 구간</div>
+          <div class="buy-price-val" style="color:#3fb950;font-size:20px;font-weight:800;margin-bottom:12px;">${fmtPrice(recR[0])} ~ ${fmtPrice(recR[1])}</div>
+          <div class="buy-basis-box" style="font-size:12px;color:#8b949e;line-height:1.5;border-top:1px solid rgba(255,255,255,0.05);padding-top:12px;">ATR 기반 최적 진입 구간<br>분할 매수 권장</div>
         </div>
       </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px;margin-bottom:12px">
-        <div style="font-size:11px;color:#8b949e;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">📋 예측 근거</div>
-        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 볼린저 하단 지지선 근접 (≈${fmtPrice(bbl)})</div>
-        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 단기 생명선(MA20) 지지 (≈${fmtPrice(ma20)})</div>
-        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 중기 추세선(MA60) 지지 (≈${fmtPrice(ma60)})</div>
-        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 일간 변동성(ATR) 기반 구간 분할 (ATR ≈${fmtPrice(atr)})</div>
-        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 최근 30일 핵심 매물대/저점 지지구간 (≈${fmtPrice(low30d)})</div>
-        <div style="font-size:12px;color:#8b949e">• AI 종합 진단 점수 (${d.score}점) 및 시그널(${buySignals}/${totalSignals} 매수) 반영</div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px;">
+        <div style="font-size:13px;color:#e6edf3;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:6px;">📋 예측 근거</div>
+        <div style="font-size:13px;color:#8b949e;line-height:1.8;padding-left:4px;">
+          • 볼린저 하단 지지선 근접 (≈${fmtPrice(bbl)})<br>
+          • 단기 생명선(MA20) 지지 (≈${fmtPrice(ma20)})<br>
+          • 중기 추세선(MA60) 지지 (≈${fmtPrice(ma60)})<br>
+          • 일간 변동성(ATR) 기반 구간 분할 (ATR ≈${fmtPrice(atr)})<br>
+          • 최근 30일 핵심 매물대/저점 지지구간 (≈${fmtPrice(low30d)})<br>
+          • AI 종합 진단 점수 (${d.score}점) 및 시그널(${buySignals}/${totalSignals} 매수) 반영
+        </div>
       </div>
     `;
   }
@@ -997,6 +999,10 @@ function updateRiskScenario() {
   const isLong = positionInfo.label === 'Long';
   const isShort = positionInfo.label === 'Short';
   
+  const currentPrice = riskData.price || 0;
+  const takeProfitPrice = isLong ? currentPrice * (1 + takeProfitPct / 100) : isShort ? currentPrice * (1 - takeProfitPct / 100) : 0;
+  const stopLossPrice = isLong ? currentPrice * (1 - riskData.stop_loss_pct / 100) : isShort ? currentPrice * (1 + riskData.stop_loss_pct / 100) : 0;
+
   // 포지션에 따른 동적 라벨 및 색상
   const profitLabel = isLong ? '예상 수익 (Long)' : isShort ? '예상 수익 (Short)' : '예상 수익 (대기)';
   const profitColor = isLong ? '#3fb950' : isShort ? '#f85149' : '#8b949e';
@@ -1023,13 +1029,18 @@ function updateRiskScenario() {
           </div>
           
           <div class="risk-row" style="margin-bottom: 12px;">
-            <span class="risk-lbl">Amount (주문 규모)</span>
-            <span style="color:#c9d1d9;font-weight:700;font-size:14px;">${fmtUsd(positionNotional)}</span>
+            <span class="risk-lbl">목표가</span>
+            <span style="color:#3fb950;font-weight:700;font-size:14px;">${fmtPrice(takeProfitPrice)}</span>
+          </div>
+
+          <div class="risk-row" style="margin-bottom: 12px;">
+            <span class="risk-lbl">손절가</span>
+            <span style="color:#f85149;font-weight:700;font-size:14px;">${fmtPrice(stopLossPrice)}</span>
           </div>
           
           <div style="background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
-            <span class="risk-lbl" style="font-size: 13px;">${profitLabel}</span>
-            <span style="color:${profitColor}; font-weight:800; font-size: 16px;">+${fmtUsd(expectedProfit)}</span>
+            <span class="risk-lbl" style="font-size: 13px;">예상 수익률</span>
+            <span style="color:#3fb950; font-weight:800; font-size: 16px;">+${takeProfitPct.toFixed(1)}%</span>
           </div>
         </div>
         
