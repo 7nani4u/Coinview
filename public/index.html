@@ -989,18 +989,20 @@ function updateRiskScenario() {
 
   const investInput = document.getElementById('invest-amount');
   const investAmt = parseFloat(investInput ? investInput.value : 1000) || 1000;
-  const recommendedLev = riskData.recommended_leverage;
-  const maxLev = riskData.max_leverage;
-  const takeProfitPct = riskData.take_profit_pct || 0;
+  const recommendedLev = riskData.recommended_leverage || 1;
+  const maxLev = riskData.max_leverage || 2;
   const volatility = riskData.volatility || 0;
   const positionInfo = getPositionContext(riskData.position);
   const scenarios = getScenarioConfigs(positionInfo.label, recommendedLev, maxLev);
 
   const isLong = positionInfo.label === 'Long';
   const isShort = positionInfo.label === 'Short';
-  
+
   const currentPrice = riskData.price || 0;
-  // 각 시나리오별로 목표가와 손절가를 다시 계산하기 위해 여기서 공통 변수 계산은 생략
+  // ATR 기반 기본 손절 폭 계산 (stop_loss_pct 미제공 또는 0인 경우 ATR로 대체)
+  const atrPct = (riskData.atr && currentPrice) ? (riskData.atr / currentPrice * 100) : 2.0;
+  const baseStopLossPct = (riskData.stop_loss_pct > 0) ? riskData.stop_loss_pct : (atrPct * 1.5);
+  const baseTakeProfitPct = (riskData.take_profit_pct > 0) ? riskData.take_profit_pct : (baseStopLossPct * 2);
 
   // 포지션에 따른 동적 라벨 및 색상
   const profitLabel = isLong ? '예상 수익 (Long)' : isShort ? '예상 수익 (Short)' : '예상 수익 (대기)';
@@ -1010,28 +1012,27 @@ function updateRiskScenario() {
     const leverageRatio = maxLev > 0 ? scenario.leverage / maxLev : 0;
     const riskLevel = getVolatilityRiskLabel(volatility, leverageRatio);
 
-    // 각 시나리오별 레버리지에 따른 예상 수익률 및 손절률 재계산
-    const scenarioTakeProfitPct = takeProfitPct; // 목표가 자체는 변하지 않음 (레버리지는 수익'률'에 곱해짐)
-    const scenarioStopLossPct = riskData.stop_loss_pct; // 손절가 자체는 변하지 않음
-
+    // 시나리오별 손절 폭 (stopFactor 적용으로 시나리오 간 차별화)
+    const scenarioStopLossPct = baseStopLossPct * (scenario.stopFactor || 1.0);
+    // 익절 폭 = 손절 폭 × 2 (최소 RR 1:2 유지)
+    const scenarioTakeProfitPct = scenarioStopLossPct * 2;
     // 시나리오별 레버리지가 적용된 예상 수익률(%)
-    const scenarioExpectedProfitPct = takeProfitPct * scenario.leverage;
+    const scenarioExpectedProfitPct = scenarioTakeProfitPct * scenario.leverage;
 
-    // 현재가 기반 목표가/손절가 계산 (레버리지 배수 무관하게 목표가/손절가 자체의 가격 도달 기준)
+    // 현재가 기반 목표가/손절가 계산
     let takeProfitPrice = 0;
     let stopLossPrice = 0;
-    
-    // getPositionContext에서 설정된 label(Short, Long, Neutral)을 기준으로 처리
-    if (positionInfo.label === 'Long' || positionInfo.label === 'Buy') {
+
+    if (isLong) {
         takeProfitPrice = currentPrice * (1 + scenarioTakeProfitPct / 100);
-        stopLossPrice = currentPrice * (1 - scenarioStopLossPct / 100);
-    } else if (positionInfo.label === 'Short' || positionInfo.label === 'Sell') {
+        stopLossPrice   = currentPrice * (1 - scenarioStopLossPct / 100);
+    } else if (isShort) {
         takeProfitPrice = currentPrice * (1 - scenarioTakeProfitPct / 100);
-        stopLossPrice = currentPrice * (1 + scenarioStopLossPct / 100);
+        stopLossPrice   = currentPrice * (1 + scenarioStopLossPct / 100);
     } else {
-        // Neutral인 경우 (위아래 범위로 표시하거나 0 처리)
-        takeProfitPrice = 0;
-        stopLossPrice = 0;
+        // Neutral: 상단 목표 / 하단 손절 동시 표시 (방향 미확정)
+        takeProfitPrice = currentPrice * (1 + scenarioTakeProfitPct / 100);
+        stopLossPrice   = currentPrice * (1 - scenarioStopLossPct / 100);
     }
 
     return `
