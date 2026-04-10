@@ -396,11 +396,8 @@ input::placeholder{color:#484f58}
       <!-- 레버리지 탭 (신규) -->
       <div id="tab-content-leverage" style="display:none">
         
-        <!-- 투자금 입력란 -->
-        <div class="card" style="margin-bottom:12px; background:#161b22; display:flex; align-items:center; gap:12px; padding:12px 16px;">
-          <label for="invest-amount" style="font-size:14px; font-weight:600;">💰 나의 투자 원금 (USDT):</label>
-          <input type="number" id="invest-amount" value="1000" style="background:#0d1117; border:1px solid #30363d; color:#fff; padding:6px 12px; border-radius:6px; width:120px; outline:none;" oninput="updateTradingSignals()">
-        </div>
+        <!-- 매수 타점 및 예측 근거 (신규) -->
+        <div id="lev-buy-section"></div>
 
         <div class="lev-card">
           <div class="card-title">⚡ 레버리지 예측 엔진</div>
@@ -421,11 +418,6 @@ input::placeholder{color:#484f58}
           </div>
           <div class="lev-factors" id="lev-factors"></div>
           <div class="lev-warning" id="lev-warning"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">📐 포지션 크기 & 손익 계산</div>
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px" id="lev-position-grid"></div>
         </div>
 
         <div class="card">
@@ -798,25 +790,50 @@ function renderLeverage(d) {
     • 레버리지 ${lev.recommended_leverage}x 적용 시 손절 손실: <strong>${lev.lev_stop_loss_pct}%</strong><br>
     • 고변동성 구간에서는 레버리지를 즉시 축소하세요.`;
 
-  // 포지션 크기 그리드
-  document.getElementById('lev-position-grid').innerHTML = `
-    <div style="background:#21262d;border-radius:10px;padding:14px;text-align:center">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px">권장 손절 (가격 기준)</div>
-      <div style="font-size:18px;font-weight:700;color:#f85149">-${lev.stop_loss_pct}%</div>
-      <div style="font-size:11px;color:#484f58;margin-top:4px">ATR × 1.5</div>
-    </div>
-    <div style="background:#21262d;border-radius:10px;padding:14px;text-align:center">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px">권장 익절 (가격 기준)</div>
-      <div style="font-size:18px;font-weight:700;color:#3fb950">+${lev.take_profit_pct}%</div>
-      <div style="font-size:11px;color:#484f58;margin-top:4px">손절 × 2 (RR 1:2)</div>
-    </div>
-    <div style="background:#21262d;border-radius:10px;padding:14px;text-align:center">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px">포지션 크기</div>
-      <div style="font-size:18px;font-weight:700;color:#388bfd">${lev.position_size_pct}%</div>
-      <div style="font-size:11px;color:#484f58;margin-top:4px">총 자산 대비</div>
-    </div>`;
+  // 매수 타점 및 예측 근거 렌더링 (신규 UI)
+  const levBuySection = document.getElementById('lev-buy-section');
+  if (levBuySection) {
+    const last = d.last_close || 0;
+    const atr = d.atr || 0;
+    const aggR = [last - 0.8 * atr, last - 0.2 * atr];
+    const recR = [last - 1.5 * atr, last - 0.8 * atr];
 
-  // 리스크 시나리오는 동적으로 렌더링 (updateTradingSignals 내에서 호출됨)
+    // 데이터 추출
+    const cd = d.chart_data || {};
+    const bbl = cd.bb_lower && cd.bb_lower.length > 0 ? cd.bb_lower[cd.bb_lower.length - 1] : 0;
+    const ma20 = cd.ma20 && cd.ma20.length > 0 ? cd.ma20[cd.ma20.length - 1] : 0;
+    const ma60 = cd.ma60 && cd.ma60.length > 0 ? cd.ma60[cd.ma60.length - 1] : 0;
+    const low30d = cd.low && cd.low.length >= 30 ? Math.min(...cd.low.slice(-30)) : (last * 0.9);
+    
+    // AI 시그널 매수 개수
+    const steps = d.analysis_steps || [];
+    const buySignals = steps.filter(s => s.score > 0).length;
+    const totalSignals = steps.length;
+
+    levBuySection.innerHTML = `
+      <div class="buy-price-grid" style="grid-template-columns: repeat(2, 1fr);">
+        <div class="buy-card aggressive">
+          <div class="buy-label">⚡ 공격적 매수</div>
+          <div class="buy-price-val" style="color:#f97316;font-size:14px">${fmtPrice(aggR[0])} ~ ${fmtPrice(aggR[1])}</div>
+          <div class="buy-basis-box">현재가 대비 단기 눌림 구간<br>ATR 0.5배 기반 · 빠른 진입</div>
+        </div>
+        <div class="buy-card recommended">
+          <div class="buy-label">✅ 추천 매수 구간</div>
+          <div class="buy-price-val" style="color:#3fb950;font-size:14px">${fmtPrice(recR[0])} ~ ${fmtPrice(recR[1])}</div>
+          <div class="buy-basis-box">ATR 기반 최적 진입 구간<br>분할 매수 권장</div>
+        </div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px;margin-bottom:12px">
+        <div style="font-size:11px;color:#8b949e;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">📋 예측 근거</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 볼린저 하단 지지선 근접 (≈${fmtPrice(bbl)})</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 단기 생명선(MA20) 지지 (≈${fmtPrice(ma20)})</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 중기 추세선(MA60) 지지 (≈${fmtPrice(ma60)})</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 일간 변동성(ATR) 기반 구간 분할 (ATR ≈${fmtPrice(atr)})</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:4px">• 최근 30일 핵심 매물대/저점 지지구간 (≈${fmtPrice(low30d)})</div>
+        <div style="font-size:12px;color:#8b949e">• AI 종합 진단 점수 (${d.score}점) 및 시그널(${buySignals}/${totalSignals} 매수) 반영</div>
+      </div>
+    `;
+  }
 
   // Trading Signals 렌더링을 위해 전역 변수 저장
   window.currentTradingSignals = lev.trading_signals;
@@ -969,7 +986,7 @@ function updateRiskScenario() {
   if (!riskData) return;
 
   const investInput = document.getElementById('invest-amount');
-  const investAmt = parseFloat(investInput ? investInput.value : 0) || 0;
+  const investAmt = parseFloat(investInput ? investInput.value : 1000) || 1000;
   const recommendedLev = riskData.recommended_leverage;
   const maxLev = riskData.max_leverage;
   const takeProfitPct = riskData.take_profit_pct || 0;
