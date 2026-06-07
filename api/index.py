@@ -4566,9 +4566,19 @@ def calc_probability(score: float, dd: Dict) -> tuple:
     prob_down = round(100.0 - prob_up, 1)
     return round(prob_up, 1), prob_down
 
+def get_round_digits(price: float, market: str) -> int:
+    if price is None or np.isnan(price): return 2
+    if market in ("US", "CRYPTO"):
+        ap = abs(float(price))
+        if ap >= 100: return 2
+        if ap >= 1: return 4
+        if ap >= 0.01: return 6
+        return 8
+    return 0 if market == "KRX" else 2
+
 def calc_risk(price: float, atr: float, market: str = "KRX", dd: Dict = None) -> Dict:
     if not atr or np.isnan(atr): atr = price * 0.02
-    rnd = 4 if market == "US" else 2
+    rnd = get_round_digits(price, market)
 
     # ── 변동성 동적 계수 산출 ──────────────────────────────────────────
     atr_pct = atr / price * 100  # ATR의 현재가 대비 비율(%)
@@ -5125,7 +5135,7 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
     if not atr or np.isnan(atr):
         atr = last_price * 0.02
 
-    rnd = 4 if market == "US" else 2
+    rnd = get_round_digits(last_price, market)
 
     # ── 변동성 동적 계수 ──────────────────────────────────────────────
     atr_pct = atr / last_price * 100
@@ -5599,7 +5609,7 @@ def calc_pullback_analysis(dd: Dict, last_price: float, atr: float, score: float
     bb_l    = bb_l_arr[-1] if bb_l_arr else 0.0
     bb_m    = bb_m_arr[-1] if bb_m_arr else 0.0
     rsi_val = rsi_arr[-1] if rsi_arr else 50.0
-    rnd     = 4 if market == "US" else 0
+    rnd = get_round_digits(last_price, market)
 
     if not atr or atr != atr:
         atr = last_price * 0.02
@@ -6029,7 +6039,7 @@ def calc_target_price(dd: Dict, last_price: float, atr: float, period: str, mark
     if not atr or np.isnan(atr):
         atr = last_price * 0.02
 
-    rnd = 4 if market == "US" else 2
+    rnd = get_round_digits(last_price, market)
 
     # ── 추세 강도 분석 (0 ~ 4, RSI 과매수 시 -1 보정) ──────────────────
     trend_strength = (
@@ -9401,7 +9411,14 @@ function _fmtKrNum(v) { return Number(v).toLocaleString('ko-KR', {maximumFractio
 //     $1 이상은 기존대로 2자리. trailing zero는 자동 제거(200.00→200, 0.5→0.5).
 function _fmtUsNum(v) {
   const n = Number(v);
-  const maxFD = (n !== 0 && Math.abs(n) < 1) ? 4 : 2;
+  if (n === 0) return '0';
+  const abs_n = Math.abs(n);
+  let maxFD = 2;
+  if (abs_n < 0.0001) maxFD = 8;
+  else if (abs_n < 0.001) maxFD = 7;
+  else if (abs_n < 0.01) maxFD = 6;
+  else if (abs_n < 0.1) maxFD = 5;
+  else if (abs_n < 1) maxFD = 4;
   return n.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:maxFD});
 }
 
