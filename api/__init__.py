@@ -1,0 +1,1 @@
+# CoinOracle API package
