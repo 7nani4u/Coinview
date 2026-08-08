@@ -248,6 +248,13 @@ def test_html_exposes_coin_ui_and_new_interactions():
     assert "function renderPullbackIntoForecast(d, isKrx)" in html
     assert "🤖 AI 종합 의견" not in html
     assert "📈 향후 가격 상승 가능 범위 (목표가 예측)" not in html
+    assert "⚠️ <strong>레버리지 사용 주의</strong>" not in html
+    assert "💡 AI 종합 진단 및 트레이딩 전략" not in html
+    assert "⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색" in html
+    assert "📍 2차 매수 구간 · 주 진입" in html
+    assert "🛡️ 리스크 관리 (ATR 기반)" in html
+    assert "news-single-column" in html
+    assert "classList.toggle('news-single-column', !isKrx)" in html
     assert 'id="page-portfolio"' in html
     assert "cv_portfolio_v1" in html
     assert "wss://stream.binance.com:9443" in html

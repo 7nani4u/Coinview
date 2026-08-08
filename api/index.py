@@ -12641,6 +12641,8 @@ input::placeholder{color:#484f58}
 .news-thumb{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#21262d}
 .news-thumb.is-error{display:none}
 .news-empty{font-size:13px;color:#484f58;padding:18px 2px}
+.two-col-grid.news-single-column{grid-template-columns:minmax(0,1fr)}
+.two-col-grid.news-single-column #news-col1{grid-column:1/-1;width:100%;min-width:0;box-sizing:border-box}
 @media(max-width:480px){
   .news-row{grid-template-columns:minmax(0,1fr) 64px;gap:10px;padding:12px 0}
   .news-thumb-shell{width:64px;height:54px;border-radius:7px}
@@ -12781,7 +12783,6 @@ input::placeholder{color:#484f58}
 .prediction-mini-list{font-size:10px;color:#8b949e;line-height:1.55}
 .prediction-scope{font-size:10px;color:#484f58;line-height:1.5;margin-top:9px}
 .prediction-context-inline{margin-top:12px;border-top:1px solid #30363d;padding-top:12px}
-.prediction-context-inline #ai-strategy-section{margin-top:9px}
 
 /* 2칼럼 그리드 공통 클래스 (인라인 스타일 대체) */
 .two-col-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -13617,10 +13618,6 @@ input::placeholder{color:#484f58}
       <div id="tab-forecast" style="display:none">
         <!-- ⚡ 레버리지 예측 엔진 통합 (방향성·진입·손절·1~3차 목표·파생 위험) -->
         <div id="prediction-section"></div>
-        <div class="card">
-          <div class="card-title">💡 AI 종합 진단 및 트레이딩 전략</div>
-          <div id="ai-strategy-section"></div>
-        </div>
         <!-- 방향별 진입 전략 카드 -->
         <div class="card">
           <div class="card-title" id="buy-strategy-title">🎯 현재가 기준 진입 전략</div>
@@ -13637,7 +13634,7 @@ input::placeholder{color:#484f58}
 
       <!-- 뉴스 탭 -->
       <div id="tab-news" style="display:none">
-        <div class="two-col-grid">
+        <div class="two-col-grid" id="news-grid">
           <div class="card" id="news-col1">
             <div class="card-title" id="news-col1-title">📰 주요 뉴스</div>
             <div id="news-list"></div>
@@ -16189,15 +16186,6 @@ function renderPrediction(d, isKrx) {
     </div>`;
   }).join('');
   const lev = p.recommended_leverage;
-  const warn = (li.max_leverage != null) ? `
-    <div style="background:#2d0d0d;border:1px solid #4d1515;border-radius:10px;padding:12px;margin-top:12px;font-size:12px;color:#f85149;line-height:1.7">
-      ⚠️ <strong>레버리지 사용 주의</strong><br>
-      • 최대 허용 레버리지: <strong>${li.max_leverage}x</strong> (절대 초과 금지)<br>
-      • 권장 포지션 크기: 총 자산의 <strong>${li.position_size_pct}%</strong> 이하<br>
-      • ${lev}x 적용 시 손절 손실: <strong>${li.lev_stop_loss_pct}%</strong><br>
-      • 고변동성 구간에서는 레버리지를 즉시 축소하세요. 본 정보는 참고용이며 투자 책임은 본인에게 있습니다.
-    </div>` : '';
-
   el.innerHTML = `
   <div class="card" style="border:1px solid #1f6feb">
     <div class="card-title">⚡ 레버리지 예측 엔진 — 종합 시그널</div>
@@ -16268,7 +16256,6 @@ function renderPrediction(d, isKrx) {
     </div>
     <div id="live-liquidation-metrics" data-live-liquidation style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:#8b949e">⚡ 실시간 청산 규모 수집 대기 중...</div>
     ${lq.liquidation_price != null ? `<p style="font-size:12px;color:#8b949e;margin-bottom:8px">⚠️ 예상 청산가 ≈ <strong style="color:${lq.color}">${fmtPrice(lq.liquidation_price, isKrx)}</strong> (현재가 대비 ${lq.distance_pct}%, ${lq.atr_buffer} ATR) — ${lq.desc}</p>` : ''}
-    ${warn}
   </div>`;
 }
 
@@ -16291,9 +16278,15 @@ function renderCryptoDirectionalForecast(d, isKrx) {
   const liq = ((prediction.risk || {}).liquidation_risk) || {};
   const fmtZone = zone => zone.low != null && zone.high != null
     ? `${fmtPrice(zone.low, isKrx)} ~ ${fmtPrice(zone.high, isKrx)}` : '산출 불가';
+  const firstLabel = plan.first_label || (isShort
+    ? '⚡ 1차 숏 진입 구간 (ATR 기반) · 소액 탐색'
+    : '⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색');
+  const secondLabel = plan.second_label || (isShort
+    ? '📍 2차 숏 진입 구간 · 주 진입'
+    : '📍 2차 매수 구간 · 주 진입');
 
   if (strategyTitle) strategyTitle.textContent = `🎯 현재가 기준 ${directionLabel} 진입 전략`;
-  if (riskTitle) riskTitle.textContent = `🛡️ ${directionLabel} 리스크 관리 (ATR 기반)`;
+  if (riskTitle) riskTitle.textContent = '🛡️ 리스크 관리 (ATR 기반)';
   if (atrEl) atrEl.innerHTML = '';
 
   if (bpEl) {
@@ -16312,12 +16305,12 @@ function renderCryptoDirectionalForecast(d, isKrx) {
         </div>
         <div class="buy-price-grid">
           <div class="buy-card aggressive" style="padding:14px;border-color:${tone}66">
-            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(plan.first_label || '⚡ 1차 진입 구간')}</div>
+            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(firstLabel)}</div>
             <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(first)}</div>
             <div style="font-size:11px;color:#8b949e">현재가 인접 구간 · 전체 계획 비중의 30% 이내 탐색</div>
           </div>
           <div class="buy-card recommended" style="padding:14px;border-color:${tone}66">
-            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(plan.second_label || '📍 2차 진입 구간')}</div>
+            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(secondLabel)}</div>
             <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(second)}</div>
             <div style="font-size:11px;color:#8b949e">1차 진입 후 가격이 유리한 방향으로 이동할 때 주 비중 진입</div>
           </div>
@@ -16365,43 +16358,6 @@ function renderForecast(d, isKrx) {
   const risk = d.risk_scenarios;
   const bp   = d.buy_price;
   const tp   = d.target_price;
-  const ai   = d.ai_strategy;
-
-  // ── AI 종합 진단 및 트레이딩 전략 섹션 ──
-  const aiEl = document.getElementById('ai-strategy-section');
-  if (aiEl && ai) {
-    const hiddenAiStrategyPatterns = [
-      /^\[시장 상태\]/,
-      /^⚠️\s*\[경고\]\s*부채비율/,
-      /^\[투자자 수급\]/,
-    ];
-    const visibleAiStrategyLines = (ai.result || '')
-      .split(' | ')
-      .map(line => line.trim())
-      .filter(line => line && !hiddenAiStrategyPatterns.some(pattern => pattern.test(line)));
-
-    const reusedEvidence = ((d.prediction_outlook || {}).ai_evidence || []).slice(0, 4);
-    const reusedSet = new Set(reusedEvidence.map(line => String(line).replace(/\s+/g, ' ').trim()));
-    const conciseLines = visibleAiStrategyLines
-      .filter(line => !reusedSet.has(String(line).replace(/\s+/g, ' ').trim()))
-      .slice(0, 6);
-    const detailBody = conciseLines.length
-      ? conciseLines.map(line => {
-          if (line.startsWith('[')) return `<div style="margin-top:10px;font-weight:bold;color:#388bfd;font-size:13px">${_escPrediction(line)}</div>`;
-          return `<div style="margin-top:5px;margin-left:8px">${_escPrediction(line)}</div>`;
-        }).join('')
-      : '<div style="color:#8b949e">추가 해석은 위의 시장·AI 판단 근거에 통합되어 있습니다.</div>';
-
-    aiEl.innerHTML = `
-      <div style="background:rgba(31,111,235,.05);border-radius:10px;padding:13px;border:1px solid #1f6feb55">
-        <div style="font-size:11px;color:#58a6ff;font-weight:700;margin-bottom:8px">AI 진단 탭의 추가 근거</div>
-        <div style="color:#cdd9e5;font-size:12px;line-height:1.6">
-          ${detailBody}
-        </div>
-        <div style="font-size:10px;color:#8b949e;margin-top:9px">단독 매매 신호가 아니라 가격·거래량·지지선 조건과 함께 확인하는 참고 정보입니다.</div>
-      </div>
-    `;
-  }
   if (d.market === 'CRYPTO' && d.prediction && d.prediction.trade_plan) {
     renderCryptoDirectionalForecast(d, isKrx);
     return;
@@ -17210,8 +17166,10 @@ function renderNews(d, isKrx) {
   const newsList = document.getElementById('news-list');
   const discEl = document.getElementById('disclosure-col');
   const col1Title = document.getElementById('news-col1-title');
+  const newsGrid = document.getElementById('news-grid');
 
   const newsArr = _normalizeNewsItems(d, isKrx);
+  if (newsGrid) newsGrid.classList.toggle('news-single-column', !isKrx);
   if (isKrx) {
     col1Title.textContent = '📰 주요 뉴스';
     discEl.style.display = 'block';
