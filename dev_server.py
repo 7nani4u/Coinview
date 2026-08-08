@@ -33,12 +33,12 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
-    print(f"[StockOracle] Server running: http://localhost:{port}")
+    print(f"[Coinview] Server running: http://localhost:{port}")
     print(f"   - 메인 페이지 (HTML): http://localhost:{port}/")
     print(f"   - API 예시:")
-    print(f"     GET /api/stock?ticker=삼성전자&period=1y")
-    print(f"     GET /api/screener")
-    print(f"     GET /api/sentiment?market=KRX")
+    print(f"     GET /api/coin?ticker=BTC&period=1mo")
+    print(f"     GET /api/crypto/overview")
+    print(f"     GET /api/peer-outlook?ticker=ETHUSDT")
     print(f"---------------------------------------------------")
     try:
         server.serve_forever()
