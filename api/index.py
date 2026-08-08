@@ -39,6 +39,7 @@ import tempfile
 import shutil
 import re
 import hashlib
+import html as html_lib
 from pathlib import Path
 import certifi
 import ssl
@@ -793,6 +794,95 @@ def fetch_open_interest(symbol: str):
             return None
     return None
 
+@ttl_cache(60)
+def fetch_crypto_derivatives(symbol: str) -> Dict:
+    """공개 Binance USDⓈ-M 데이터로 펀딩·포지셔닝·ADL 위험을 구성한다."""
+    sym = str(symbol or "").upper()
+    result = {
+        "available": False,
+        "symbol": sym,
+        "funding_rate": None,
+        "funding_rate_pct": None,
+        "next_funding_time": None,
+        "mark_price": None,
+        "index_price": None,
+        "basis_pct": None,
+        "long_short_ratio": None,
+        "long_account_pct": None,
+        "short_account_pct": None,
+        "adl_risk": None,
+        "probability_adjustment": 0.0,
+        "reasons": [],
+        "liquidation_source": "Binance forceOrder WebSocket",
+    }
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            premium_future = executor.submit(
+                _binance_get, "/fapi/v1/premiumIndex", {"symbol": sym}, True
+            )
+            ratio_future = executor.submit(
+                _binance_get,
+                "/futures/data/globalLongShortAccountRatio",
+                {"symbol": sym, "period": "5m", "limit": 1},
+                True,
+            )
+            adl_future = executor.submit(
+                _binance_get, "/fapi/v1/symbolAdlRisk", {"symbol": sym}, True
+            )
+            premium = premium_future.result() or {}
+            ratio_rows = ratio_future.result() or []
+            adl = adl_future.result() or {}
+
+        if isinstance(premium, dict) and premium.get("markPrice") is not None:
+            result["mark_price"] = float(premium["markPrice"])
+            result["index_price"] = float(premium.get("indexPrice") or 0) or None
+            funding = float(premium.get("lastFundingRate") or 0)
+            result["funding_rate"] = funding
+            result["funding_rate_pct"] = round(funding * 100.0, 5)
+            result["next_funding_time"] = int(premium.get("nextFundingTime") or 0) or None
+            if result["index_price"]:
+                result["basis_pct"] = round(
+                    (result["mark_price"] - result["index_price"]) / result["index_price"] * 100.0,
+                    4,
+                )
+
+        ratio = ratio_rows[-1] if isinstance(ratio_rows, list) and ratio_rows else {}
+        if isinstance(ratio, dict) and ratio.get("longShortRatio") is not None:
+            result["long_short_ratio"] = round(float(ratio["longShortRatio"]), 4)
+            result["long_account_pct"] = round(float(ratio.get("longAccount") or 0) * 100.0, 2)
+            result["short_account_pct"] = round(float(ratio.get("shortAccount") or 0) * 100.0, 2)
+
+        if isinstance(adl, dict) and adl.get("adlRisk"):
+            result["adl_risk"] = str(adl["adlRisk"]).upper()
+
+        adjustment = 0.0
+        funding_pct = result.get("funding_rate_pct")
+        if funding_pct is not None:
+            if funding_pct >= 0.05:
+                adjustment -= 2.5
+                result["reasons"].append("양(+)의 펀딩비 과열로 롱 쏠림 위험 반영")
+            elif funding_pct <= -0.05:
+                adjustment += 2.5
+                result["reasons"].append("음(-)의 펀딩비 과열로 숏 쏠림 위험 반영")
+
+        long_pct = result.get("long_account_pct")
+        if long_pct is not None:
+            if long_pct >= 60.0:
+                adjustment -= min(4.0, (long_pct - 58.0) * 0.35)
+                result["reasons"].append("전체 계정 롱 비율 과밀로 역방향 위험 반영")
+            elif long_pct <= 40.0:
+                adjustment += min(4.0, (42.0 - long_pct) * 0.35)
+                result["reasons"].append("전체 계정 숏 비율 과밀로 숏커버 가능성 반영")
+
+        result["probability_adjustment"] = round(max(-6.0, min(6.0, adjustment)), 2)
+        result["available"] = any(
+            result.get(key) is not None
+            for key in ("funding_rate_pct", "long_short_ratio", "adl_risk")
+        )
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
 @ttl_cache(30)
 def fetch_ticker_24h(symbol: str):
     """24시간 티커 통계 (현재가·고저·거래량·등락률)."""
@@ -850,6 +940,34 @@ CRYPTO_OVERVIEW_UNIVERSE = (
     "INJUSDT", "ATOMUSDT", "FILUSDT", "RENDERUSDT", "TIAUSDT", "SEIUSDT",
 )
 
+def _contains_hangul(value: str) -> bool:
+    return bool(re.search(r"[가-힣]", str(value or "")))
+
+@ttl_cache(86400)
+def _translate_to_korean(text: str) -> str:
+    """영문 뉴스 제목을 한국어로 번역한다. 실패 시 원문을 반환한다."""
+    source = html_lib.unescape(str(text or "").strip())
+    if not source or _contains_hangul(source):
+        return source
+    try:
+        response = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "ko", "dt": "t", "q": source},
+            headers=_REQ_HEADERS,
+            timeout=8,
+        )
+        if response.status_code != 200:
+            return source
+        body = response.json()
+        translated = "".join(
+            str(segment[0] or "")
+            for segment in (body[0] or [])
+            if isinstance(segment, list) and segment
+        ).strip()
+        return translated if translated and _contains_hangul(translated) else source
+    except Exception:
+        return source
+
 def _fetch_coin_news(symbol: str):
     """코인 관련 Google News RSS (주식 뉴스 쿼리 대체)."""
     news = []
@@ -862,11 +980,20 @@ def _fetch_coin_news(symbol: str):
             break
     try:
         url = f"https://news.google.com/rss/search?q={quote(base + ' crypto')}&hl=en-US&gl=US&ceid=US:en"
-        for e in feedparser.parse(url).entries[:6]:
+        entries = list(feedparser.parse(url).entries[:6])
+        titles = [html_lib.unescape(str(getattr(e, "title", "") or "").strip()) for e in entries]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(titles)))) as executor:
+            translated_titles = list(executor.map(_translate_to_korean, titles))
+        for e, original_title, title_ko in zip(entries, titles, translated_titles):
             news.append({
-                "title": e.title, "link": e.link,
+                "title": original_title,
+                "title_ko": title_ko or original_title,
+                "original_title": original_title,
+                "translation_source": "Google Translate" if title_ko and title_ko != original_title else "",
+                "link": e.link,
                 "publisher": getattr(e, "source", type("", (), {"title": "Google News"})()).title,
                 "published": getattr(e, "published", ""),
+                "source_type": "google_news",
             })
     except Exception:
         pass
@@ -10151,8 +10278,9 @@ def calc_trend_strength(score, ema12, ema26, rsi, adx=0.0):
     grade = "매우 강함" if strength >= 70 else "강함" if strength >= 45 else "보통" if strength >= 25 else "약함 (횡보)"
     return round(strength, 0), grade
 
-def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, prob_down):
-    """🔮 예측 탭 통합 데이터: 방향성·진입·손절·1~3차 목표·리스크·AI의견."""
+def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, prob_down,
+                     derivatives: Dict | None = None):
+    """🔮 예측 탭 통합 데이터: 방향성·2단계 진입·손절·목표·파생 위험."""
     def v(k):
         a = dd.get(k, [])
         try: return float(a[-1])
@@ -10168,15 +10296,23 @@ def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, pro
         atr = price * 0.02
     lev = (leverage_info or {}).get("recommended_leverage", 3)
 
-    # 손절 1.5 ATR, 목표 3.0/4.5/6.0 ATR → 1차 R:R 1:2
+    # 손절 1.5 ATR, 목표 3.0/4.5/6.0 ATR → 1차 R:R 1:2.
+    # 숏은 진입·추가 진입·손절·목표를 모두 가격축 반대 방향으로 대칭 계산한다.
     if direction == "SHORT":
-        entry_low, entry_high = price - atr * 0.2, price + atr * 0.5
+        entry_low, entry_high = price - atr * 0.10, price + atr * 0.25
+        second_low, second_high = price + atr * 0.50, price + atr * 1.00
         stop_loss = price + atr * 1.5
         targets = [round(price - atr * m, 8) for m in (3.0, 4.5, 6.0)]
-    else:
-        entry_low, entry_high = price - atr * 0.5, price + atr * 0.2
+    elif direction == "LONG":
+        entry_low, entry_high = price - atr * 0.25, price + atr * 0.10
+        second_low, second_high = price - atr * 1.00, price - atr * 0.50
         stop_loss = price - atr * 1.5
         targets = [round(price + atr * m, 8) for m in (3.0, 4.5, 6.0)]
+    else:
+        entry_low, entry_high = price - atr * 0.25, price + atr * 0.25
+        second_low, second_high = price - atr * 0.75, price + atr * 0.75
+        stop_loss = price - atr * 1.5
+        targets = [round(price + atr * m, 8) for m in (2.0, 3.0, 4.0)]
     target_pcts = [round((t - price) / price * 100, 2) for t in targets]
     risk_dist = abs(price - stop_loss); reward_dist = abs(targets[0] - price)
     rr_ratio = round(reward_dist / risk_dist, 2) if risk_dist > 0 else 0
@@ -10192,18 +10328,40 @@ def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, pro
     else:                vol_risk = ("낮음", "#3fb950")
 
     dir_kr = {"LONG": "롱(상승)", "SHORT": "숏(하락)", "NEUTRAL": "관망"}[direction]
-    if direction == "NEUTRAL":
-        opinion = (f"상승 {prob_up:.0f}% / 하락 {prob_down:.0f}%로 방향성이 불분명합니다. "
-                   f"추세 강도 '{trend_grade}', 변동성 위험 '{vol_risk[0]}' 상태로 관망을 권장합니다.")
+    entry_prefix = "매수" if direction == "LONG" else "숏 진입" if direction == "SHORT" else "관망"
+    if direction == "SHORT":
+        invalidation_text = "손절가 이상 종가 안착 시 숏 시나리오 무효"
+        stop_action = "가격 상승 시 손실이 확대되므로 손절가 이상에서 숏 포지션 정리"
+    elif direction == "LONG":
+        invalidation_text = "손절가 이하 종가 이탈 시 롱 시나리오 무효"
+        stop_action = "가격 하락 시 손실이 확대되므로 손절가 이하에서 롱 포지션 정리"
     else:
-        opinion = (f"종합 분석 결과 {dir_kr} 우위(상승 {prob_up:.0f}% / 하락 {prob_down:.0f}%)입니다. "
-                   f"추천 레버리지 {lev}x, 손익비 1:{rr_ratio}, 추세 강도 '{trend_grade}'. "
-                   f"손절가 준수가 필수이며 청산 위험도는 '{(liq or {}).get('level', '-')}' 입니다.")
+        invalidation_text = "방향 확정 전 신규 레버리지 진입 보류"
+        stop_action = "롱·숏 확률 차이가 8%p 미만이면 관망을 우선"
+
+    def _zone(low, high):
+        return {"low": round(min(low, high), 8), "high": round(max(low, high), 8)}
+
+    trade_plan = {
+        "direction": direction,
+        "direction_kr": dir_kr,
+        "first_entry": _zone(entry_low, entry_high),
+        "second_entry": _zone(second_low, second_high),
+        "first_label": f"⚡ 1차 {entry_prefix} 구간 (ATR 기반) · 소액 탐색",
+        "second_label": f"📍 2차 {entry_prefix} 구간 · 주 진입",
+        "stop_loss": round(stop_loss, 8),
+        "stop_distance_atr": 1.5,
+        "invalidation_text": invalidation_text,
+        "stop_action": stop_action,
+        "risk_basis": ["ATR 1.5배 손절", "격리 마진 기준 청산가", "펀딩비·롱숏 비율·ADL 위험"],
+        "derivatives": derivatives or {},
+    }
     return {
         "prob_up": prob_up, "prob_down": prob_down,
         "direction": direction, "direction_kr": dir_kr, "recommended_leverage": lev,
-        "entry_zone": {"low": round(min(entry_low, entry_high), 8), "high": round(max(entry_low, entry_high), 8)},
+        "entry_zone": _zone(entry_low, entry_high),
         "stop_loss": round(stop_loss, 8),
+        "trade_plan": trade_plan,
         "targets": [
             {"label": "1차 목표가", "price": targets[0], "pct": target_pcts[0]},
             {"label": "2차 목표가", "price": targets[1], "pct": target_pcts[1]},
@@ -10215,7 +10373,6 @@ def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, pro
             "liquidation_risk": liq,
             "trend_strength": {"value": trend_val, "grade": trend_grade},
         },
-        "ai_opinion": opinion,
     }
 
 # =============================================================================
@@ -11087,6 +11244,11 @@ def route(path: str, params: Dict) -> Dict:
         else:
             volatility_30d = atr_pct * 8
         open_interest = fetch_open_interest(sym)
+        derivatives = fetch_crypto_derivatives(sym) if market == "CRYPTO" else {}
+        if derivatives and derivatives.get("available"):
+            derivative_adj = float(derivatives.get("probability_adjustment") or 0.0)
+            prob_up = round(max(3.0, min(97.0, float(prob_up) + derivative_adj)), 1)
+            prob_down = round(100.0 - prob_up, 1)
         _vols = [float(x) for x in (dd.get("Volume") or []) if x]
         _avg20 = (sum(_vols[-20:]) / max(len(_vols[-20:]), 1)) if _vols else 1.0
         vol_ratio = (_vols[-1] / _avg20) if (_vols and _avg20 > 0) else 1.0
@@ -11100,8 +11262,10 @@ def route(path: str, params: Dict) -> Dict:
             macd=_lv("MACD"), macd_signal=_lv("Signal_Line"), score=score,
             bb_upper=_lv("BB_Upper"), bb_lower=_lv("BB_Lower"),
             ema12=_lv("EMA20"), ema26=_lv("EMA50"))
-        prediction = build_prediction(last, atr_val, atr_pct, score, leverage_info,
-                                      dd, prob_up, prob_down)
+        prediction = build_prediction(
+            last, atr_val, atr_pct, score, leverage_info,
+            dd, prob_up, prob_down, derivatives,
+        )
 
         # ── Step 5: HybridTurtle 복합 점수 (NCS/BQS/FWS) ────────────────────
         hybrid_score = None
@@ -11280,6 +11444,7 @@ def route(path: str, params: Dict) -> Dict:
             "atr_pct": round(atr_pct, 2),
             "volatility_30d": round(volatility_30d, 1),
             "open_interest": open_interest,
+            "derivatives": derivatives,
             "leverage_info": leverage_info,
             "prediction": prediction,
             "score": score, "prob_up": prob_up, "prob_down": prob_down,
@@ -13210,6 +13375,17 @@ input::placeholder{color:#484f58}
 .kr-lt-fund-tag{font-size:10px;padding:2px 7px;background:#21262d;border:1px solid #30363d;border-radius:10px;color:#8b949e;font-variant-numeric:tabular-nums}
 .kr-lt-theme-badge{font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(56,139,253,.15);color:#58a6ff;border:1px solid rgba(56,139,253,.3);font-weight:600}
 .us-reco-reason::before{display:none}
+/* ── 관심 코인 포트폴리오 ── */
+.portfolio-form{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:8px;align-items:end}
+.portfolio-form label{font-size:10px;color:#8b949e;display:flex;flex-direction:column;gap:5px}
+.portfolio-form input{margin:0;background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:9px 10px;color:#e6edf3;min-width:0}
+.portfolio-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}
+.portfolio-summary-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px}
+.portfolio-summary-label{font-size:10px;color:#8b949e;margin-bottom:5px}.portfolio-summary-value{font-size:18px;font-weight:800;color:#e6edf3}
+.portfolio-table-wrap{overflow-x:auto}.portfolio-table{width:100%;border-collapse:collapse;font-size:12px;min-width:760px}
+.portfolio-table th,.portfolio-table td{padding:11px 9px;border-bottom:1px solid #21262d;text-align:right}.portfolio-table th{color:#8b949e;font-weight:600;font-size:10px}.portfolio-table th:nth-child(-n+2),.portfolio-table td:nth-child(-n+2){text-align:left}
+.portfolio-live{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#3fb950;background:#3fb95018;border:1px solid #3fb95055;border-radius:10px;padding:2px 7px}
+@media(max-width:720px){.portfolio-form{grid-template-columns:1fr 1fr}.portfolio-form button{grid-column:1/-1}.portfolio-summary{grid-template-columns:1fr}.portfolio-table{min-width:680px}}
 </style>
 </head>
 <body>
@@ -13236,6 +13412,7 @@ input::placeholder{color:#484f58}
     <div style="display:flex;flex-direction:column;gap:4px">
       <button class="mkt-btn active" style="text-align:left;padding:10px 12px" id="nav-analysis" onclick="showPage('analysis')">🔍 코인 상세 분석</button>
       <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-scan" onclick="showPage('screener')">🔬 코인 스크리너</button>
+      <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-portfolio" onclick="showPage('portfolio')">⭐ 관심 코인 포트폴리오</button>
       <!-- ⚡ 개장 급등 추천 아코디언 (코인 모드 비활성 — 홈 대시보드의 24h 등락 상위로 대체) -->
       <button class="mkt-btn" style="display:none;text-align:left;padding:10px 12px" id="nav-recommendations" onclick="toggleRecoMenu()">
         <span class="nav-reco-parent">
@@ -13351,12 +13528,13 @@ input::placeholder{color:#484f58}
       <div class="page-header">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:4px">
           <h2 id="r-title"></h2>
-          <div style="display:flex;gap:8px;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <button id="result-tg-btn" class="alert-result-btn" style="background:rgba(36,129,204,0.15);border-color:rgba(36,129,204,0.5);color:#58a6ff;display:flex;align-items:center;gap:4px;" onclick="shareToTelegram()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221l-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.446 1.394c-.14.18-.357.295-.6.295-.002 0-.003 0-.005 0l.213-3.054 5.56-5.022c.24-.213-.054-.334-.373-.121l-6.869 4.326-2.96-.924c-.64-.203-.658-.64.135-.954l11.566-4.458c.538-.196 1.006.128.832.94z"/></svg>
               텔레그램 전송
             </button>
             <button id="result-alert-btn" class="alert-result-btn" onclick="openAlertModal(_currentAlertSymbol, _currentAlertPrice)">🔔 알림 설정</button>
+            <button id="result-portfolio-btn" class="alert-result-btn" onclick="toggleCurrentPortfolio()">☆ 관심 코인</button>
           </div>
         </div>
         <p id="r-subtitle"></p>
@@ -13437,25 +13615,21 @@ input::placeholder{color:#484f58}
 
       <!-- 예측 탭 -->
       <div id="tab-forecast" style="display:none">
-        <!-- ⚡ 레버리지 예측 엔진 통합 (방향성·진입·손절·1~3차 목표·리스크·AI의견) -->
+        <!-- ⚡ 레버리지 예측 엔진 통합 (방향성·진입·손절·1~3차 목표·파생 위험) -->
         <div id="prediction-section"></div>
         <div class="card">
           <div class="card-title">💡 AI 종합 진단 및 트레이딩 전략</div>
           <div id="ai-strategy-section"></div>
         </div>
+        <!-- 방향별 진입 전략 카드 -->
         <div class="card">
-          <div class="card-title">📈 향후 가격 상승 가능 범위 (목표가 예측)</div>
-          <div id="target-price-section"></div>
-        </div>
-        <!-- 매수 전략 카드: 현재가 분석 → 가격 구간 → 분할 매수 흐름 통합 -->
-        <div class="card">
-          <div class="card-title">🎯 현재가 기준 매수 전략</div>
+          <div class="card-title" id="buy-strategy-title">🎯 현재가 기준 진입 전략</div>
           <div id="buy-price-section"></div>
           <div id="pullback-forecast-section"></div>
         </div>
         <!-- 리스크 관리 카드: 시나리오 + ATR 기반 정밀 가격 통합 -->
         <div class="card">
-          <div class="card-title">🛡️ 리스크 관리 (ATR 기반)</div>
+          <div class="card-title" id="risk-strategy-title">🛡️ 리스크 관리 (ATR 기반)</div>
           <div class="risk-grid" id="risk-grid"></div>
           <div id="pullback-atr-section"></div>
         </div>
@@ -13575,6 +13749,33 @@ input::placeholder{color:#484f58}
           <tbody id="scrn-tbody"></tbody>
         </table>
       </div>
+    </div>
+  </div>
+
+  <!-- ── ⭐ 관심 코인 포트폴리오 ── -->
+  <div id="page-portfolio" style="display:none">
+    <div class="screener-header" style="margin-bottom:16px;align-items:flex-start">
+      <div>
+        <h2 style="font-size:22px;font-weight:700;margin-bottom:4px">⭐ 관심 코인 포트폴리오</h2>
+        <p style="font-size:12px;color:#8b949e">브라우저에 보유 수량·평균 단가를 저장하고 Binance 실시간 시세로 평가합니다.</p>
+      </div>
+      <span class="portfolio-live" id="portfolio-live-status">● LIVE 대기</span>
+    </div>
+    <div class="card">
+      <div class="portfolio-form">
+        <label>코인 심볼<input id="portfolio-symbol" type="text" placeholder="BTC 또는 BTCUSDT"></label>
+        <label>보유 수량<input id="portfolio-amount" type="number" min="0" step="any" placeholder="0.01"></label>
+        <label>평균 매수가 (USDT)<input id="portfolio-avg-price" type="number" min="0" step="any" placeholder="65000"></label>
+        <button onclick="savePortfolioCoin()" style="background:#1f6feb;border:none;border-radius:8px;padding:10px 16px;color:#fff;font-weight:700;cursor:pointer">추가·수정</button>
+      </div>
+      <div id="portfolio-form-msg" style="font-size:11px;color:#8b949e;margin-top:8px"></div>
+    </div>
+    <div class="portfolio-summary" id="portfolio-summary"></div>
+    <div class="card portfolio-table-wrap">
+      <table class="portfolio-table">
+        <thead><tr><th>#</th><th>코인</th><th>현재가</th><th>24h</th><th>보유 수량</th><th>평균 단가</th><th>평가액</th><th>손익</th><th>관리</th></tr></thead>
+        <tbody id="portfolio-tbody"></tbody>
+      </table>
     </div>
   </div>
 
@@ -13805,7 +14006,7 @@ var _usLongtermLoaded = false;
 var _usSurgeLoaded   = false;
 
 var _recoSubPages = ['kr-longterm', 'us-longterm', 'us-surge'];
-var _allPages = ['analysis', 'screener', 'kr-longterm', 'us-longterm', 'us-surge', 'scan', 'immune'];
+var _allPages = ['analysis', 'screener', 'portfolio', 'kr-longterm', 'us-longterm', 'us-surge', 'scan', 'immune'];
 var _scanLoaded  = false;
 var _immuneLoaded = false;
 
@@ -13830,7 +14031,8 @@ function showPage(page) {
 
   // 상단 nav 버튼 active 상태
   document.getElementById('nav-analysis').classList.toggle('active', page === 'analysis');
-  document.getElementById('nav-scan').classList.toggle('active', page === 'scan');
+  document.getElementById('nav-scan').classList.toggle('active', page === 'screener');
+  document.getElementById('nav-portfolio').classList.toggle('active', page === 'portfolio');
 
   var isRecoPage = _recoSubPages.indexOf(page) !== -1;
   // 서브페이지를 선택하면 아코디언 부모도 active, 서브메뉴 열기
@@ -13843,6 +14045,7 @@ function showPage(page) {
 
   // 데이터 최초 로드 (각 서브페이지 첫 방문 시)
   if (page === 'screener'    && screenerData.length === 0) loadScreener();
+  if (page === 'portfolio') renderPortfolio();
   if (page === 'kr-longterm' && !_krLongtermLoaded) { _krLongtermLoaded = true; loadKrLongterm(); }
   if (page === 'us-longterm' && !_usLongtermLoaded) { _usLongtermLoaded = true; loadUsLongterm(); }
   if (page === 'us-surge'    && !_usSurgeLoaded)    { _usSurgeLoaded    = true; loadUsSurge(); }
@@ -13850,10 +14053,20 @@ function showPage(page) {
   // HybridTurtle 통합 페이지 첫 방문 시 자동 로드
   if (page === 'scan')   { var scanEl = document.getElementById('nav-scan');   if(scanEl) scanEl.classList.add('active'); loadImmuneBanner(); }
   if (page === 'immune') { var imEl   = document.getElementById('nav-immune'); if(imEl)   imEl.classList.add('active');   loadImmuneFull(); }
-  ['nav-scan','nav-immune'].forEach(function(id) {
+  ['nav-immune'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.classList.toggle('active', id === 'nav-' + page);
   });
+
+  if (page === 'portfolio') {
+    _stopRealtimeStreams();
+    _startPortfolioStream();
+  } else {
+    _stopPortfolioStream();
+    if (page === 'analysis' && currentData && currentData.market === 'CRYPTO' && currentData.symbol) {
+      _startRealtimeStreams(currentData.symbol);
+    }
+  }
 
   closeSidebar();   // 모바일: 페이지 전환 시 사이드바 닫기
 }
@@ -14334,9 +14547,23 @@ function _stopLoadingAnimation() {
 // ── 코인 24시간 현재가 폴링 ───────────────────────────────────────────────
 let _pricePoller    = null;
 let _pollTicker     = null;
+let _livePriceSocket = null;
+let _liquidationSocket = null;
+let _liveReconnectTimer = null;
+let _liveStreamGeneration = 0;
+let _liquidationEvents = [];
 
 function _stopPricePolling() {
   if (_pricePoller) { clearInterval(_pricePoller); _pricePoller = null; }
+}
+
+function _stopRealtimeStreams() {
+  _liveStreamGeneration += 1;
+  if (_liveReconnectTimer) { clearTimeout(_liveReconnectTimer); _liveReconnectTimer = null; }
+  if (_livePriceSocket) { try { _livePriceSocket.close(); } catch (_) {} _livePriceSocket = null; }
+  if (_liquidationSocket) { try { _liquidationSocket.close(); } catch (_) {} _liquidationSocket = null; }
+  _liquidationEvents = [];
+  _stopPricePolling();
 }
 
 function _startPricePolling(symbol) {
@@ -14354,6 +14581,92 @@ function _startPricePolling(symbol) {
   }, 5000);
 }
 
+function _formatLiveNotional(value) {
+  const n = Number(value || 0);
+  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+}
+
+function _renderLiveLiquidations() {
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  _liquidationEvents = _liquidationEvents.filter(item => item.time >= cutoff);
+  const longValue = _liquidationEvents.filter(item => item.side === 'LONG').reduce((sum, item) => sum + item.notional, 0);
+  const shortValue = _liquidationEvents.filter(item => item.side === 'SHORT').reduce((sum, item) => sum + item.notional, 0);
+  const total = longValue + shortValue;
+  const dominant = longValue > shortValue * 1.2 ? '롱 청산 우세 · 하방 압력'
+    : shortValue > longValue * 1.2 ? '숏 청산 우세 · 숏커버 압력' : '청산 방향 균형';
+  const tone = longValue > shortValue * 1.2 ? '#f85149' : shortValue > longValue * 1.2 ? '#3fb950' : '#8b949e';
+  document.querySelectorAll('[data-live-liquidation]').forEach(el => {
+    el.innerHTML = `⚡ 최근 15분 실시간 청산 <strong style="color:${tone}">${_formatLiveNotional(total)}</strong> · 롱 ${_formatLiveNotional(longValue)} · 숏 ${_formatLiveNotional(shortValue)} · <span style="color:${tone}">${dominant}</span>`;
+  });
+  if (currentData) currentData.live_liquidation = {total, long:longValue, short:shortValue, window_minutes:15};
+}
+
+function _startRealtimeStreams(symbol) {
+  _stopRealtimeStreams();
+  const sym = String(symbol || '').toUpperCase();
+  if (!sym) return;
+  const lower = sym.toLowerCase();
+  const generation = _liveStreamGeneration;
+  _pollTicker = sym;
+
+  try {
+    _livePriceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/${lower}@ticker`);
+    _livePriceSocket.onopen = () => {
+      if (generation !== _liveStreamGeneration) return;
+      _stopPricePolling();
+      const badge = document.getElementById('r-session-badge');
+      if (badge) {
+        badge.textContent = '● LIVE';
+        badge.style.background = '#3fb95022';
+        badge.style.color = '#3fb950';
+        badge.style.display = 'inline';
+      }
+    };
+    _livePriceSocket.onmessage = event => {
+      if (generation !== _liveStreamGeneration) return;
+      try {
+        const tick = JSON.parse(event.data);
+        _applyPriceUpdate({price:Number(tick.c), pct_change:Number(tick.P), session_name:'● LIVE'});
+        _updatePortfolioQuote(sym, Number(tick.c), Number(tick.P));
+      } catch (_) {}
+    };
+    _livePriceSocket.onerror = () => { if (!_pricePoller) _startPricePolling(sym); };
+    _livePriceSocket.onclose = () => {
+      if (generation !== _liveStreamGeneration) return;
+      if (!_pricePoller) _startPricePolling(sym);
+      _liveReconnectTimer = setTimeout(() => {
+        if (generation === _liveStreamGeneration && currentData && currentData.symbol === sym) _startRealtimeStreams(sym);
+      }, 3000);
+    };
+  } catch (_) {
+    _startPricePolling(sym);
+  }
+
+  try {
+    _liquidationSocket = new WebSocket(`wss://fstream.binance.com/ws/${lower}@forceOrder`);
+    _liquidationSocket.onmessage = event => {
+      if (generation !== _liveStreamGeneration) return;
+      try {
+        const payload = JSON.parse(event.data);
+        const order = payload.o || {};
+        const price = Number(order.ap || order.p || 0);
+        const quantity = Number(order.z || order.q || 0);
+        if (!(price > 0 && quantity > 0)) return;
+        _liquidationEvents.push({
+          time: Number(order.T || payload.E || Date.now()),
+          notional: price * quantity,
+          side: order.S === 'SELL' ? 'LONG' : 'SHORT',
+        });
+        _renderLiveLiquidations();
+      } catch (_) {}
+    };
+  } catch (_) {}
+  _renderLiveLiquidations();
+}
+
 function _applyPriceUpdate(d) {
   const up  = d.pct_change >= 0;
   const clr = up ? '#3fb950' : '#f85149';
@@ -14367,6 +14680,7 @@ function _applyPriceUpdate(d) {
     const sn = (d.session_name || '').trim();
     if (sn && !hiddenSessions.has(sn)) {
       const sessionColors = {
+        '● LIVE':       { bg: '#3fb95022', fg: '#3fb950' },
         '프리마켓':   { bg: '#1f6feb33', fg: '#58a6ff' },
         '오버나이트': { bg: '#6e40c933', fg: '#bc8cff' },
         '애프터마켓': { bg: '#388bfd22', fg: '#79c0ff' },
@@ -14383,7 +14697,7 @@ function _applyPriceUpdate(d) {
   }
 }
 async function analyze(tickerOverride = '') {
-  _stopPricePolling();   // 새 검색 시 이전 폴링 중단
+  _stopRealtimeStreams();   // 새 검색 시 이전 실시간 스트림 중단
   _hideStockSuggestions();
   closeSidebar();   // 모바일에서 분석 시작 시 사이드바 자동 닫기
   const inputValue = document.getElementById('ticker-input').value;
@@ -14424,10 +14738,11 @@ async function analyze(tickerOverride = '') {
     }
     renderResult(d);
     renderSignalConfidence(d);
+    _updatePortfolioButton(d.symbol);
     setState('result');
-    // 코인: 5초마다 Binance 24시간 현재가 자동 갱신
+    // 코인: Binance WebSocket 실시간 시세·청산 스트림, 장애 시 5초 폴링 폴백
     if (d.market === 'CRYPTO' && d.symbol) {
-      _startPricePolling(d.symbol);
+      _startRealtimeStreams(d.symbol);
     }
     // KRX 전용: 투자자 수급 자동 비동기 로드
     // 메인 API 응답에서 ok=false인 경우(타임아웃·API 지연 등) 전용 엔드포인트로 자동 재시도
@@ -15862,6 +16177,7 @@ function renderPrediction(d, isKrx) {
   const vr = r.volatility_risk || {};
   const lq = r.liquidation_risk || {};
   const tr = r.trend_strength || {};
+  const dm = d.derivatives || ((p.trade_plan || {}).derivatives) || {};
   const entryColor = dir === 'SHORT' ? '#f85149' : '#3fb950';
   const entryLabel = dir === 'SHORT' ? '추천 숏 진입 구간' : '추천 매수 진입 구간';
   const targetsHtml = (p.targets || []).map(t => {
@@ -15936,15 +16252,113 @@ function renderPrediction(d, isKrx) {
       <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">청산 위험도</div><div style="font-size:15px;font-weight:700;color:${lq.color||'#8b949e'}">${lq.level||'-'}</div></div>
       <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">추세 강도</div><div style="font-size:15px;font-weight:700;color:#e6edf3">${tr.grade||'-'}</div></div>
     </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:10px 0">
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">펀딩비</div>
+        <div style="font-size:14px;font-weight:700;color:${Number(dm.funding_rate_pct||0)>0?'#d29922':Number(dm.funding_rate_pct||0)<0?'#58a6ff':'#8b949e'}">${dm.funding_rate_pct != null ? Number(dm.funding_rate_pct).toFixed(5)+'%' : '-'}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">전체 계정 롱 / 숏</div>
+        <div style="font-size:14px;font-weight:700;color:#e6edf3">${dm.long_account_pct != null ? Number(dm.long_account_pct).toFixed(1)+'% / '+Number(dm.short_account_pct).toFixed(1)+'%' : '-'}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">ADL·청산 압력</div>
+        <div style="font-size:14px;font-weight:700;color:${String(dm.adl_risk||'').toUpperCase()==='HIGH'?'#f85149':String(dm.adl_risk||'').toUpperCase()==='MEDIUM'?'#d29922':'#3fb950'}">${dm.adl_risk || '-'}</div>
+      </div>
+    </div>
+    <div id="live-liquidation-metrics" data-live-liquidation style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:#8b949e">⚡ 실시간 청산 규모 수집 대기 중...</div>
     ${lq.liquidation_price != null ? `<p style="font-size:12px;color:#8b949e;margin-bottom:8px">⚠️ 예상 청산가 ≈ <strong style="color:${lq.color}">${fmtPrice(lq.liquidation_price, isKrx)}</strong> (현재가 대비 ${lq.distance_pct}%, ${lq.atr_buffer} ATR) — ${lq.desc}</p>` : ''}
     ${warn}
-
-    <!-- 7. AI 종합 의견 -->
-    <div style="margin-top:14px;background:rgba(31,111,235,0.05);border-radius:10px;padding:14px;border:1px solid #1f6feb">
-      <div style="font-size:13px;font-weight:700;color:#388bfd;margin-bottom:6px">🤖 AI 종합 의견</div>
-      <p style="font-size:14px;color:#e6edf3;line-height:1.7;margin:0">${p.ai_opinion||''}</p>
-    </div>
   </div>`;
+}
+
+function renderCryptoDirectionalForecast(d, isKrx) {
+  const prediction = d.prediction || {};
+  const plan = prediction.trade_plan || {};
+  const direction = plan.direction || prediction.direction || 'NEUTRAL';
+  const isLong = direction === 'LONG';
+  const isShort = direction === 'SHORT';
+  const tone = isLong ? '#3fb950' : isShort ? '#f85149' : '#d29922';
+  const directionLabel = isLong ? '롱(상승)' : isShort ? '숏(하락)' : '관망';
+  const strategyTitle = document.getElementById('buy-strategy-title');
+  const riskTitle = document.getElementById('risk-strategy-title');
+  const bpEl = document.getElementById('buy-price-section');
+  const rgEl = document.getElementById('risk-grid');
+  const atrEl = document.getElementById('pullback-atr-section');
+  const first = plan.first_entry || {};
+  const second = plan.second_entry || {};
+  const dm = d.derivatives || plan.derivatives || {};
+  const liq = ((prediction.risk || {}).liquidation_risk) || {};
+  const fmtZone = zone => zone.low != null && zone.high != null
+    ? `${fmtPrice(zone.low, isKrx)} ~ ${fmtPrice(zone.high, isKrx)}` : '산출 불가';
+
+  if (strategyTitle) strategyTitle.textContent = `🎯 현재가 기준 ${directionLabel} 진입 전략`;
+  if (riskTitle) riskTitle.textContent = `🛡️ ${directionLabel} 리스크 관리 (ATR 기반)`;
+  if (atrEl) atrEl.innerHTML = '';
+
+  if (bpEl) {
+    if (!isLong && !isShort) {
+      bpEl.innerHTML = `<div style="background:#241a0a;border:1px solid #d2992255;border-radius:10px;padding:16px;color:#d29922;font-size:13px;line-height:1.7">
+        상승·하락 가능성 차이가 실행 기준보다 작습니다. 방향 확정 전 신규 레버리지 진입을 보류하세요.
+      </div>`;
+    } else {
+      const sideNote = isLong
+        ? '하락 눌림에서 분할 진입하며, 손절가는 모든 진입 구간 아래에 배치됩니다.'
+        : '상승 반등에서 분할 숏 진입하며, 손절가는 모든 진입 구간 위에 배치됩니다.';
+      bpEl.innerHTML = `
+        <div style="background:${isLong?'#0d2d1a':'#2d1515'};border:1px solid ${tone}66;border-radius:10px;padding:13px 15px;margin-bottom:12px">
+          <div style="font-size:15px;font-weight:800;color:${tone};margin-bottom:4px">${directionLabel} 우위 · 방향 대칭 ATR 전략</div>
+          <div style="font-size:11px;color:#cdd9e5;line-height:1.6">${sideNote}</div>
+        </div>
+        <div class="buy-price-grid">
+          <div class="buy-card aggressive" style="padding:14px;border-color:${tone}66">
+            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(plan.first_label || '⚡ 1차 진입 구간')}</div>
+            <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(first)}</div>
+            <div style="font-size:11px;color:#8b949e">현재가 인접 구간 · 전체 계획 비중의 30% 이내 탐색</div>
+          </div>
+          <div class="buy-card recommended" style="padding:14px;border-color:${tone}66">
+            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(plan.second_label || '📍 2차 진입 구간')}</div>
+            <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(second)}</div>
+            <div style="font-size:11px;color:#8b949e">1차 진입 후 가격이 유리한 방향으로 이동할 때 주 비중 진입</div>
+          </div>
+        </div>`;
+    }
+  }
+
+  if (rgEl) {
+    const stopValue = plan.stop_loss != null ? fmtPrice(plan.stop_loss, isKrx) : '산출 불가';
+    const adjustment = Number(dm.probability_adjustment || 0);
+    const reasonHtml = (dm.reasons || []).slice(0, 4)
+      .map(reason => `<div>• ${_escPrediction(reason)}</div>`).join('') || '<div>• 파생 포지셔닝 과열 신호 없음</div>';
+    rgEl.innerHTML = `
+      <div style="grid-column:1/-1;background:#0d1117;border:1px solid ${tone};border-radius:10px;padding:15px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:11px;color:#8b949e;margin-bottom:5px">손절가 · ${plan.stop_distance_atr || 1.5} ATR</div>
+            <div style="font-size:22px;font-weight:900;color:#f85149">${stopValue}</div>
+            <div style="font-size:11px;color:#d29922;margin-top:5px">${_escPrediction(plan.invalidation_text || '')}</div>
+          </div>
+          <div style="font-size:11px;color:#8b949e;line-height:1.65;max-width:520px">${_escPrediction(plan.stop_action || '')}</div>
+        </div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
+        <div style="font-size:10px;color:#8b949e">예상 청산가</div>
+        <div style="font-size:16px;font-weight:800;color:${liq.color||'#e6edf3'}">${liq.liquidation_price != null ? fmtPrice(liq.liquidation_price,isKrx) : '-'}</div>
+        <div style="font-size:10px;color:#8b949e;margin-top:4px">위험도 ${liq.level||'-'} · ${liq.atr_buffer!=null?liq.atr_buffer+' ATR':'-'}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
+        <div style="font-size:10px;color:#8b949e">펀딩비 · 포지셔닝 보정</div>
+        <div style="font-size:16px;font-weight:800;color:${adjustment>0?'#3fb950':adjustment<0?'#f85149':'#e6edf3'}">${adjustment>=0?'+':''}${adjustment.toFixed(2)}%p</div>
+        <div style="font-size:10px;color:#8b949e;margin-top:4px">롱 ${dm.long_account_pct!=null?Number(dm.long_account_pct).toFixed(1)+'%':'-'} · 숏 ${dm.short_account_pct!=null?Number(dm.short_account_pct).toFixed(1)+'%':'-'}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
+        <div style="font-size:10px;color:#8b949e">ADL 위험</div>
+        <div style="font-size:16px;font-weight:800;color:${String(dm.adl_risk||'').toUpperCase()==='HIGH'?'#f85149':'#3fb950'}">${dm.adl_risk||'-'}</div>
+        <div style="font-size:10px;color:#8b949e;margin-top:4px">Binance 심볼 단위 청산 압력 등급</div>
+      </div>
+      <div style="grid-column:1/-1;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px;font-size:11px;color:#8b949e;line-height:1.6">${reasonHtml}</div>
+      <div data-live-liquidation style="grid-column:1/-1;background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;font-size:11px;color:#8b949e">⚡ 실시간 청산 규모 수집 대기 중...</div>`;
+  }
 }
 
 function renderForecast(d, isKrx) {
@@ -15987,6 +16401,10 @@ function renderForecast(d, isKrx) {
         <div style="font-size:10px;color:#8b949e;margin-top:9px">단독 매매 신호가 아니라 가격·거래량·지지선 조건과 함께 확인하는 참고 정보입니다.</div>
       </div>
     `;
+  }
+  if (d.market === 'CRYPTO' && d.prediction && d.prediction.trade_plan) {
+    renderCryptoDirectionalForecast(d, isKrx);
+    return;
   }
   // ── 매수 전략 섹션 ──
   const bpEl = document.getElementById('buy-price-section');
@@ -16742,17 +17160,16 @@ function _normalizeNewsItems(d, isKrx) {
   const finnhubNews = (((d.us_enriched || {}).news) || []);
   const rssNews = (d.news || []);
   const candidates = isKrx
-    ? [...naverNews, ...rssNews.filter(n => _newsHasHangul(n.title_ko || n.title))]
+    ? [...naverNews, ...rssNews]
     : [
-        ...finnhubNews.filter(n => _newsHasHangul(n.title_ko || n.title)),
-        ...rssNews.filter(n => _newsHasHangul(n.title_ko || n.title)),
+        ...finnhubNews,
+        ...rssNews,
       ];
   const seen = new Set();
   return candidates.filter(n => {
     const displayTitle = String(n.title_ko || n.title || '').replace(/\s+/g, ' ').trim();
     const key = displayTitle.toLowerCase().replace(/[^0-9a-z가-힣]/g, '');
     if (!displayTitle || !key || seen.has(key)) return false;
-    if (!isKrx && !_newsHasHangul(displayTitle)) return false;
     seen.add(key);
     return true;
   }).slice(0, 10);
@@ -16811,7 +17228,7 @@ function renderNews(d, isKrx) {
   }
   newsList.innerHTML = newsArr.length > 0
     ? newsArr.map(n => _renderNewsItem(n)).join('')
-    : `<p class="news-empty">${isKrx ? '관련 뉴스를 찾지 못했습니다.' : '한국어로 제공 가능한 관련 뉴스를 찾지 못했습니다.'}</p>`;
+    : '<p class="news-empty">관련 뉴스를 찾지 못했습니다.</p>';
   _bindNewsImageFallbacks(newsList);
 }
 
@@ -17146,6 +17563,213 @@ function switchTab(tab) {
       if (guide) guide.style.display = 'block';
     }
   }
+}
+
+// ── ⭐ 관심 코인 포트폴리오 ─────────────────────────────────────────────
+const PORTFOLIO_STORAGE_KEY = 'cv_portfolio_v1';
+let _portfolioRows = [];
+let _portfolioQuotes = {};
+let _portfolioSocket = null;
+let _portfolioRenderTimer = null;
+let _portfolioGeneration = 0;
+
+function _loadPortfolioRows() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PORTFOLIO_STORAGE_KEY) || '[]');
+    _portfolioRows = Array.isArray(parsed) ? parsed.filter(row => row && row.symbol) : [];
+  } catch (_) { _portfolioRows = []; }
+  return _portfolioRows;
+}
+
+function _savePortfolioRows() {
+  localStorage.setItem(PORTFOLIO_STORAGE_KEY, JSON.stringify(_portfolioRows));
+}
+
+function _normalizePortfolioSymbol(value) {
+  let symbol = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (symbol && !symbol.endsWith('USDT')) symbol += 'USDT';
+  return symbol;
+}
+
+function _updatePortfolioButton(symbol) {
+  const btn = document.getElementById('result-portfolio-btn');
+  if (!btn) return;
+  const sym = _normalizePortfolioSymbol(symbol || (currentData || {}).symbol);
+  const exists = _loadPortfolioRows().some(row => row.symbol === sym);
+  btn.style.display = 'flex';
+  btn.textContent = exists ? '★ 관심 코인 저장됨' : '☆ 관심 코인';
+  btn.style.color = exists ? '#d29922' : '';
+  btn.style.borderColor = exists ? '#d2992255' : '';
+}
+
+function toggleCurrentPortfolio() {
+  if (!currentData || !currentData.symbol) return;
+  const symbol = _normalizePortfolioSymbol(currentData.symbol);
+  _loadPortfolioRows();
+  const index = _portfolioRows.findIndex(row => row.symbol === symbol);
+  if (index >= 0) {
+    _portfolioRows.splice(index, 1);
+  } else {
+    _portfolioRows.push({
+      symbol,
+      name: currentData.company || symbol.replace(/USDT$/, ''),
+      amount: 0,
+      avgPrice: Number(currentData.last_close || 0),
+    });
+  }
+  _savePortfolioRows();
+  _updatePortfolioButton(symbol);
+}
+
+function savePortfolioCoin() {
+  const symbol = _normalizePortfolioSymbol((document.getElementById('portfolio-symbol') || {}).value);
+  const amount = Number((document.getElementById('portfolio-amount') || {}).value || 0);
+  const avgPrice = Number((document.getElementById('portfolio-avg-price') || {}).value || 0);
+  const msg = document.getElementById('portfolio-form-msg');
+  if (!symbol || !/^[A-Z0-9]{2,16}USDT$/.test(symbol)) {
+    if (msg) { msg.style.color = '#f85149'; msg.textContent = '유효한 코인 심볼을 입력하세요.'; }
+    return;
+  }
+  if (amount < 0 || avgPrice < 0) {
+    if (msg) { msg.style.color = '#f85149'; msg.textContent = '수량과 평균 단가는 0 이상이어야 합니다.'; }
+    return;
+  }
+  _loadPortfolioRows();
+  const existing = _portfolioRows.find(row => row.symbol === symbol);
+  const row = {symbol, name:symbol.replace(/USDT$/, ''), amount, avgPrice};
+  if (existing) Object.assign(existing, row); else _portfolioRows.push(row);
+  _portfolioRows = _portfolioRows.slice(0, 30);
+  _savePortfolioRows();
+  if (msg) { msg.style.color = '#3fb950'; msg.textContent = symbol + ' 저장 완료'; }
+  renderPortfolio();
+}
+
+function removePortfolioCoin(symbol) {
+  _loadPortfolioRows();
+  _portfolioRows = _portfolioRows.filter(row => row.symbol !== symbol);
+  delete _portfolioQuotes[symbol];
+  _savePortfolioRows();
+  renderPortfolio();
+  _updatePortfolioButton(symbol);
+}
+
+function analyzePortfolioCoin(symbol) {
+  showPage('analysis');
+  const input = document.getElementById('ticker-input');
+  if (input) input.value = symbol;
+  analyze(symbol);
+}
+
+function _portfolioMoney(value) {
+  return '$' + Number(value || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function _updatePortfolioQuote(symbol, price, changePct) {
+  const sym = _normalizePortfolioSymbol(symbol);
+  if (!sym || !(Number(price) > 0)) return;
+  const previous = _portfolioQuotes[sym] || {};
+  const parsedChange = Number(changePct);
+  _portfolioQuotes[sym] = {
+    price:Number(price),
+    change_pct:Number.isFinite(parsedChange) ? parsedChange : Number(previous.change_pct || 0),
+  };
+  const page = document.getElementById('page-portfolio');
+  if (page && page.style.display !== 'none') {
+    if (_portfolioRenderTimer) clearTimeout(_portfolioRenderTimer);
+    _portfolioRenderTimer = setTimeout(_renderPortfolioRows, 250);
+  }
+}
+
+function _renderPortfolioRows() {
+  const tbody = document.getElementById('portfolio-tbody');
+  const summary = document.getElementById('portfolio-summary');
+  if (!tbody || !summary) return;
+  let marketValue = 0, costValue = 0;
+  if (!_portfolioRows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:36px;color:#8b949e">관심 코인을 추가하면 실시간 평가액을 확인할 수 있습니다.</td></tr>';
+  } else {
+    tbody.innerHTML = _portfolioRows.map((row, index) => {
+      const quote = _portfolioQuotes[row.symbol] || {};
+      const price = Number(quote.price || 0);
+      const amount = Number(row.amount || 0);
+      const avg = Number(row.avgPrice || 0);
+      const value = price * amount;
+      const cost = avg * amount;
+      const pnl = value - cost;
+      const pnlPct = cost > 0 ? pnl / cost * 100 : 0;
+      marketValue += value; costValue += cost;
+      const tone = pnl >= 0 ? '#3fb950' : '#f85149';
+      const changeTone = Number(quote.change_pct || 0) >= 0 ? '#3fb950' : '#f85149';
+      return `<tr>
+        <td>${index + 1}</td>
+        <td><button onclick="analyzePortfolioCoin('${row.symbol}')" style="background:none;border:none;color:#58a6ff;font-weight:800;cursor:pointer;padding:0">${_escPrediction(row.name || row.symbol)}</button><div style="font-size:10px;color:#484f58">${row.symbol}</div></td>
+        <td>${price ? fmtPrice(price,false) : '로딩...'}</td>
+        <td style="color:${changeTone}">${quote.change_pct != null ? (Number(quote.change_pct)>=0?'+':'')+Number(quote.change_pct).toFixed(2)+'%' : '-'}</td>
+        <td>${amount.toLocaleString('en-US',{maximumFractionDigits:8})}</td>
+        <td>${avg ? fmtPrice(avg,false) : '-'}</td>
+        <td>${_portfolioMoney(value)}</td>
+        <td style="color:${tone}">${cost > 0 ? _portfolioMoney(pnl)+' ('+(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%)' : '-'}</td>
+        <td><button onclick="removePortfolioCoin('${row.symbol}')" style="background:#2d1515;border:1px solid #f8514955;color:#f85149;border-radius:6px;padding:4px 8px;cursor:pointer">삭제</button></td>
+      </tr>`;
+    }).join('');
+  }
+  const totalPnl = marketValue - costValue;
+  const totalPct = costValue > 0 ? totalPnl / costValue * 100 : 0;
+  const pnlTone = totalPnl >= 0 ? '#3fb950' : '#f85149';
+  summary.innerHTML = `
+    <div class="portfolio-summary-card"><div class="portfolio-summary-label">총 평가액</div><div class="portfolio-summary-value">${_portfolioMoney(marketValue)}</div></div>
+    <div class="portfolio-summary-card"><div class="portfolio-summary-label">총 매수 원가</div><div class="portfolio-summary-value">${_portfolioMoney(costValue)}</div></div>
+    <div class="portfolio-summary-card"><div class="portfolio-summary-label">평가 손익</div><div class="portfolio-summary-value" style="color:${pnlTone}">${_portfolioMoney(totalPnl)} ${costValue>0?'('+(totalPct>=0?'+':'')+totalPct.toFixed(2)+'%)':''}</div></div>`;
+}
+
+async function _loadPortfolioQuotes() {
+  if (!_portfolioRows.length) { _renderPortfolioRows(); return; }
+  try {
+    const symbols = _portfolioRows.map(row => row.symbol).join(',');
+    const response = await fetch('/api/alert/quote?symbols=' + encodeURIComponent(symbols), {cache:'no-store'});
+    const body = await response.json();
+    Object.entries(body.quotes || {}).forEach(([symbol, quote]) => _updatePortfolioQuote(symbol, quote.price, quote.pct_change));
+  } catch (_) {}
+  _renderPortfolioRows();
+}
+
+function _stopPortfolioStream() {
+  _portfolioGeneration += 1;
+  if (_portfolioSocket) { try { _portfolioSocket.close(); } catch (_) {} _portfolioSocket = null; }
+  const status = document.getElementById('portfolio-live-status');
+  if (status) status.textContent = '● LIVE 대기';
+}
+
+function _startPortfolioStream() {
+  _stopPortfolioStream();
+  if (!_portfolioRows.length) return;
+  const generation = _portfolioGeneration;
+  const streams = _portfolioRows.map(row => row.symbol.toLowerCase() + '@ticker').join('/');
+  try {
+    _portfolioSocket = new WebSocket('wss://stream.binance.com:9443/stream?streams=' + streams);
+    _portfolioSocket.onopen = () => {
+      const status = document.getElementById('portfolio-live-status');
+      if (status) status.textContent = '● LIVE 연결됨';
+    };
+    _portfolioSocket.onmessage = event => {
+      try {
+        const wrapper = JSON.parse(event.data);
+        const tick = wrapper.data || wrapper;
+        _updatePortfolioQuote(tick.s, Number(tick.c), Number(tick.P));
+      } catch (_) {}
+    };
+    _portfolioSocket.onclose = () => {
+      const page = document.getElementById('page-portfolio');
+      if (generation === _portfolioGeneration && page && page.style.display !== 'none') setTimeout(_startPortfolioStream, 3000);
+    };
+  } catch (_) {}
+}
+
+function renderPortfolio() {
+  _loadPortfolioRows();
+  _renderPortfolioRows();
+  _loadPortfolioQuotes();
+  _startPortfolioStream();
 }
 
 // ── 스크리너 ──
@@ -19568,7 +20192,7 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
     handler_self.send_header("X-Content-Type-Options", "nosniff")
     handler_self.send_header("X-Frame-Options", "DENY")
     handler_self.send_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-    handler_self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://finance.naver.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com;")
+    handler_self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://finance.naver.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com wss://stream.binance.com:9443 wss://stream.binance.com:443 wss://fstream.binance.com;")
     handler_self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
 
     handler_self.end_headers()

@@ -88,10 +88,65 @@ def test_crypto_signal_confidence_contract():
     assert result["macro_regime"]["regime"] == "Risk-On"
 
 
+def test_prediction_trade_plan_reverses_entries_and_stop_for_long_short():
+    dd = {
+        "RSI": [55.0], "EMA12": [100.0], "EMA20": [100.0], "EMA50": [99.0],
+        "MACD": [1.0], "ADX": [30.0],
+    }
+    leverage = {"recommended_leverage": 3, "risk_grade": "Medium", "factors": {}}
+    long_plan = app.build_prediction(100.0, 4.0, 4.0, 70.0, leverage, dd, 65.0, 35.0)["trade_plan"]
+    short_plan = app.build_prediction(100.0, 4.0, 4.0, 30.0, leverage, dd, 35.0, 65.0)["trade_plan"]
+
+    assert long_plan["direction"] == "LONG"
+    assert long_plan["second_entry"]["high"] < 100.0
+    assert long_plan["stop_loss"] < long_plan["second_entry"]["low"]
+    assert "매수 구간" in long_plan["first_label"]
+
+    assert short_plan["direction"] == "SHORT"
+    assert short_plan["second_entry"]["low"] > 100.0
+    assert short_plan["stop_loss"] > short_plan["second_entry"]["high"]
+    assert "숏" in short_plan["first_label"]
+
+
+def test_derivatives_contract_and_probability_adjustment(monkeypatch):
+    def fake_binance(path, params=None, fapi=False, timeout=8):
+        if path.endswith("premiumIndex"):
+            return {"markPrice": "101", "indexPrice": "100", "lastFundingRate": "0.0008", "nextFundingTime": 123}
+        if path.endswith("globalLongShortAccountRatio"):
+            return [{"longShortRatio": "2", "longAccount": "0.67", "shortAccount": "0.33"}]
+        if path.endswith("symbolAdlRisk"):
+            return {"adlRisk": "HIGH"}
+        return None
+
+    app._CACHE.clear()
+    monkeypatch.setattr(app, "_binance_get", fake_binance)
+    result = app.fetch_crypto_derivatives("BTCUSDT")
+    assert result["available"] is True
+    assert result["funding_rate_pct"] == pytest.approx(0.08)
+    assert result["long_account_pct"] == pytest.approx(67.0)
+    assert result["adl_risk"] == "HIGH"
+    assert result["probability_adjustment"] < 0
+
+
+def test_english_news_translation_returns_korean(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return [[["비트코인 상승세가 확대되고 있습니다.", "Bitcoin rally expands"]], None, "en"]
+
+    app._CACHE.clear()
+    monkeypatch.setattr(app.requests, "get", lambda *args, **kwargs: FakeResponse())
+    translated = app._translate_to_korean("Bitcoin rally expands")
+    assert "비트코인" in translated
+
+
 def test_coin_route_full_contract_without_external_network(monkeypatch):
     market_data = _synthetic_market_data()
     monkeypatch.setattr(app, "fetch_coin_data", lambda *args, **kwargs: (market_data, [], "BTCUSDT"))
     monkeypatch.setattr(app, "fetch_open_interest", lambda *args, **kwargs: 12345.0)
+    monkeypatch.setattr(app, "fetch_crypto_derivatives", lambda *args, **kwargs: {"available": False})
     monkeypatch.setattr(app, "check_market_regime", lambda *args, **kwargs: "BULL")
 
     result = app.route("/api/coin", {"ticker": "BTC", "period": "1y", "market": "CRYPTO"})
@@ -102,6 +157,7 @@ def test_coin_route_full_contract_without_external_network(monkeypatch):
     assert result["last_close"] > 0
     assert len(result["chart_data"]["close"]) == len(market_data["Close"])
     assert result["prediction"]
+    assert result["prediction"]["trade_plan"]["direction"] in {"LONG", "SHORT", "NEUTRAL"}
     assert result["prediction_outlook"]["scenarios"]
     assert result["signal_confidence"]["days_to_earnings"] is None
     assert result["event_risk"]["days_to_earnings"] is None
@@ -113,6 +169,7 @@ def test_backward_compatible_stock_path_is_coin_alias(monkeypatch):
     market_data = _synthetic_market_data()
     monkeypatch.setattr(app, "fetch_coin_data", lambda *args, **kwargs: (market_data, [], "ETHUSDT"))
     monkeypatch.setattr(app, "fetch_open_interest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "fetch_crypto_derivatives", lambda *args, **kwargs: {"available": False})
     monkeypatch.setattr(app, "check_market_regime", lambda *args, **kwargs: "NEUTRAL")
     result = app.route("/api/stock", {"ticker": "ETH", "period": "1y"})
     assert result["market"] == "CRYPTO"
@@ -189,3 +246,11 @@ def test_html_exposes_coin_ui_and_new_interactions():
     assert "market=CRYPTO" in html
     assert "function _escPrediction(value)" in html
     assert "function renderPullbackIntoForecast(d, isKrx)" in html
+    assert "🤖 AI 종합 의견" not in html
+    assert "📈 향후 가격 상승 가능 범위 (목표가 예측)" not in html
+    assert 'id="page-portfolio"' in html
+    assert "cv_portfolio_v1" in html
+    assert "wss://stream.binance.com:9443" in html
+    assert "wss://fstream.binance.com" in html
+    assert "@forceOrder" in html
+    assert "data-live-liquidation" in html
