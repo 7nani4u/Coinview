@@ -108,6 +108,27 @@ def test_prediction_trade_plan_reverses_entries_and_stop_for_long_short():
     assert "숏" in short_plan["first_label"]
 
 
+def test_detailed_entry_stop_is_outside_every_long_and_short_band():
+    buy_price = {
+        "aggressive_bands": [{"steps": [{"price": 98.0}, {"price": 96.0}]}],
+        "recommended_bands": [{"steps": [{"price": 94.0}, {"price": 92.0}]}],
+    }
+    long_prediction = {
+        "direction": "LONG", "stop_loss": 95.0,
+        "trade_plan": {"direction": "LONG", "stop_loss": 95.0},
+        "targets": [{"price": 106.0}], "risk": {},
+    }
+    short_prediction = {
+        "direction": "SHORT", "stop_loss": 105.0,
+        "trade_plan": {"direction": "SHORT", "stop_loss": 105.0},
+        "targets": [{"price": 94.0}], "risk": {},
+    }
+    long_result = app.align_prediction_stop_with_detailed_entries(long_prediction, buy_price, 100.0, 2.0)
+    short_result = app.align_prediction_stop_with_detailed_entries(short_prediction, buy_price, 100.0, 2.0)
+    assert long_result["trade_plan"]["stop_loss"] < 92.0
+    assert short_result["trade_plan"]["stop_loss"] > 108.0
+
+
 def test_derivatives_contract_and_probability_adjustment(monkeypatch):
     def fake_binance(path, params=None, fapi=False, timeout=8):
         if path.endswith("premiumIndex"):
@@ -253,6 +274,9 @@ def test_html_exposes_coin_ui_and_new_interactions():
     assert "⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색" in html
     assert "📍 2차 매수 구간 · 주 진입" in html
     assert "🛡️ 리스크 관리 (ATR 기반)" in html
+    assert "function _buildCryptoDetailedForecastView(source)" in html
+    assert 'aria-label="밴드 ${b.band} 5단계 ${entryNoun} 가격"' in html
+    assert "bpEl.innerHTML = (isCrypto ? '' : stratBanner + artyHtml)" in html
     assert "news-single-column" in html
     assert "classList.toggle('news-single-column', !isKrx)" in html
     assert 'id="page-portfolio"' in html

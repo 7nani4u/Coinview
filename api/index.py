@@ -10375,6 +10375,52 @@ def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, pro
         },
     }
 
+def align_prediction_stop_with_detailed_entries(prediction: Dict, buy_price: Dict,
+                                                current_price: float, atr: float) -> Dict:
+    """상세 A/B/C 분할 진입 단계 전체 바깥에 방향별 공통 손절가를 배치한다."""
+    if not prediction or not buy_price or not current_price:
+        return prediction
+    plan = prediction.get("trade_plan") or {}
+    direction = str(plan.get("direction") or prediction.get("direction") or "NEUTRAL").upper()
+    if direction not in ("LONG", "SHORT"):
+        return prediction
+
+    source_prices: list[float] = []
+    for group_name in ("aggressive_bands", "recommended_bands"):
+        for band in buy_price.get(group_name) or []:
+            for step in band.get("steps") or []:
+                try:
+                    value = float(step.get("price"))
+                    if value > 0:
+                        source_prices.append(value)
+                except (TypeError, ValueError):
+                    continue
+    if not source_prices:
+        return prediction
+
+    price = float(current_price)
+    buffer_value = max(float(atr or 0.0) * 0.5, price * 0.001)
+    existing = float(plan.get("stop_loss") or prediction.get("stop_loss") or price)
+    if direction == "SHORT":
+        detailed_entries = [price * 2.0 - value for value in source_prices]
+        aligned_stop = max(existing, max(detailed_entries) + buffer_value)
+    else:
+        aligned_stop = min(existing, min(source_prices) - buffer_value)
+    aligned_stop = max(price * 0.000001, aligned_stop)
+
+    rounded_stop = round(aligned_stop, 8)
+    plan["stop_loss"] = rounded_stop
+    prediction["stop_loss"] = rounded_stop
+    first_target = ((prediction.get("targets") or [{}])[0]).get("price")
+    try:
+        risk_distance = abs(rounded_stop - price)
+        reward_distance = abs(float(first_target) - price)
+        if risk_distance > 0:
+            prediction.setdefault("risk", {})["rr_ratio"] = round(reward_distance / risk_distance, 2)
+    except (TypeError, ValueError):
+        pass
+    return prediction
+
 # =============================================================================
 # 라우팅
 # =============================================================================
@@ -11265,6 +11311,9 @@ def route(path: str, params: Dict) -> Dict:
         prediction = build_prediction(
             last, atr_val, atr_pct, score, leverage_info,
             dd, prob_up, prob_down, derivatives,
+        )
+        prediction = align_prediction_stop_with_detailed_entries(
+            prediction, buy_price, last, atr_val,
         )
 
         # ── Step 5: HybridTurtle 복합 점수 (NCS/BQS/FWS) ────────────────────
@@ -16354,14 +16403,153 @@ function renderCryptoDirectionalForecast(d, isKrx) {
   }
 }
 
+function _buildCryptoDetailedForecastView(source) {
+  const prediction = source.prediction || {};
+  const plan = prediction.trade_plan || {};
+  const direction = plan.direction || prediction.direction || 'NEUTRAL';
+  const current = Number(source.last_close || ((source.buy_price || {}).current) || 0);
+  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+  const view = {
+    ...source,
+    buy_price: clone(source.buy_price),
+    risk_scenarios: clone(source.risk_scenarios),
+    pullback_analysis: clone(source.pullback_analysis) || {},
+    prediction_outlook: clone(source.prediction_outlook) || {},
+  };
+
+  // 공통 손절가는 상세 카드에서도 레버리지 방향별 trade_plan 값을 사용한다.
+  if (plan.stop_loss != null && current > 0) {
+    view.pullback_analysis.stop_loss = Number(plan.stop_loss);
+    view.pullback_analysis.stop_loss_pct = Number((-
+      Math.abs(Number(plan.stop_loss) - current) / current * 100
+    ).toFixed(2));
+  }
+  if (direction !== 'SHORT' || !current) return view;
+
+  const mirrorPrice = value => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Number(Math.max(current * 0.000001, current * 2 - number).toFixed(8)) : value;
+  };
+  const mirrorRange = range => Array.isArray(range)
+    ? range.map(mirrorPrice).sort((a, b) => a - b) : range;
+  const shortNote = value => String(value || '')
+    .replaceAll('추가 하락 위험', '__SHORT_UPSIDE_RISK__')
+    .replaceAll('하락 위험', '__SHORT_UPSIDE_RISK__')
+    .replaceAll('기관 매집 참조', '저항 확인 참조')
+    .replaceAll('중기 저점 매집', '고점 분산 숏 진입')
+    .replaceAll('ATR 낙폭 소화 후 반등', 'ATR __SHORT_RISE_MOVE__ 소화 후 반락')
+    .replaceAll('하락 거래량', '__SHORT_RISING_VOLUME__')
+    .replaceAll('BB하단', '__SHORT_BB_UPPER__')
+    .replaceAll('재상승', '재하락')
+    .replaceAll('매수', '숏 진입')
+    .replaceAll('지지', '저항')
+    .replaceAll('눌림', '반등')
+    .replaceAll('상단', '하단')
+    .replaceAll('돌파', '이탈')
+    .replaceAll('상승', '하락')
+    .replaceAll('__SHORT_BB_UPPER__', 'BB상단')
+    .replaceAll('__SHORT_RISE_MOVE__', '상승폭')
+    .replaceAll('__SHORT_RISING_VOLUME__', '상승 거래량')
+    .replaceAll('__SHORT_UPSIDE_RISK__', '추가 상승 위험');
+
+  const bp = view.buy_price || {};
+  ['aggressive', 'recommended'].forEach(key => {
+    if (!bp[key]) return;
+    bp[key].range = mirrorRange(bp[key].range);
+    if (Array.isArray(bp[key].pct)) bp[key].pct = bp[key].pct.map(value => Math.abs(Number(value)));
+    ['basis', 'interpretation'].forEach(field => { if (bp[key][field]) bp[key][field] = shortNote(bp[key][field]); });
+  });
+  ['aggressive_bands', 'recommended_bands'].forEach(group => {
+    (bp[group] || []).forEach(band => {
+      band.range = mirrorRange(band.range);
+      if (Array.isArray(band.pct)) band.pct = band.pct.map(value => Math.abs(Number(value)));
+      band.entry_role = group === 'aggressive_bands' ? '소액 탐색 숏 진입' : '주 숏 진입';
+      band.atr_basis = shortNote(band.atr_basis);
+      band.tech_note = shortNote(band.tech_note);
+      band.risk_note = shortNote(band.risk_note);
+      band.basis = shortNote(band.basis);
+      band.hold_note = shortNote(band.hold_note);
+      band.confirm_note = '가격이 진입 밴드에서 저항받고 거래량이 증가하는 반락 봉이 확인될 때만 단계적으로 숏 진입';
+      (band.steps || []).forEach(step => {
+        step.price = mirrorPrice(step.price);
+        step.decline_pct = Math.abs(Number(step.decline_pct || 0));
+        step.basis = shortNote(step.basis);
+      });
+    });
+  });
+  if (bp.strategy_rec) {
+    bp.strategy_rec.action = '숏 방향 상세 분할 진입 계획';
+    bp.strategy_rec.rationale = [
+      '상승 반등 구간에서 1차 소액 탐색 후 저항 확인 시 주 비중 진입',
+      plan.invalidation_text || '손절가 이상 안착 시 숏 시나리오 무효',
+    ];
+  }
+  bp.arty_smma_fractal = null;
+
+  const scenarioCopy = {
+    conservative: ['단기 하락 목표 — 변동성이 높을 때 적합', '가까운 지지 구간까지의 단기 숏 목표'],
+    balanced: ['스윙 숏 기준 — 하락 추세가 형성될 때 적합', '중기 지지 이탈과 추세 지속 기준'],
+    aggressive: ['추세 추종 최대 수익 — 강한 하락 모멘텀 확인 시 적합', '강한 하락 추세 지속 시 확장 목표'],
+  };
+  const risk = view.risk_scenarios || {};
+  ['conservative', 'balanced', 'aggressive'].forEach(key => {
+    const scenario = risk[key];
+    if (!scenario) return;
+    scenario.target = mirrorRange(scenario.target);
+    scenario.stop = mirrorRange(scenario.stop);
+    scenario.tp_range = mirrorRange(scenario.tp_range);
+    scenario.desc = scenarioCopy[key][0];
+    scenario.target_basis = [scenarioCopy[key][1], 'ATR 거리·변동성·거래량을 반영한 숏 방향 대칭 계산'];
+    scenario.interpretation = `${scenarioCopy[key][1]} · 손절가는 현재가 위에 배치`;
+    scenario.return = Math.abs(Number(scenario.return || 0));
+    scenario.stop_pct = -Math.abs(Number(scenario.stop_pct || 0));
+    (scenario.tp_levels || []).forEach(level => {
+      level.price = mirrorPrice(level.price);
+      level.return_pct = Math.abs(Number(level.return_pct || 0));
+    });
+  });
+  if (view.pullback_analysis) {
+    ['target_main', 'target_ext', 'trail_stop'].forEach(field => {
+      if (view.pullback_analysis[field] != null) view.pullback_analysis[field] = mirrorPrice(view.pullback_analysis[field]);
+    });
+    view.pullback_analysis.target_source = '숏 방향 ATR 대칭 목표';
+    ['target_main_basis', 'target_ext_basis'].forEach(field => {
+      if (Array.isArray(view.pullback_analysis[field])) {
+        view.pullback_analysis[field] = view.pullback_analysis[field].map(shortNote);
+      }
+    });
+  }
+  const levels = view.prediction_outlook.levels || {};
+  const alignedStop = Number(view.pullback_analysis.stop_loss || plan.stop_loss || current);
+  levels.warning_zone = [Math.min(current + Number(source.atr || 0) * 0.5, alignedStop), alignedStop]
+    .sort((a, b) => a - b);
+  view.prediction_outlook.risk_triggers = [
+    plan.invalidation_text || '손절가 이상 종가 안착',
+    '거래량 증가를 동반한 저항 돌파',
+    '롱 우위로 예측 방향 전환',
+  ];
+  return view;
+}
+
 function renderForecast(d, isKrx) {
-  const risk = d.risk_scenarios;
-  const bp   = d.buy_price;
-  const tp   = d.target_price;
-  if (d.market === 'CRYPTO' && d.prediction && d.prediction.trade_plan) {
+  const isCrypto = d.market === 'CRYPTO';
+  const rawDirection = (((d.prediction || {}).trade_plan || {}).direction) || ((d.prediction || {}).direction) || 'NEUTRAL';
+  if (isCrypto && rawDirection === 'NEUTRAL') {
     renderCryptoDirectionalForecast(d, isKrx);
     return;
   }
+  if (isCrypto) d = _buildCryptoDetailedForecastView(d);
+  const isShort = isCrypto && rawDirection === 'SHORT';
+  const entryNoun = isShort ? '숏 진입' : '매수';
+  const risk = d.risk_scenarios;
+  const bp   = d.buy_price;
+  const tp   = d.target_price;
+  const strategyTitle = document.getElementById('buy-strategy-title');
+  const riskTitle = document.getElementById('risk-strategy-title');
+  if (strategyTitle) strategyTitle.textContent = isCrypto
+    ? `🎯 현재가 기준 ${isShort ? '숏(하락)' : '롱(상승)'} 상세 진입 전략`
+    : '🎯 현재가 기준 진입 전략';
+  if (riskTitle) riskTitle.textContent = '🛡️ 리스크 관리 (ATR 기반)';
   // ── 매수 전략 섹션 ──
   const bpEl = document.getElementById('buy-price-section');
   const buyRiskNotesEl = document.getElementById('buy-risk-notes-section');
@@ -16676,9 +16864,10 @@ function renderForecast(d, isKrx) {
             ? `${s.days_min}~${s.days_max}일`
             : (s.period_label || '기간 산정 불가');
           const decline = Number(s.decline_pct);
-          const declineText = Number.isFinite(decline) ? `${decline.toFixed(1)}%` : '-';
+          const declineText = Number.isFinite(decline)
+            ? `${isShort ? '+' + Math.abs(decline).toFixed(1) : decline.toFixed(1)}%` : '-';
           const stepTitle = `${s.basis || 'ATR·기술 지표'} · 단계 배분 ${s.allocation_pct || 0}%`;
-          return `<div class="buy-stage-row" role="row" title="${stepTitle}" aria-label="${s.label}, ${fmt(s.price, isKrx)}, 현재가 대비 ${declineText}, 도달 확률 ${probabilityText}, 예상 ${periodText}, 단계 배분 ${s.allocation_pct || 0}%">
+          return `<div class="buy-stage-row" role="row" title="${stepTitle}" aria-label="${s.label}, ${fmt(s.price, isKrx)}, 현재가 대비 ${isShort ? '상승' : '하락'} ${declineText}, 도달 확률 ${probabilityText}, 예상 ${periodText}, 단계 배분 ${s.allocation_pct || 0}%">
             <span class="buy-stage-name" role="cell" style="color:${bc}">${s.label}</span>
             <span class="buy-stage-price" role="cell" style="color:${bc}">${fmt(s.price, isKrx)}</span>
             <span class="buy-stage-drop" role="cell">${declineText}</span>
@@ -16686,11 +16875,11 @@ function renderForecast(d, isKrx) {
             <span class="buy-stage-days ${s.days_min == null ? 'buy-stage-unavailable' : ''}" role="cell">${periodText}</span>
           </div>`;
         }).join('');
-        const stageTable = `<div class="buy-stage-table" role="table" aria-label="밴드 ${b.band} 5단계 매수 가격">
+        const stageTable = `<div class="buy-stage-table" role="table" aria-label="밴드 ${b.band} 5단계 ${entryNoun} 가격">
           <div class="buy-stage-row buy-stage-header" role="row">
             <span role="columnheader">단계</span>
-            <span role="columnheader">매수 가격</span>
-            <span role="columnheader">하락률</span>
+            <span role="columnheader">${entryNoun} 가격</span>
+            <span role="columnheader">${isShort ? '상승률' : '하락률'}</span>
             <span role="columnheader">도달 확률</span>
             <span role="columnheader">예상 기간</span>
           </div>
@@ -16722,16 +16911,16 @@ function renderForecast(d, isKrx) {
       const recBandsHtml = (bp.recommended_bands && bp.recommended_bands.length)
         ? `<div class="buy-card recommended" style="padding:12px 14px">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:4px">
-              <div class="buy-label" style="margin-bottom:0;font-size:13px">📍 2차 매수 구간 · 주 진입</div>
-              <div style="font-size:10px;color:#484f58">※ 지지선·이평선·VWAP 앵커 기반, 주 비중</div>
+              <div class="buy-label" style="margin-bottom:0;font-size:13px">📍 2차 ${entryNoun} 구간 · 주 진입</div>
+              <div style="font-size:10px;color:#484f58">※ ${isShort ? '저항선·이평선·VWAP 앵커 기반' : '지지선·이평선·VWAP 앵커 기반'}, 주 비중</div>
             </div>
             <div class="buy-bands-row">${bp.recommended_bands.map((b, i) => renderBandCard(b, i, true)).join('')}</div>
           </div>` : '';
 
       const isWaitMode = ['wait', 'wait_support', 'wait_breakdown'].includes(sr.action_key);
-      const aggTitle = '⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색';
+      const aggTitle = `⚡ 1차 ${entryNoun} 구간 (ATR 기반) · 소액 탐색`;
       const aggNote = isWaitMode
-        ? '매수 보류 상태 · 반등 확인 전 실행 구간 아님'
+        ? `${entryNoun} 보류 상태 · ${isShort ? '반락' : '반등'} 확인 전 실행 구간 아님`
         : '백테스트 + 이벤트 위험 반영';
 
       const aggBandsHtml = (bp.aggressive_bands && bp.aggressive_bands.length)
@@ -16743,7 +16932,7 @@ function renderForecast(d, isKrx) {
             <div class="buy-bands-row">${bp.aggressive_bands.map((b, i) => renderBandCard(b, i, false)).join('')}</div>
           </div>` : '';
 
-      bpEl.innerHTML = stratBanner + artyHtml + `<div class="buy-price-grid">${aggBandsHtml}${recBandsHtml}</div>`;
+      bpEl.innerHTML = (isCrypto ? '' : stratBanner + artyHtml) + `<div class="buy-price-grid">${aggBandsHtml}${recBandsHtml}</div>`;
       if (buyRiskNotesEl) {
         buyRiskNotesEl.innerHTML = bandDistanceHtml + eventRiskHtml + downsideRiskHtml;
       }
@@ -16772,14 +16961,14 @@ function renderForecast(d, isKrx) {
     const outlook = d.prediction_outlook || {};
     const warningZone = (outlook.levels || {}).warning_zone || [];
     const warningZoneHtml = warningZone.length === 2
-      ? `<div style="margin-top:8px"><div style="font-size:10px;color:#8b949e">주의 구간</div><div style="font-size:12px;font-weight:700;color:#d29922">${fmt(warningZone[0], isKrx)} ~ ${fmt(warningZone[1], isKrx)}</div><div style="font-size:10px;color:#8b949e;margin-top:2px">지지 회복 전 신규 진입 비중 축소</div></div>` : '';
+      ? `<div style="margin-top:8px"><div style="font-size:10px;color:#8b949e">주의 구간</div><div style="font-size:12px;font-weight:700;color:#d29922">${fmt(warningZone[0], isKrx)} ~ ${fmt(warningZone[1], isKrx)}</div><div style="font-size:10px;color:#8b949e;margin-top:2px">${isShort ? '저항 재돌파 전 숏 비중 축소' : '지지 회복 전 신규 진입 비중 축소'}</div></div>` : '';
     const riskTriggerHtml = (outlook.risk_triggers || []).slice(0, 5)
       .map(x => `<div style="display:flex;gap:5px;align-items:flex-start;margin-bottom:2px"><span style="color:#f85149">•</span><span>${x}</span></div>`).join('');
     const commonStopHtml = (_stopVal == null) ? '' : `
       <div style="grid-column:1 / -1;background:#0d1117;border-radius:8px;padding:11px 14px;border:1px solid #f85149">
         <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">손절가</div>
         <div style="font-size:17px;font-weight:800;color:#f85149">${fmt(_stopVal, isKrx)}</div>
-        <div style="font-size:11px;color:#d29922;margin-top:4px">${_stopPct != null ? _stopPct + '% 범위 · ' : ''}종가 이탈과 거래량 증가가 함께 나타나면 손실 제한 우선</div>
+        <div style="font-size:11px;color:#d29922;margin-top:4px">${_stopPct != null ? _stopPct + '% 범위 · ' : ''}${isShort ? '손절가 이상 종가 안착과 거래량 증가 시 숏 포지션 정리' : '종가 이탈과 거래량 증가가 함께 나타나면 손실 제한 우선'}</div>
         <div style="font-size:10px;color:#8b949e;margin-top:5px">${risk.vol_state || ''} · ${risk.vol_trend || ''} 변동성이 클수록 정상 가격 진폭도 커져 ATR 손절 폭이 넓어지며, 저변동성에서는 기준이 좁아질 수 있습니다.</div>
         ${warningZoneHtml}
         ${riskTriggerHtml ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #30363d"><div style="font-size:10px;color:#f85149;font-weight:700;margin-bottom:4px">리스크 확대 조건</div><div style="font-size:10px;color:#8b949e;line-height:1.5">${riskTriggerHtml}</div></div>` : ''}
@@ -16817,7 +17006,7 @@ function renderForecast(d, isKrx) {
             const sub = [pa.rr_main != null ? `R/R ${pa.rr_main}:1` : '', pa.target_source || ''].filter(Boolean).join(' · ');
             items.push(targetItem(pa.target_main, '1차 정밀 목표가', '#3fb950', sub, pa.target_main_basis, pa.target_main_confidence_pct));
           } else if (sc.label === '공격적' && pa.target_ext != null) {
-            items.push(targetItem(pa.target_ext, '2차 목표 (돌파 후)', '#58a6ff', '1차 돌파 확인 후 홀딩 기준', pa.target_ext_basis, pa.target_ext_confidence_pct));
+            items.push(targetItem(pa.target_ext, `2차 목표 (${isShort ? '이탈' : '돌파'} 후)`, '#58a6ff', `1차 ${isShort ? '이탈' : '돌파'} 확인 후 홀딩 기준`, pa.target_ext_basis, pa.target_ext_confidence_pct));
           }
           if (!items.length) return '';
           const rows = items.map(it => {
@@ -16840,7 +17029,7 @@ function renderForecast(d, isKrx) {
               </div>${it.sub ? `<div style="font-size:10px;color:#8b949e;margin-top:1px">${it.sub}</div>` : ''}${basisHtml}${confHtml}<div style="margin-bottom:4px"></div>`;
           }).join('');
           return `<div style="margin-top:8px;padding-top:8px;${DIVIDER}">
-            <div style="font-size:10px;color:#8b949e;margin-bottom:5px">📌 눌림목 정밀가</div>
+            <div style="font-size:10px;color:#8b949e;margin-bottom:5px">📌 ${isShort ? '반등 숏' : '눌림목'} 정밀가</div>
             ${rows}
           </div>`;
         })();
@@ -16860,7 +17049,7 @@ function renderForecast(d, isKrx) {
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:2px">
             ${sc.target_confidence_pct != null ? `<span style="font-size:10px;color:#8b949e">목표가 신뢰도 <b style="color:${sc.target_confidence_pct >= 60 ? '#3fb950' : sc.target_confidence_pct >= 35 ? '#d29922' : '#f97316'}">${sc.target_confidence_pct}%</b></span>` : ''}
-            ${sc.breakout_probability_pct != null ? `<span style="font-size:10px;color:#8b949e">저항 돌파확률 <b style="color:#58a6ff">${sc.breakout_probability_pct}%</b></span>` : ''}
+            ${sc.breakout_probability_pct != null ? `<span style="font-size:10px;color:#8b949e">${isShort ? '지지 이탈확률' : '저항 돌파확률'} <b style="color:#58a6ff">${sc.breakout_probability_pct}%</b></span>` : ''}
           </div>` : ''}
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;${DIVIDER}">
             <div>
