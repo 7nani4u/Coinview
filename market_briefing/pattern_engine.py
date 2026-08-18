@@ -1,4 +1,4 @@
-"""Coinview 공통 코인 가격 패턴 탐지 엔진.
+"""StockOracle 공통 가격 패턴 탐지 엔진.
 
 이 모듈은 기존 ``api.index.ChartPatternAnalyzer``의 공개 호출 형식을 깨지
 않으면서 다음 책임을 한 곳에서 처리하기 위한 순수 Python/Numpy 구현이다.
@@ -1068,4 +1068,3 @@ def compatibility_patterns(patterns: Iterable[Mapping[str, Any]]) -> list[dict[s
             "conf": int(round(float(pattern.get("completion_score") or 0))),
         })
     return result
-

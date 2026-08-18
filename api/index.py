@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Coinview - Vercel Serverless Unified Handler
-=============================================
+StockOracle - Vercel Serverless Unified Handler
+================================================
 [구조 설명]
 - 단일 Python 파일이 HTML 프론트엔드 + 모든 /api/* 엔드포인트를 처리
 - frontend/ 폴더, Next.js 빌드 없이 순수 Python + HTML/JS만으로 동작
@@ -12,7 +12,7 @@ Coinview - Vercel Serverless Unified Handler
 2. "framework":"nextjs" + "builds" 혼용 → Vercel v2 충돌 → 수정: builds만 사용
 3. "routes" + "framework" 충돌 → 수정: routes로만 라우팅 통일
 4. "dest":"/frontend/$1" 존재하지 않는 경로 → 수정: 모든 요청을 api/index.py로
-5. 모든 요청은 api/index.py의 단일 진입점으로 처리
+5. api/stock.py 미진입 → 수정: api/index.py로 진입점 변경
 
 [버그 수정 내역 v2]
 1. 거래량 차트 색상: hex 문자열에 .replace('rgb','rgba') 적용 불가 → rgba() 직접 사용
@@ -39,7 +39,6 @@ import tempfile
 import shutil
 import re
 import hashlib
-import html as html_lib
 from pathlib import Path
 import certifi
 import ssl
@@ -58,7 +57,7 @@ if os.name == 'nt' and not cert_path.isascii():
         if not os.path.exists(safe_cert_path):
             shutil.copy2(cert_path, safe_cert_path)
         cert_path = safe_cert_path
-
+        
         # curl_cffi 내부에서 certifi.where()를 호출할 때 우회된 경로를 반환하도록 몽키패치
         certifi.where = lambda: safe_cert_path
     except Exception:
@@ -75,6 +74,7 @@ else:
     TMP_DIR = "/tmp"
 
 os.environ["TMPDIR"] = TMP_DIR
+os.environ["HOME"] = TMP_DIR
 os.environ["XDG_CACHE_HOME"] = os.path.join(TMP_DIR, "cache")
 os.environ["YF_CACHE_DIR"] = os.path.join(TMP_DIR, "yf_cache")
 
@@ -151,7 +151,7 @@ import yfinance.utils
 import yfinance.data
 import curl_cffi.curl
 
-# IPv6 네트워크 지연으로 인한 타임아웃(curl: 28) 오류를 방지하기 위해
+# IPv6 네트워크 지연으로 인한 타임아웃(curl: 28) 오류를 방지하기 위해 
 # curl_cffi의 setopt 메서드를 몽키패치하여 IPv4를 강제로 사용하도록 설정합니다.
 _original_setopt = curl_cffi.curl.Curl.setopt
 
@@ -162,11 +162,11 @@ def _patched_setopt(self, option, value):
         _original_setopt(self, curl_cffi.curl.CurlOpt.IPRESOLVE, 1)
         # 타임아웃 기본값 연장 (CurlOpt.TIMEOUT_MS = 115)
         _original_setopt(self, curl_cffi.curl.CurlOpt.TIMEOUT_MS, 30000)
-
+    
     # yfinance가 설정하는 timeout 값이 30초보다 작으면 30초로 덮어쓰기
     if option == curl_cffi.curl.CurlOpt.TIMEOUT_MS and value < 30000:
         value = 30000
-
+        
     return _original_setopt(self, option, value)
 
 curl_cffi.curl.Curl.setopt = _patched_setopt
@@ -414,251 +414,1220 @@ US_STOCK_MAPPING = {
     "이더리움": "ETH-USD",
 }
 
-@ttl_cache(3600)   # 1시간 캐시 — 실패 시 24시간 고착 방지 (기존 86400 → 3600)
-def get_krx_code_map():
-    """KRX 전체 상장 종목 티커↔이름 맵 반환.
-    실패 시 빈 dict 반환 — resolve_ticker가 KR_STOCK_MAP 폴백으로 처리함.
-    """
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0"}
-    urls = [
-        # HTTPS 우선, HTTP 폴백
+_KRX_UNIVERSE_CACHE: Dict[str, Any] = {
+    "records": (), "updated_at": 0.0, "session_date": ""
+}
+_KRX_UNIVERSE_LOCK = threading.Lock()
+_KRX_SEARCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0",
+    "Accept": "application/json,text/html,*/*",
+}
+
+
+def _krx_market_meta(market_name: str) -> Tuple[str, str]:
+    """시장 문자열을 yfinance 접미사와 표시용 시장명으로 정규화한다."""
+    market = re.sub(r"\s+", "", str(market_name or "")).upper()
+    if "KOSDAQ" in market or "코스닥" in market:
+        return "KQ", "KOSDAQ"
+    if "KONEX" in market or "코넥스" in market:
+        # Yahoo Finance에는 별도 KONEX 접미사가 없어 KRX 유가증권 접미사를 사용한다.
+        return "KS", "KONEX"
+    return "KS", "KOSPI"
+
+
+def _krx_product_flags(name: str) -> Tuple[bool, bool]:
+    normalized = re.sub(r"\s+", "", str(name or "")).upper()
+    leveraged = any(token in normalized for token in ("레버리지", "LEVERAGE", "2X", "3X"))
+    inverse = "인버스" in normalized or "INVERSE" in normalized
+    return leveraged, inverse
+
+
+def _krx_session_date() -> str:
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        return dt.now(_ZI("Asia/Seoul")).strftime("%Y-%m-%d")
+    except Exception:
+        return dt.now().strftime("%Y-%m-%d")
+
+
+def _is_krx_short_code(value: str) -> bool:
+    """숫자 또는 최근 도입된 영문 혼합 6자리 KRX 단축코드인지 확인한다."""
+    return bool(re.fullmatch(r"[0-9A-Z]{6}", str(value or "").strip().upper()))
+
+
+def _build_krx_security_record(
+        code: str, name: str, market_name: str, security_type: str,
+        listed_date: str = "") -> Optional[Dict]:
+    code = re.sub(r"[^0-9A-Z]", "", str(code or "").strip().upper())
+    if code.isdigit():
+        code = code.zfill(6)
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not _is_krx_short_code(code) or not name:
+        return None
+    suffix, exchange = _krx_market_meta(market_name)
+    security_type = str(security_type or "STOCK").upper()
+    leveraged, inverse = _krx_product_flags(name)
+    listed_date = str(listed_date or "").strip().replace(".", "-").replace("/", "-")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", listed_date):
+        listed_date = ""
+    return {
+        "code": code,
+        "name": name,
+        "ticker": f"{code}.{suffix}",
+        "market": "KRX",
+        "exchange": exchange,
+        "security_type": security_type,
+        "is_leveraged": leveraged,
+        "is_inverse": inverse,
+        "listed_date": listed_date,
+        "is_new_listing": bool(listed_date and listed_date == _krx_session_date()),
+    }
+
+
+def _download_krx_corporations() -> List[Dict]:
+    """KIND 상장법인목록에서 KOSPI·KOSDAQ·KONEX 보통/우선주 등을 읽는다."""
+    urls = (
         "https://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13",
         "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13",
-    ]
+    )
     for url in urls:
         try:
-            res = requests.get(url, headers=headers, timeout=8, verify=False)
+            res = requests.get(url, headers=_KRX_SEARCH_HEADERS, timeout=8, verify=False)
+            res.raise_for_status()
             res.encoding = "euc-kr"
-            soup = BeautifulSoup(res.text, "html.parser")
-            table = soup.select_one("table")
-            n2c, c2n = {}, {}
+            table = BeautifulSoup(res.text, "html.parser").select_one("table")
+            records = []
             if table:
                 for row in table.select("tr")[1:]:
                     cols = row.select("td")
-                    if len(cols) >= 3:
-                        name = cols[0].text.strip()
-                        market_name = cols[1].text.strip()
-                        code = cols[2].text.strip().zfill(6)
-                        if name and code:
-                            suffix = "KQ" if "코스닥" in market_name else "KS"
-                            n2c[name] = f"{code}.{suffix}"
-                            c2n[code] = name
-            if n2c:          # 파싱 성공 시 반환 (빈 결과면 다음 URL 시도)
-                return n2c, c2n
+                    if len(cols) < 3:
+                        continue
+                    record = _build_krx_security_record(
+                        cols[2].get_text(strip=True),
+                        cols[0].get_text(strip=True),
+                        cols[1].get_text(strip=True),
+                        "STOCK",
+                        cols[5].get_text(strip=True) if len(cols) > 5 else "",
+                    )
+                    if record:
+                        records.append(record)
+            if records:
+                return records
         except Exception:
             continue
-    return {}, {}            # 모두 실패 → resolve_ticker가 KR_STOCK_MAP 폴백 사용
-
-# ── 코인 별칭(한글/영문) → Binance BASE 심볼 ─────────────────────────────────
-COIN_ALIASES = {
-    "비트코인": "BTC", "비트": "BTC", "btc": "BTC", "xbt": "BTC",
-    "이더리움": "ETH", "이더": "ETH", "eth": "ETH",
-    "바이낸스코인": "BNB", "바낸": "BNB", "bnb": "BNB",
-    "리플": "XRP", "xrp": "XRP",
-    "솔라나": "SOL", "솔라": "SOL", "sol": "SOL",
-    "에이다": "ADA", "카르다노": "ADA", "ada": "ADA",
-    "도지": "DOGE", "도지코인": "DOGE", "doge": "DOGE",
-    "아발란체": "AVAX", "아바": "AVAX", "avax": "AVAX",
-    "시바이누": "SHIB", "시바": "SHIB", "shib": "SHIB",
-    "폴카닷": "DOT", "닷": "DOT", "dot": "DOT",
-    "체인링크": "LINK", "링크": "LINK", "link": "LINK",
-    "유니스왑": "UNI", "유니": "UNI", "uni": "UNI",
-    "아톰": "ATOM", "코스모스": "ATOM", "atom": "ATOM",
-    "라이트코인": "LTC", "라코": "LTC", "ltc": "LTC",
-    "이더리움클래식": "ETC", "etc": "ETC",
-    "비트코인캐시": "BCH", "bch": "BCH",
-    "수이": "SUI", "sui": "SUI",
-    "아비트럼": "ARB", "arb": "ARB",
-    "옵티미즘": "OP", "op": "OP",
-    "폴리곤": "POL", "매틱": "POL", "pol": "POL", "matic": "MATIC",
-    "니어": "NEAR", "near": "NEAR",
-    "인젝티브": "INJ", "inj": "INJ",
-    "셀레스티아": "TIA", "tia": "TIA",
-    "앱토스": "APT", "apt": "APT",
-    "파일코인": "FIL", "필코인": "FIL", "fil": "FIL",
-    "트론": "TRX", "트론코인": "TRX", "trx": "TRX",
-    "스텔라": "XLM", "xlm": "XLM",
-    "에이브": "AAVE", "aave": "AAVE",
-    "렌더": "RENDER", "render": "RENDER",
-    "월드코인": "WLD", "wld": "WLD",
-    "페페": "PEPE", "pepe": "PEPE",
-    "봉크": "BONK", "bonk": "BONK",
-    "플로키": "FLOKI", "floki": "FLOKI",
-    "비트텐서": "TAO", "tao": "TAO",
-    "에테나": "ENA", "ena": "ENA",
-    "세이": "SEI", "sei": "SEI",
-    "칠리즈": "CHZ", "chz": "CHZ",
-    "샌드박스": "SAND", "sand": "SAND",
-    "디센트럴랜드": "MANA", "mana": "MANA",
-    "트럼프": "TRUMP", "trump": "TRUMP",
-}
-
-# Binance 견적(quote) 통화 — 베이스 심볼 추출용
-_QUOTE_ASSETS = ("USDT", "USDC", "FDUSD", "BUSD", "TUSD")
-
-def resolve_ticker(q: str):
-    """코인명 / 별칭 / 심볼 → (binance_symbol, "CRYPTO", display_name)
-
-    예: "비트코인" / "btc" / "BTC" / "BTCUSDT" → ("BTCUSDT", "CRYPTO", "BTC")
-    [변경] 주식(KRX/US) 종목 해석 → Binance USDT 무기한/현물 심볼 해석
-    """
-    q = (q or "").strip()
-    if not q:
-        return None, None, None
-
-    # 1. 별칭(한글/영문 소문자) 매칭
-    ql = q.lower()
-    if ql in COIN_ALIASES:
-        base = COIN_ALIASES[ql]
-        return f"{base}USDT", "CRYPTO", base
-
-    # 2. 심볼 정규화 (구분자 제거, 대문자)
-    qu = q.upper().replace("/", "").replace("-", "").replace("_", "").replace(" ", "")
-    if not qu or not qu.isalnum():
-        return None, None, None
-
-    # 3. 이미 견적통화가 붙은 완전한 페어 심볼
-    for quote in _QUOTE_ASSETS:
-        if qu.endswith(quote) and len(qu) > len(quote):
-            return qu, "CRYPTO", qu[:-len(quote)]
-
-    # 4. 베이스 심볼만 입력 → 기본 USDT 무기한 페어로 변환
-    return f"{qu}USDT", "CRYPTO", qu
+    return []
 
 
-COIN_DISPLAY_NAMES = {
-    "BTC": "비트코인", "ETH": "이더리움", "BNB": "바이낸스코인", "XRP": "리플",
-    "SOL": "솔라나", "ADA": "에이다", "DOGE": "도지코인", "AVAX": "아발란체",
-    "SHIB": "시바이누", "DOT": "폴카닷", "LINK": "체인링크", "UNI": "유니스왑",
-    "ATOM": "코스모스", "LTC": "라이트코인", "ETC": "이더리움클래식", "BCH": "비트코인캐시",
-    "SUI": "수이", "ARB": "아비트럼", "OP": "옵티미즘", "POL": "폴리곤",
-    "NEAR": "니어", "INJ": "인젝티브", "TIA": "셀레스티아", "APT": "앱토스",
-    "FIL": "파일코인", "TRX": "트론", "XLM": "스텔라", "AAVE": "에이브",
-    "RENDER": "렌더", "WLD": "월드코인", "PEPE": "페페", "BONK": "봉크",
-    "FLOKI": "플로키", "TAO": "비트텐서", "ENA": "에테나", "SEI": "세이",
-    "CHZ": "칠리즈", "SAND": "샌드박스", "MANA": "디센트럴랜드", "TRUMP": "트럼프",
-}
-
-
-def search_coin_suggestions(q: str, limit: int = 12) -> List[Dict]:
-    """한글명·별칭·심볼을 대상으로 Binance USDT 코인 자동완성 항목을 반환한다."""
-    query = str(q or "").strip().lower()
-    if not query:
-        return []
-    bases = set(COIN_DISPLAY_NAMES)
-    bases.update(COIN_ALIASES.values())
-    ranked = []
-    for base in bases:
-        name = COIN_DISPLAY_NAMES.get(base, base)
-        aliases = [alias for alias, value in COIN_ALIASES.items() if value == base]
-        fields = [base.lower(), f"{base.lower()}usdt", name.lower(), *aliases]
-        if not any(query in field for field in fields):
+def _download_krx_exchange_products() -> List[Dict]:
+    """상장법인목록에 없는 ETF·ETN(레버리지/인버스 포함)을 보완한다."""
+    sources = (
+        ("https://finance.naver.com/api/sise/etfItemList.nhn", "etfItemList", "ETF"),
+        ("https://finance.naver.com/api/sise/etnItemList.nhn", "etnItemList", "ETN"),
+    )
+    records = []
+    for url, list_key, security_type in sources:
+        try:
+            res = requests.get(url, headers=_KRX_SEARCH_HEADERS, timeout=8)
+            res.raise_for_status()
+            items = (res.json().get("result") or {}).get(list_key) or []
+            for item in items:
+                record = _build_krx_security_record(
+                    item.get("itemcode"), item.get("itemname"), "KOSPI", security_type
+                )
+                if record:
+                    records.append(record)
+        except Exception:
+            # ETF와 ETN 중 한 소스만 실패해도 성공한 소스의 상품은 유지한다.
             continue
-        exact = 0 if query in (base.lower(), f"{base.lower()}usdt", name.lower()) else 1
-        prefix = 0 if any(field.startswith(query) for field in fields) else 1
-        ranked.append(((exact, prefix, len(name), base), {
-            "ticker": f"{base}USDT", "code": base, "name": name,
-            "market": "CRYPTO", "exchange": "Binance USDT",
-        }))
-    return [item for _, item in sorted(ranked, key=lambda row: row[0])[:max(1, min(20, limit))]]
+    return records
 
 
-CRYPTO_PEER_GROUPS = {
-    "비트코인·대형 코인": ["BTC", "ETH", "BNB", "SOL", "XRP"],
-    "스마트컨트랙트 플랫폼": ["ETH", "SOL", "ADA", "AVAX", "SUI", "APT", "NEAR"],
-    "디파이·오라클": ["LINK", "UNI", "AAVE", "INJ"],
-    "레이어2": ["ARB", "OP", "POL"],
-    "밈 코인": ["DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "TRUMP"],
-    "AI·컴퓨팅": ["TAO", "RENDER", "WLD"],
-}
+def _fetch_krx_security_universe() -> Tuple[Dict, ...]:
+    """복수 소스 결과를 종목코드 기준으로 병합한다."""
+    by_code: Dict[str, Dict] = {}
+    for record in _download_krx_corporations() + _download_krx_exchange_products():
+        by_code[record["code"]] = record
+    return tuple(sorted(by_code.values(), key=lambda item: (item["name"].casefold(), item["code"])))
 
 
-def _crypto_peer_group(base: str) -> tuple[str, list[str]]:
-    if base == "BTC":
-        return "비트코인·대형 코인", CRYPTO_PEER_GROUPS["비트코인·대형 코인"]
-    for name, bases in CRYPTO_PEER_GROUPS.items():
-        if name != "비트코인·대형 코인" and base in bases:
-            return name, bases
-    return "주요 알트코인", ["ETH", "BNB", "SOL", "XRP", "ADA", "AVAX", "LINK", "SUI"]
+def get_krx_security_universe() -> Tuple[Dict, ...]:
+    """국내 상장 주식·ETF·ETN 검색 마스터를 stale-if-error 방식으로 반환한다."""
+    now = time.time()
+    session_date = _krx_session_date()
+    cached = _KRX_UNIVERSE_CACHE.get("records") or ()
+    same_session_date = _KRX_UNIVERSE_CACHE.get("session_date") == session_date
+    if (cached and same_session_date and
+            now - float(_KRX_UNIVERSE_CACHE.get("updated_at") or 0) < 3600):
+        return cached
+    with _KRX_UNIVERSE_LOCK:
+        cached = _KRX_UNIVERSE_CACHE.get("records") or ()
+        same_session_date = _KRX_UNIVERSE_CACHE.get("session_date") == session_date
+        if (cached and same_session_date and
+                now - float(_KRX_UNIVERSE_CACHE.get("updated_at") or 0) < 3600):
+            return cached
+        fresh = _fetch_krx_security_universe()
+        if fresh:
+            # 일부 소스만 일시 실패한 경우 기존 정상 항목을 보존한다.
+            merged = {record["code"]: record for record in cached}
+            merged.update({record["code"]: record for record in fresh})
+            records = tuple(sorted(
+                merged.values(), key=lambda item: (item["name"].casefold(), item["code"])
+            ))
+            _KRX_UNIVERSE_CACHE["records"] = records
+            _KRX_UNIVERSE_CACHE["session_date"] = session_date
+            source_types = {record["security_type"] for record in fresh}
+            # 주식·ETF·ETN 중 하나라도 빠졌다면 1분 후 재시도한다.
+            _KRX_UNIVERSE_CACHE["updated_at"] = (
+                now if {"STOCK", "ETF", "ETN"}.issubset(source_types) else now - 3540
+            )
+            return records
+        # 일시 장애 때 빈 결과로 정상 캐시를 덮어쓰지 않는다.
+        return cached
 
 
-def _crypto_peer_metrics(base: str) -> Dict | None:
-    rows = fetch_klines(f"{base}USDT", "1d", 60)
-    closes = [float(row[4]) for row in rows or []]
-    if len(closes) < 21:
-        return None
-    ret5 = (closes[-1] / closes[-6] - 1.0) * 100.0
-    ret20 = (closes[-1] / closes[-21] - 1.0) * 100.0
-    ma20 = float(np.mean(closes[-20:]))
-    deltas = np.diff(np.array(closes[-16:], dtype=float))
-    gains = float(np.mean(np.maximum(deltas, 0.0)))
-    losses = float(np.mean(np.maximum(-deltas, 0.0)))
-    rsi = 100.0 if losses == 0 else 100.0 - 100.0 / (1.0 + gains / losses)
-    up = _clip(50.0 + ret5 * 1.3 + ret20 * 0.45 + (rsi - 50.0) * 0.22, 15.0, 85.0)
-    return {
-        "ticker": f"{base}USDT", "name": COIN_DISPLAY_NAMES.get(base, base),
-        "return_5d": round(ret5, 2), "return_20d": round(ret20, 2),
-        "rsi": round(rsi, 1), "above_ma20": closes[-1] >= ma20,
-        "trend": "상승" if up >= 57 else "하락" if up <= 43 else "혼조",
-        "up_probability": round(up, 1), "down_probability": round(100.0 - up, 1),
-    }
+def _promote_new_krx_listing(record: Dict) -> None:
+    """자동완성에서 당일 신규 상장을 발견하면 전체 TTL 만료 전 즉시 캐시에 넣는다."""
+    if not record or not record.get("code"):
+        return
+    promoted = dict(record)
+    promoted["listed_date"] = promoted.get("listed_date") or _krx_session_date()
+    promoted["is_new_listing"] = True
+    with _KRX_UNIVERSE_LOCK:
+        merged = {
+            item["code"]: item for item in (_KRX_UNIVERSE_CACHE.get("records") or ())
+        }
+        merged[promoted["code"]] = promoted
+        _KRX_UNIVERSE_CACHE["records"] = tuple(sorted(
+            merged.values(), key=lambda item: (item["name"].casefold(), item["code"])
+        ))
+        _KRX_UNIVERSE_CACHE["session_date"] = _krx_session_date()
+        # 발견 종목은 즉시 사용하고, 다음 검색에서 전체 마스터도 다시 동기화한다.
+        _KRX_UNIVERSE_CACHE["updated_at"] = 0.0
+
+
+def get_krx_code_map():
+    """호환용 종목명↔코드 맵. 전체 주식·ETF·ETN 유니버스를 포함한다."""
+    name_to_ticker: Dict[str, str] = {}
+    code_to_name: Dict[str, str] = {}
+    for record in get_krx_security_universe():
+        name_to_ticker[record["name"]] = record["ticker"]
+        code_to_name[record["code"]] = record["name"]
+    return name_to_ticker, code_to_name
 
 
 @ttl_cache(300)
-def build_crypto_peer_outlook(symbol: str, company: str = "") -> Dict:
-    base = str(symbol or "").upper()
-    for quote_asset in _QUOTE_ASSETS:
-        if base.endswith(quote_asset):
-            base = base[:-len(quote_asset)]
-            break
-    group_name, bases = _crypto_peer_group(base)
-    requested = list(dict.fromkeys([base, *bases]))[:8]
-    metrics = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(requested))) as executor:
-        futures = {executor.submit(_crypto_peer_metrics, item): item for item in requested}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                row = future.result()
-                if row:
-                    metrics.append(row)
-            except Exception:
-                pass
-    selected = next((row for row in metrics if row["ticker"] == f"{base}USDT"), None)
-    peers = [row for row in metrics if row["ticker"] != f"{base}USDT"]
-    comparison = peers or metrics
-    if not comparison:
-        return {"ok": False, "reason": "비교 가능한 코인 일봉 데이터가 없습니다."}
-    avg5 = float(np.mean([row["return_5d"] for row in comparison]))
-    avg20 = float(np.mean([row["return_20d"] for row in comparison]))
-    breadth = sum(row["above_ma20"] for row in comparison) / len(comparison) * 100.0
-    avg_up = float(np.mean([row["up_probability"] for row in comparison]))
-    label = "상승 우위" if avg_up >= 57 else "하락 우위" if avg_up <= 43 else "방향 혼조"
-    reasons = [f"그룹 평균 5일 {avg5:+.2f}%", f"그룹 평균 20일 {avg20:+.2f}%", f"MA20 상회 {breadth:.0f}%"]
-    return {
-        "ok": True, "symbol": f"{base}USDT", "company": company or COIN_DISPLAY_NAMES.get(base, base),
-        "market": "CRYPTO", "group_name": group_name, "sector": group_name, "industry": group_name,
-        "peer_count": len(comparison), "up_probability": round(avg_up, 1),
-        "down_probability": round(100.0 - avg_up, 1), "avg_return_5d": round(avg5, 2),
-        "avg_return_20d": round(avg20, 2), "breadth_above_ma20": round(breadth, 1),
-        "label": label, "reasons": reasons, "peers": sorted(peers, key=lambda row: row["up_probability"], reverse=True),
-        "selected": selected,
-        "relative_to_industry": round((selected["up_probability"] - avg_up), 1) if selected else None,
-        "basis": "Binance 일봉 기반 5일·20일 모멘텀, RSI, MA20 상대 비교",
-        "generated_at": dt.now().isoformat(),
+def search_krx_security_remote(q: str) -> Tuple[Dict, ...]:
+    """전체 마스터 장애 시 자동완성 단건 API로 시장 접미사를 복구한다."""
+    query = re.sub(r"\s+", " ", str(q or "")).strip()
+    if not query:
+        return ()
+    try:
+        res = requests.get(
+            "https://ac.stock.naver.com/ac",
+            params={"q": query, "target": "stock,index,marketindicator"},
+            headers=_KRX_SEARCH_HEADERS,
+            timeout=5,
+        )
+        res.raise_for_status()
+        records = []
+        for item in res.json().get("items") or []:
+            if str(item.get("nationCode") or "").upper() != "KOR":
+                continue
+            record = _build_krx_security_record(
+                item.get("code"), item.get("name"), item.get("typeCode"), "STOCK"
+            )
+            if record:
+                records.append(record)
+        return tuple(records)
+    except Exception:
+        return ()
+
+
+def _exact_krx_remote_match(q: str) -> Optional[Dict]:
+    query = re.sub(r"\s+", " ", str(q or "")).strip()
+    query_fold = query.casefold()
+    for record in search_krx_security_remote(query):
+        if record["code"] == query or record["name"].casefold() == query_fold:
+            return record
+    return None
+
+
+def _krx_status_directory() -> Dict[str, Any]:
+    """개장 급등 모듈의 전체 관리·거래정지 스냅샷을 검색에서도 재사용한다."""
+    fetcher = globals().get("_fetch_kr_surge_risk_flags")
+    if not callable(fetcher):
+        return {"flags": {}, "details": {}, "coverage": {}, "errors": ["상태 피드 미초기화"]}
+    try:
+        snapshot = fetcher() or {}
+        return {
+            "flags": snapshot.get("flags") or {},
+            "details": snapshot.get("details") or {},
+            "coverage": snapshot.get("coverage") or {},
+            "errors": snapshot.get("errors") or [],
+            "as_of": snapshot.get("as_of"),
+        }
+    except Exception as exc:
+        return {"flags": {}, "details": {}, "coverage": {}, "errors": [str(exc)]}
+
+
+def _parse_krx_delisting_notice(html: str) -> Dict[str, Any]:
+    """최신 공시에서 확정 상장폐지 공시와 이후 상장유지 결정을 시간순으로 판별한다."""
+    soup = BeautifulSoup(str(html or ""), "html.parser")
+    cutoff = dt.now() - timedelta(days=730)
+    events = []
+    for row in soup.select("table tr"):
+        cols = row.select("td")
+        if len(cols) < 3:
+            continue
+        title = re.sub(r"\s+", " ", cols[0].get_text(" ", strip=True)).strip()
+        date_text = cols[-1].get_text(strip=True)
+        try:
+            disclosed_at = dt.strptime(date_text, "%Y.%m.%d")
+        except (TypeError, ValueError):
+            continue
+        if disclosed_at < cutoff:
+            continue
+        events.append((disclosed_at, title))
+    events.sort(key=lambda item: item[0], reverse=True)
+    for disclosed_at, title in events:
+        normalized = re.sub(r"\s+", "", title)
+        if any(term in normalized for term in (
+                "상장유지결정", "상장폐지결정취소", "상장폐지사유해소")):
+            return {"scheduled": False, "title": title, "date": disclosed_at.strftime("%Y-%m-%d")}
+        formal_decision = bool(re.search(r"(?:\(정정\))?상장폐지$", normalized))
+        committee_decision = "상장폐지결정" in normalized and "여부결정" not in normalized
+        if formal_decision or committee_decision:
+            return {"scheduled": True, "title": title, "date": disclosed_at.strftime("%Y-%m-%d")}
+    return {"scheduled": False, "title": "", "date": ""}
+
+
+def _krx_notice_rows(html: str) -> List[Dict[str, str]]:
+    """네이버/KOSCOM 종목 공시 목록을 제목·공시일·본문 번호로 정규화한다."""
+    rows: List[Dict[str, str]] = []
+    soup = BeautifulSoup(str(html or ""), "html.parser")
+    for row in soup.select("table tr"):
+        anchor = row.select_one("a[href*='news_notice_read']")
+        if not anchor:
+            continue
+        href = str(anchor.get("href") or "")
+        number = re.search(r"(?:[?&]no=)(\d+)", href)
+        if not number:
+            continue
+        title = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
+        date_match = re.search(r"20\d{2}[.]\d{1,2}[.]\d{1,2}", row.get_text(" ", strip=True))
+        rows.append({
+            "notice_no": number.group(1),
+            "title": title,
+            "date": date_match.group(0).replace(".", "-") if date_match else "",
+        })
+    return rows
+
+
+def _parse_krx_halt_release_content(
+        content: str, today: Optional[str] = None) -> Dict[str, str]:
+    """거래정지 공시의 명시 해제일 또는 조건부 종료 사유를 추출한다.
+
+    현재도 거래정지인 종목에 과거 해제일을 잘못 노출하지 않도록 오늘 이전
+    날짜는 폐기한다. 공시에 날짜가 없으면 임의 추정 대신 조건과 '미정'을 반환한다.
+    """
+    text_value = BeautifulSoup(str(content or ""), "html.parser").get_text(" ", strip=True)
+    text_value = re.sub(r"\s+", " ", text_value).strip()
+    result = {
+        "halt_release_date": "", "halt_release_time": "",
+        "halt_release_label": "해제일 미정", "halt_release_condition": "",
+        "halt_release_basis": "정보 없음",
     }
+    if not text_value:
+        return result
+    today_value = str(today or _krx_session_date())
+    field_pattern = re.compile(r"(?:매매거래정지해제일|정지해제일|해제일시|만료일시)\s*[:：]?\s*", re.I)
+    fields = list(field_pattern.finditer(text_value))
+    for field in fields:
+        segment = text_value[field.end():field.end() + 320]
+        # 다음 번호 항목이나 표의 다음 주요 필드가 시작되기 전까지만 사용한다.
+        segment = re.split(
+            r"\s+(?:\d+[.]\s*|근거규정|정지사유|매매거래정지일|기타 투자판단에 참고할 사항)",
+            segment, maxsplit=1,
+        )[0]
+        date_match = re.search(
+            r"(20\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})\s*일?"
+            r"(?:\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})?\s*분?)?",
+            segment,
+        )
+        if date_match:
+            year, month, day = (int(date_match.group(i)) for i in range(1, 4))
+            try:
+                release_date = datetime.date(year, month, day).isoformat()
+            except ValueError:
+                release_date = ""
+            if release_date and release_date >= today_value:
+                hour = date_match.group(4)
+                minute = date_match.group(5)
+                release_time = ""
+                if hour is not None:
+                    release_time = f"{int(hour):02d}:{int(minute or 0):02d}"
+                result.update({
+                    "halt_release_date": release_date,
+                    "halt_release_time": release_time,
+                    "halt_release_label": f"{release_date}{' ' + release_time if release_time else ''}",
+                    "halt_release_basis": "공시 명시",
+                })
+                return result
+        condition_match = re.search(
+            r"([^.;]{0,180}?(?:확인|결정|해소|종료|해제)[^.;]{0,100}?(?:시까지|때까지))",
+            segment,
+        )
+        if condition_match:
+            condition = re.sub(r"^[\s\-–—:]+|[\s\-–—:]+$", "", condition_match.group(1))
+            result.update({
+                "halt_release_condition": condition,
+                "halt_release_basis": "조건부·미정",
+            })
+            return result
+    return result
+
+
+def _fetch_krx_halt_release_guidance(
+        code: str, first_notice_html: str = "") -> Dict[str, str]:
+    """최근 거래정지 공시를 역순으로 확인해 해제일 안내를 구성한다."""
+    candidates: List[Dict[str, str]] = []
+    for page in range(1, 4):
+        html = first_notice_html if page == 1 else ""
+        if not html:
+            try:
+                response = requests.get(
+                    "https://finance.naver.com/item/news_notice.naver",
+                    params={"code": code, "page": page},
+                    headers=_KRX_SEARCH_HEADERS, timeout=6,
+                )
+                response.raise_for_status()
+                response.encoding = "euc-kr"
+                html = response.text
+            except Exception:
+                continue
+        for notice in _krx_notice_rows(html):
+            normalized = re.sub(r"\s+", "", notice.get("title") or "")
+            if "거래정지" not in normalized:
+                continue
+            # 이미 끝난 순수 해제 공시는 현재 거래정지의 예상 해제 근거가 아니다.
+            if "정지해제" in normalized and "정지및정지해제" not in normalized:
+                continue
+            candidates.append(notice)
+    for notice in candidates[:10]:
+        try:
+            response = requests.get(
+                "https://finance.naver.com/item/news_notice_read_content.naver",
+                params={"no": notice["notice_no"]},
+                headers=_KRX_SEARCH_HEADERS, timeout=6,
+            )
+            response.raise_for_status()
+            response.encoding = "euc-kr"
+            guidance = _parse_krx_halt_release_content(response.text)
+        except Exception:
+            continue
+        if guidance.get("halt_release_date") or guidance.get("halt_release_condition"):
+            guidance.update({
+                "halt_release_source_title": notice.get("title") or "",
+                "halt_release_notice_date": notice.get("date") or "",
+            })
+            return guidance
+    return {
+        "halt_release_date": "", "halt_release_time": "",
+        "halt_release_label": "해제일 미정", "halt_release_condition": "",
+        "halt_release_basis": "정보 없음", "halt_release_source_title": "",
+        "halt_release_notice_date": "",
+    }
+
+
+@ttl_cache(120)
+def _fetch_krx_security_detail_status(code: str) -> Dict[str, Any]:
+    """종목별 실시간 거래상태·신규상장·최근 상장폐지 공시를 확인한다."""
+    code = str(code or "").strip().upper()
+    result: Dict[str, Any] = {
+        "code": code, "available": False, "management": False,
+        "trading_halt": False, "delisting_scheduled": False,
+        "newly_listed": False, "listed_date": "", "errors": [],
+    }
+    if not _is_krx_short_code(code):
+        result["errors"].append("KRX 단축코드 형식 오류")
+        return result
+    notice_html = ""
+    try:
+        response = requests.get(
+            f"https://m.stock.naver.com/api/stock/{quote(code)}/basic",
+            headers=_KRX_SEARCH_HEADERS, timeout=6,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        trade_stop = payload.get("tradeStopType") or {}
+        trade_name = str(trade_stop.get("name") or "").upper()
+        tradable = str(payload.get("tradableStatus") or "").lower()
+        result.update({
+            "available": True,
+            "name": payload.get("stockName") or "",
+            "trade_status": trade_name,
+            "tradable_status": payload.get("tradableStatus"),
+            "tradable_status_code": payload.get("tradableStatusCode"),
+            "trading_halt": (
+                trade_name not in {"", "TRADING", "NORMAL"}
+                or tradable not in {"", "tradable"}
+            ),
+            "newly_listed": bool(payload.get("newlyListed")),
+        })
+    except Exception as exc:
+        result["errors"].append(f"basic: {exc}")
+
+    try:
+        response = requests.get(
+            "https://finance.naver.com/item/main.naver",
+            params={"code": code}, headers=_KRX_SEARCH_HEADERS, timeout=6,
+        )
+        response.raise_for_status()
+        response.encoding = "euc-kr"
+        result["management"] = bool(
+            BeautifulSoup(response.text, "html.parser").select_one("em.manage")
+        )
+        result["available"] = True
+    except Exception as exc:
+        result["errors"].append(f"management: {exc}")
+
+    try:
+        response = requests.get(
+            "https://finance.naver.com/item/news_notice.naver",
+            params={"code": code, "page": 1}, headers=_KRX_SEARCH_HEADERS, timeout=6,
+        )
+        response.raise_for_status()
+        response.encoding = "euc-kr"
+        notice_html = response.text
+        delisting = _parse_krx_delisting_notice(notice_html)
+        result.update({
+            "delisting_scheduled": bool(delisting.get("scheduled")),
+            "delisting_notice_title": delisting.get("title") or "",
+            "delisting_notice_date": delisting.get("date") or "",
+            "available": True,
+        })
+    except Exception as exc:
+        result["errors"].append(f"notice: {exc}")
+    if result.get("trading_halt"):
+        try:
+            result.update(_fetch_krx_halt_release_guidance(code, notice_html))
+        except Exception as exc:
+            result["errors"].append(f"halt_release: {exc}")
+    if result.get("newly_listed") and not result.get("listed_date"):
+        result["listed_date"] = _krx_session_date()
+    result["as_of"] = dt.now().isoformat()
+    return result
+
+
+def _extract_unique_trading_dates(data: Any) -> List[str]:
+    """DataFrame 또는 기존 분석 dict에서 중복 없는 실제 거래일을 추출한다."""
+    values: Any = []
+    if isinstance(data, pd.DataFrame):
+        values = list(data.index)
+    elif isinstance(data, dict):
+        values = data.get("Date")
+        if values is None:
+            values = data.get("Dates")
+        if values is None:
+            values = []
+    elif isinstance(data, (list, tuple, set, pd.Index, pd.Series)):
+        values = data
+    unique = set()
+    for value in values:
+        try:
+            parsed = pd.Timestamp(value)
+            if pd.isna(parsed):
+                continue
+            unique.add(parsed.date().isoformat())
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return sorted(unique)
+
+
+@ttl_cache(600)
+def _fetch_krx_listing_daily_history(
+        ticker: str, listed_date: str) -> Tuple[Tuple[str, float], ...]:
+    """상장일부터 현재까지의 일봉 날짜·종가를 단기 화면 기간과 분리해 조회한다."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(listed_date or "")):
+        return ()
+    try:
+        age_days = (datetime.date.fromisoformat(_krx_session_date()) -
+                    datetime.date.fromisoformat(listed_date)).days
+    except ValueError:
+        return ()
+    # 120거래일을 넉넉히 지난 종목은 별도 네트워크 조회가 필요 없다.
+    if age_days > 250:
+        return ()
+    symbol = str(ticker or "").strip().upper()
+    candidates = [symbol]
+    if symbol.endswith(".KS"):
+        candidates.append(symbol[:-3] + ".KQ")
+    elif symbol.endswith(".KQ"):
+        candidates.append(symbol[:-3] + ".KS")
+    for candidate in candidates:
+        try:
+            end_date = (
+                datetime.date.fromisoformat(_krx_session_date()) + timedelta(days=1)
+            ).isoformat()
+            frame = yf.Ticker(candidate).history(
+                start=listed_date, end=end_date, interval="1d", auto_adjust=True
+            )
+            rows = []
+            if frame is not None and not frame.empty and "Close" in frame:
+                for index_value, close_value in frame["Close"].items():
+                    try:
+                        date_value = pd.Timestamp(index_value).date().isoformat()
+                        close_number = float(close_value)
+                        if date_value >= listed_date and math.isfinite(close_number) and close_number > 0:
+                            rows.append((date_value, close_number))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+            if rows:
+                # 공급자 데이터 중복 시 해당 거래일의 마지막 종가를 사용한다.
+                return tuple(sorted(dict(rows).items()))
+        except Exception:
+            continue
+    return ()
+
+
+def _fetch_krx_listing_trading_dates(ticker: str, listed_date: str) -> Tuple[str, ...]:
+    """기존 호출부 호환용: 신규 상장 일봉 이력에서 거래일만 반환한다."""
+    return tuple(date for date, _close in _fetch_krx_listing_daily_history(ticker, listed_date))
+
+
+def _extract_daily_close_series(data: Any) -> List[float]:
+    """일봉·분봉 입력을 거래일별 마지막 유효 종가 시계열로 정규화한다."""
+    rows: Dict[str, float] = {}
+    if isinstance(data, pd.DataFrame) and "Close" in data:
+        iterator = data["Close"].items()
+    elif isinstance(data, dict):
+        dates = data.get("Date")
+        if dates is None:
+            dates = data.get("Dates")
+        closes = data.get("Close")
+        if dates is None or closes is None:
+            return []
+        iterator = zip(dates, closes)
+    elif isinstance(data, (list, tuple)) and data and isinstance(data[0], (list, tuple)):
+        iterator = data
+    else:
+        return []
+    for date_value, close_value in iterator:
+        try:
+            date_key = pd.Timestamp(date_value).date().isoformat()
+            close_number = float(close_value)
+            if math.isfinite(close_number) and close_number > 0:
+                rows[date_key] = close_number
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return [rows[key] for key in sorted(rows)]
+
+
+def _prediction_history_confidence_profile(
+        close_prices: Any, available_trading_days: Optional[int] = None) -> Dict[str, Any]:
+    """거래일 단계 상한과 워크포워드 검증 기반 최적 관측 일수를 계산한다.
+
+    후보 관측 구간은 20일부터 5거래일 간격으로 탐색한다. 각 과거 시점에서
+    해당 구간의 로그가격 추세만 사용해 다음 거래일 방향을 예측하므로 미래
+    데이터를 현재 예측에 섞지 않는다. 표본이 적은 적중률은 50%로 축소한다.
+    """
+    if isinstance(close_prices, np.ndarray):
+        raw_prices = close_prices.tolist()
+    else:
+        raw_prices = list(close_prices or [])
+    prices = []
+    for value in raw_prices:
+        try:
+            number = float(value)
+            if math.isfinite(number) and number > 0:
+                prices.append(number)
+        except (TypeError, ValueError):
+            continue
+    count = int(available_trading_days if available_trading_days is not None else len(prices))
+    count = max(0, count)
+    if count < 20:
+        stage, stage_cap = "under_20", 45
+    elif count < 60:
+        stage, stage_cap = "under_60", 60
+    elif count < 120:
+        stage, stage_cap = "under_120", 75
+    else:
+        stage, stage_cap = "sufficient", 90
+    result: Dict[str, Any] = {
+        "available_trading_days": count,
+        "stage": stage,
+        "stage_confidence_cap": stage_cap,
+        "optimal_lookback_days": None,
+        "validation_points": 0,
+        "validation_hit_rate": None,
+        "validation_score": None,
+        "validation_confidence_cap": None,
+        "confidence_cap": stage_cap,
+        "method": "워크포워드 로그가격 추세 검증 · 5거래일 간격 후보 · 소표본 축소",
+    }
+    n_prices = len(prices)
+    # 후보 하나당 최소 12회의 다음 거래일 검증을 남겨 극소 표본 최적화를 막는다.
+    max_window = min(250, n_prices - 12)
+    if max_window < 20:
+        result["cap_reason"] = (
+            f"가격 이력 {count}거래일로 20거래일 최소 검증 구간을 충족하지 못해 "
+            f"신뢰도 상한을 {stage_cap}%로 제한"
+        )
+        return result
+
+    candidates = set(range(20, max_window + 1, 5))
+    candidates.update(window for window in (20, 60, 120) if window <= max_window)
+    candidate_results = []
+    log_prices = np.log(np.asarray(prices, dtype=float))
+    for window in sorted(candidates):
+        predicted: List[int] = []
+        actual: List[int] = []
+        evaluation_start = max(window - 1, n_prices - 121)
+        for end in range(evaluation_start, n_prices - 1):
+            sample = log_prices[end - window + 1:end + 1]
+            if len(sample) != window:
+                continue
+            x_axis = np.arange(window, dtype=float)
+            try:
+                slope = float(np.polyfit(x_axis, sample, 1)[0])
+            except (TypeError, ValueError, np.linalg.LinAlgError):
+                continue
+            next_return = float(log_prices[end + 1] - log_prices[end])
+            if not math.isfinite(slope) or not math.isfinite(next_return) or next_return == 0:
+                continue
+            predicted.append(1 if slope >= 0 else -1)
+            actual.append(1 if next_return > 0 else -1)
+        points = len(actual)
+        if points < 12:
+            continue
+        hits = [1.0 if pred == observed else 0.0 for pred, observed in zip(predicted, actual)]
+        hit_rate = float(np.mean(hits))
+        recent_hits = hits[-min(20, points):]
+        recent_rate = float(np.mean(recent_hits))
+        midpoint = max(1, points // 2)
+        first_rate = float(np.mean(hits[:midpoint]))
+        second_rate = float(np.mean(hits[midpoint:])) if hits[midpoint:] else first_rate
+        stability = max(0.0, 1.0 - abs(first_rate - second_rate))
+        shrink = points / (points + 20.0)
+        shrunk_hit = 0.5 + (hit_rate - 0.5) * shrink
+        recent_shrink = len(recent_hits) / (len(recent_hits) + 20.0)
+        shrunk_recent = 0.5 + (recent_rate - 0.5) * recent_shrink
+        score = 0.55 * shrunk_hit + 0.30 * shrunk_recent + 0.15 * stability
+        candidate_results.append({
+            "window": window, "points": points, "hit_rate": hit_rate,
+            "recent_hit_rate": recent_rate, "stability": stability, "score": score,
+        })
+    if not candidate_results:
+        result["cap_reason"] = (
+            f"가격 이력 {count}거래일의 검증 표본이 부족해 단계 상한 {stage_cap}%를 적용"
+        )
+        return result
+    # 동점이면 검증 표본이 많고 관측 일수가 짧은 후보를 선택해 과적합을 억제한다.
+    best = max(candidate_results, key=lambda item: (
+        round(item["score"], 8), item["points"], -item["window"]
+    ))
+    selection_penalty = min(
+        0.10,
+        math.sqrt(math.log(max(2, len(candidate_results))) / max(2.0, 2.0 * best["points"])) * 0.25,
+    )
+    adjusted_score = max(0.0, best["score"] - selection_penalty)
+    validation_cap = int(round(max(50.0, min(95.0, 50.0 + adjusted_score * 45.0))))
+    final_cap = min(stage_cap, validation_cap)
+    result.update({
+        "optimal_lookback_days": int(best["window"]),
+        "validation_points": int(best["points"]),
+        "validation_hit_rate": round(best["hit_rate"] * 100.0, 1),
+        "validation_score": round(adjusted_score * 100.0, 1),
+        "selection_penalty": round(selection_penalty * 100.0, 1),
+        "validation_confidence_cap": validation_cap,
+        "confidence_cap": final_cap,
+        "candidate_count": len(candidate_results),
+        "cap_reason": (
+            f"신규 상장 데이터 {count}거래일 · 단계 상한 {stage_cap}% · "
+            f"워크포워드 최적 관측 {best['window']}거래일"
+            f"(검증 {best['points']}회, 방향 일치 {best['hit_rate'] * 100.0:.1f}%) → "
+            f"최종 신뢰도 상한 {final_cap}%"
+        ),
+    })
+    return result
+
+
+def _build_listing_history_status(
+        data: Any, listed_date: str, today: Optional[str] = None) -> Dict[str, Any]:
+    """신규 상장 분석 데이터의 20·60·120거래일 충족 단계를 계산한다."""
+    listed_date = str(listed_date or "").strip()
+    today_value = str(today or _krx_session_date())
+    base = {
+        "applicable": False, "listed_date": listed_date,
+        "available_trading_days": 0, "stage": "unknown", "stage_label": "",
+        "next_threshold": None, "remaining_trading_days": None,
+        "data_sufficient": False, "warning": "",
+    }
+    try:
+        listed_day = datetime.date.fromisoformat(listed_date)
+        today_day = datetime.date.fromisoformat(today_value)
+    except ValueError:
+        return base
+    if listed_day > today_day:
+        return base
+    dates = [date for date in _extract_unique_trading_dates(data)
+             if listed_date <= date <= today_value]
+    count = len(dates)
+    base.update({"applicable": True, "available_trading_days": count})
+    if count < 20:
+        threshold, stage, label = 20, "under_20", "20거래일 미만"
+        limitation = "MA20·MA60·MA120과 단기·중기·장기 패턴의 신뢰도가 제한됩니다."
+    elif count < 60:
+        threshold, stage, label = 60, "under_60", "20~59거래일"
+        limitation = "MA20은 계산 가능하지만 MA60·MA120과 중기·장기 패턴의 신뢰도가 제한됩니다."
+    elif count < 120:
+        threshold, stage, label = 120, "under_120", "60~119거래일"
+        limitation = "MA20·MA60은 계산 가능하지만 MA120과 장기 추세 판단의 신뢰도가 제한됩니다."
+    else:
+        base.update({
+            "stage": "sufficient", "stage_label": "120거래일 이상",
+            "data_sufficient": True,
+        })
+        return base
+    remaining = threshold - count
+    base.update({
+        "stage": stage, "stage_label": label,
+        "next_threshold": threshold, "remaining_trading_days": remaining,
+        "warning": (
+            f"신규 상장 후 확보 데이터 {count}거래일 · {label} 단계: {limitation} "
+            f"다음 기준({threshold}거래일)까지 {remaining}거래일이 더 필요합니다."
+        ),
+    })
+    return base
+
+
+def _compose_krx_security_status(
+        code: str, record: Optional[Dict] = None, flags: Optional[Dict] = None,
+        directory_detail: Optional[Dict] = None,
+        live_detail: Optional[Dict] = None) -> Dict[str, Any]:
+    record = record or {}
+    flags = flags or {}
+    directory_detail = directory_detail or {}
+    live_detail = live_detail or {}
+    management = bool(flags.get("management") or live_detail.get("management"))
+    trading_halt = bool(flags.get("trading_halt") or live_detail.get("trading_halt"))
+    delisting = bool(live_detail.get("delisting_scheduled"))
+    newly_listed = bool(record.get("is_new_listing") or live_detail.get("newly_listed"))
+    listed_date = str(record.get("listed_date") or live_detail.get("listed_date") or "")
+    release_date = str(live_detail.get("halt_release_date") or "")
+    release_time = str(live_detail.get("halt_release_time") or "")
+    release_label = str(live_detail.get("halt_release_label") or "해제일 미정")
+    release_condition = str(live_detail.get("halt_release_condition") or "")
+    release_basis = str(live_detail.get("halt_release_basis") or "정보 없음")
+    warnings_list = []
+    labels = []
+    if delisting:
+        labels.append("상장폐지 예정")
+        warnings_list.append("상장폐지 결정 또는 절차 진행 공시가 확인되어 분석을 차단했습니다.")
+    if trading_halt:
+        labels.append("거래정지")
+        warnings_list.append("현재 거래정지 또는 주문 불가 상태로 분석을 차단했습니다.")
+        if release_date:
+            warnings_list.append(f"거래정지 예상 해제일: {release_label} (공시 명시).")
+        elif release_condition:
+            warnings_list.append(f"거래정지 예상 해제일: 미정 · {release_condition}.")
+        else:
+            warnings_list.append("거래정지 예상 해제일: 미정 · 후속 거래소 공시 확인이 필요합니다.")
+    if management:
+        labels.append("관리종목")
+        warnings_list.append("관리종목입니다. 정보 조회는 가능하지만 신규 진입 판단에는 각별한 주의가 필요합니다.")
+    if newly_listed:
+        labels.append("신규상장")
+        warnings_list.append("당일 신규 상장 종목으로 과거 데이터가 부족할 수 있습니다.")
+    blocked = delisting or trading_halt
+    block_reason = " · ".join(label for label in labels if label in {"상장폐지 예정", "거래정지"})
+    return {
+        "code": str(code or "").upper(),
+        "management": management,
+        "trading_halt": trading_halt,
+        "delisting_scheduled": delisting,
+        "newly_listed": newly_listed,
+        "listed_date": listed_date,
+        "analysis_blocked": blocked,
+        "block_reason": block_reason,
+        "status_labels": labels,
+        "warnings": warnings_list,
+        "management_date": directory_detail.get("management_date") or "",
+        "trading_halt_date": directory_detail.get("trading_halt_date") or "",
+        "halt_release_date": release_date,
+        "halt_release_time": release_time,
+        "halt_release_label": release_label if trading_halt else "",
+        "halt_release_condition": release_condition,
+        "halt_release_basis": release_basis,
+        "halt_release_source_title": live_detail.get("halt_release_source_title") or "",
+        "halt_release_notice_date": live_detail.get("halt_release_notice_date") or "",
+        "delisting_notice_title": live_detail.get("delisting_notice_title") or "",
+        "delisting_notice_date": live_detail.get("delisting_notice_date") or "",
+        "status_available": bool(flags or live_detail.get("available")),
+        "as_of": live_detail.get("as_of") or "",
+    }
+
+
+def get_krx_security_status(code: str) -> Dict[str, Any]:
+    code = str(code or "").split(".", 1)[0].strip().upper()
+    directory = _krx_status_directory()
+    record = next((item for item in get_krx_security_universe()
+                   if item.get("code") == code), {})
+    live_detail = _fetch_krx_security_detail_status(code)
+    status = _compose_krx_security_status(
+        code, record, (directory.get("flags") or {}).get(code),
+        (directory.get("details") or {}).get(code), live_detail,
+    )
+    if status["newly_listed"] and not record:
+        remote = _exact_krx_remote_match(code)
+        if remote:
+            _promote_new_krx_listing(remote)
+    return status
+
+
+def _enrich_krx_suggestion_status(items: List[Dict], query: str) -> List[Dict]:
+    krx_items = [item for item in items if item.get("market") == "KRX"]
+    if not krx_items:
+        return items
+    directory = _krx_status_directory()
+    flags_by_code = directory.get("flags") or {}
+    directory_details = directory.get("details") or {}
+    universe = {record["code"]: record for record in get_krx_security_universe()}
+    query_fold = str(query or "").strip().casefold()
+    need_detail = []
+    for item in krx_items:
+        code = item.get("code") or ""
+        flags = flags_by_code.get(code) or {}
+        exact = query_fold in {str(code).casefold(), str(item.get("name") or "").casefold()}
+        if flags.get("management") or flags.get("trading_halt") or exact or code not in universe:
+            need_detail.append(code)
+    detail_by_code: Dict[str, Dict] = {}
+    if need_detail:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(need_detail))) as executor:
+            for code, detail in zip(need_detail, executor.map(
+                    _fetch_krx_security_detail_status, need_detail)):
+                detail_by_code[code] = detail
+    for item in krx_items:
+        code = item.get("code") or ""
+        record = universe.get(code) or {}
+        status = _compose_krx_security_status(
+            code, record, flags_by_code.get(code), directory_details.get(code),
+            detail_by_code.get(code),
+        )
+        item.update({
+            "management": status["management"],
+            "trading_halt": status["trading_halt"],
+            "delisting_scheduled": status["delisting_scheduled"],
+            "newly_listed": status["newly_listed"],
+            "analysis_blocked": status["analysis_blocked"],
+            "block_reason": status["block_reason"],
+            "status_labels": status["status_labels"],
+            "status_warnings": status["warnings"],
+            "halt_release_date": status["halt_release_date"],
+            "halt_release_time": status["halt_release_time"],
+            "halt_release_label": status["halt_release_label"],
+            "halt_release_condition": status["halt_release_condition"],
+            "halt_release_basis": status["halt_release_basis"],
+        })
+        if status["newly_listed"] and not record:
+            promoted = _build_krx_security_record(
+                code, item.get("name"),
+                "KOSDAQ" if str(item.get("ticker") or "").endswith(".KQ") else "KOSPI",
+                item.get("security_type") or "STOCK", _krx_session_date(),
+            )
+            if promoted:
+                _promote_new_krx_listing(promoted)
+    return items
+
+def resolve_ticker(q: str):
+    """종목명 / 코드 / 별칭 → (yfinance_ticker, market, display_name)
+
+    우선순위 (빠른 오프라인 조회 우선, 단건 외부 API는 장애 복구용):
+    1. COMMON_ALIASES  — 별칭·줄임말
+    2. US_STOCK_MAPPING — 한국어 미국 종목명
+    3. 6자리 KRX 코드 — 정적 목록 → 전체 KRX 마스터 → 단건 조회
+    4. 전체 ASCII    — US ticker 직접 입력
+    5. KR_STOCK_MAP 완전 일치 (오프라인, KQ/KS 올바름)  ← 핵심 추가
+    6. KRX API 완전 일치 (전체 상장 종목, 네트워크 필요)
+    7. KRX API 전방 일치
+    8. KR_STOCK_MAP 전방 일치 (KRX API 실패 시 최종 폴백)  ← 핵심 추가
+    """
+    q = q.strip()
+    if not q:
+        return None, None, None
+
+    # ── 1. 별칭 / 줄임말 ─────────────────────────────────────────────
+    if q in COMMON_ALIASES:
+        code = COMMON_ALIASES[q]
+        for name, tkr in KR_STOCK_MAP.items():
+            if tkr.startswith(code + "."):
+                return tkr, "KRX", q
+        try:
+            n2c, c2n = get_krx_code_map()
+            company = c2n.get(code)
+            if company and company in n2c:
+                return n2c[company], "KRX", q
+        except Exception:
+            pass
+        remote = _exact_krx_remote_match(code)
+        return ((remote["ticker"], "KRX", q) if remote else (None, None, None))
+
+    # ── 2. 한국어 미국 종목명 ─────────────────────────────────────────
+    if q in US_STOCK_MAPPING:
+        return US_STOCK_MAPPING[q], "US", q
+
+    # ── 3. 6자리 숫자 코드 ───────────────────────────────────────────
+    if q.isdigit() and len(q) == 6:
+        # KR_STOCK_MAP 역조회 (오프라인, 빠름)
+        for name, tkr in KR_STOCK_MAP.items():
+            if tkr.startswith(q + "."):
+                return tkr, "KRX", name
+        # 전체 KRX 마스터(주식·ETF·ETN) 조회
+        try:
+            n2c, c2n = get_krx_code_map()
+        except Exception:
+            n2c, c2n = {}, {}
+        company = c2n.get(q)
+        if company and company in n2c:
+            return n2c[company], "KRX", company
+        # 전체 목록 수집 실패 시에도 코스닥 코드를 임의로 .KS 처리하지 않는다.
+        remote = _exact_krx_remote_match(q)
+        if remote:
+            return remote["ticker"], "KRX", remote["name"]
+        return None, None, None
+
+    # 최근 KRX 단축코드에는 영문자가 포함될 수 있다(ETF 등).
+    qu = q.upper()
+    if _is_krx_short_code(qu) and any(char.isdigit() for char in qu):
+        for name, tkr in KR_STOCK_MAP.items():
+            if tkr.upper().startswith(qu + "."):
+                return tkr, "KRX", name
+        try:
+            n2c, c2n = get_krx_code_map()
+        except Exception:
+            n2c, c2n = {}, {}
+        company = c2n.get(qu)
+        if company and company in n2c:
+            return n2c[company], "KRX", company
+        remote = _exact_krx_remote_match(qu)
+        if remote:
+            return remote["ticker"], "KRX", remote["name"]
+
+    # ── 3.5. 한국 시장 접미사(.KS/.KQ) 부착 코드 → KRX 직접 처리 ──────
+    #   "041510.KQ" / "000660.KS" 처럼 접미사가 붙은 완전한 KR 티커가
+    #   규칙 4(전체 ASCII → US)로 US 종목으로 오분류되는 것을 방지한다.
+    #   (🔬 스캔 엔진 결과 클릭 시 전달되는 형식 — 직접 검색과 동일 동작 보장)
+    if qu.endswith((".KS", ".KQ")):
+        code = qu[:-3]
+        if _is_krx_short_code(code):
+            # 표시용 한글 종목명: KR_STOCK_MAP 역조회 → KRX API 폴백 (없으면 코드)
+            for nm, tkr in KR_STOCK_MAP.items():
+                if tkr.upper() == qu or tkr.startswith(code + "."):
+                    return qu, "KRX", nm
+            try:
+                _, c2n = get_krx_code_map()
+            except Exception:
+                c2n = {}
+            company = c2n.get(code)
+            if not company:
+                remote = _exact_krx_remote_match(code)
+                company = remote["name"] if remote else code
+            return qu, "KRX", company
+
+    # ── 4. 전체 ASCII → US ticker 직접 입력 ──────────────────────────
+    if all(ord(c) < 128 for c in q):
+        return q.upper(), "US", q.upper()
+
+    # ── 5. KR_STOCK_MAP 완전 일치 (오프라인, KQ/KS 정확) ─────────────
+    if q in KR_STOCK_MAP:
+        return KR_STOCK_MAP[q], "KRX", q
+
+    # ── 6~7. KRX 마스터 (전체 상장 주식·ETF·ETN) ───────────────────
+    try:
+        n2c, _ = get_krx_code_map()
+    except Exception:
+        n2c = {}
+    if q in n2c:
+        return n2c[q], "KRX", q
+    for name, ticker in n2c.items():
+        if name.startswith(q):
+            return ticker, "KRX", name
+
+    # ── 8. KR_STOCK_MAP 전방 일치 (KRX API 실패 시 최종 폴백) ────────
+    for name, tkr in KR_STOCK_MAP.items():
+        if name.startswith(q):
+            return tkr, "KRX", name
+
+    # 전체 마스터가 비었거나 신규 상장 직후인 경우 단건 자동완성으로 복구한다.
+    remote = _exact_krx_remote_match(q)
+    if remote:
+        return remote["ticker"], "KRX", remote["name"]
+    for remote in search_krx_security_remote(q):
+        if remote["name"].casefold().startswith(q.casefold()):
+            return remote["ticker"], "KRX", remote["name"]
+
+    return None, None, None
+
+
+def search_stock_suggestions(q: str, limit: int = 12) -> List[Dict]:
+    """국내 종목명·코드와 미국 종목명·티커의 부분일치 자동완성 목록."""
+    query = re.sub(r"\s+", " ", str(q or "")).strip()
+    if not query:
+        return []
+    limit = max(1, min(int(limit or 12), 20))
+    query_fold = query.casefold()
+    query_upper = query.upper()
+    ranked: list[tuple[int, Dict]] = []
+    seen_tickers: set[str] = set()
+
+    def _append(rank: int, *, name: str, ticker: str, market: str, exchange: str,
+                security_type: str = "", is_leveraged: bool = False,
+                is_inverse: bool = False):
+        ticker = str(ticker or "").strip().upper()
+        name = str(name or ticker).strip()
+        if not ticker or ticker in seen_tickers:
+            return
+        seen_tickers.add(ticker)
+        code = ticker.split(".", 1)[0] if market == "KRX" else ticker
+        item = {
+            "name": name,
+            "ticker": ticker,
+            "code": code,
+            "market": market,
+            "exchange": exchange,
+        }
+        if market == "KRX":
+            item.update({
+                "security_type": security_type or "STOCK",
+                "is_leveraged": bool(is_leveraged),
+                "is_inverse": bool(is_inverse),
+            })
+        ranked.append((rank, item))
+
+    # 국내: 정적 핵심 종목을 먼저 반영하고 KRX 전체 상장사 목록으로 보완한다.
+    static_krx = globals().get("KR_STOCK_MAP", {})
+    krx_universe = {}
+    try:
+        krx_universe.update(get_krx_code_map()[0])
+    except Exception:
+        pass
+    krx_universe.update(static_krx)
+    try:
+        krx_metadata = {
+            record["ticker"]: record for record in get_krx_security_universe()
+        }
+    except Exception:
+        krx_metadata = {}
+    static_order = {name: index for index, name in enumerate(static_krx)}
+    local_krx_matches = 0
+    for name, ticker in krx_universe.items():
+        name_fold = str(name).casefold()
+        code = str(ticker).split(".", 1)[0]
+        if query_fold == name_fold or query_upper == code:
+            rank = 0
+        elif name in static_order and (query_fold in name_fold or code.startswith(query_upper)):
+            rank = 10 + static_order[name]
+        elif name_fold.startswith(query_fold):
+            rank = 100
+        elif code.startswith(query_upper):
+            rank = 120
+        elif query_fold in name_fold:
+            rank = 200
+        else:
+            continue
+        metadata = krx_metadata.get(str(ticker).upper(), {})
+        exchange = metadata.get("exchange") or (
+            "KOSDAQ" if str(ticker).endswith(".KQ") else "KOSPI"
+        )
+        security_type = metadata.get("security_type") or "STOCK"
+        exchange_label = (
+            f"{security_type} · {exchange}" if security_type in {"ETF", "ETN"} else exchange
+        )
+        _append(
+            rank, name=name, ticker=ticker, market="KRX", exchange=exchange_label,
+            security_type=security_type,
+            is_leveraged=metadata.get("is_leveraged", False),
+            is_inverse=metadata.get("is_inverse", False),
+        )
+        local_krx_matches += 1
+
+    # 전체 마스터 장애·신규 상장 지연 때도 입력한 코드/이름 후보는 단건으로 보완한다.
+    if local_krx_matches == 0 or _is_krx_short_code(query) or not query.isascii():
+        for remote_index, record in enumerate(search_krx_security_remote(query)):
+            name_fold = record["name"].casefold()
+            if query == record["code"] or query_fold == name_fold:
+                rank = 0
+            elif name_fold.startswith(query_fold):
+                rank = 105 + remote_index
+            elif record["code"].startswith(query_upper):
+                rank = 125 + remote_index
+            elif query_fold in name_fold:
+                rank = 205 + remote_index
+            else:
+                continue
+            _append(
+                rank, name=record["name"], ticker=record["ticker"], market="KRX",
+                exchange=record["exchange"], security_type=record["security_type"],
+                is_leveraged=record["is_leveraged"], is_inverse=record["is_inverse"],
+            )
+
+    # 해외: 한글 별칭과 로컬 유니버스로 즉시 응답 가능한 후보를 만든다.
+    ticker_names = {}
+    for name, ticker in US_STOCK_MAPPING.items():
+        ticker_names.setdefault(ticker.upper(), name)
+        if query_fold in name.casefold() or ticker.upper().startswith(query_upper):
+            rank = 20 if name.casefold().startswith(query_fold) else 80
+            _append(rank, name=name, ticker=ticker, market="US", exchange="US")
+
+    us_universe = list(dict.fromkeys(
+        list(globals().get("US_TICKERS", [])) +
+        list(globals().get("TOSS_US_UNIVERSE", []))
+    ))
+    for ticker in us_universe:
+        ticker = str(ticker).upper()
+        if ticker.startswith(query_upper):
+            _append(60, name=ticker_names.get(ticker, ticker), ticker=ticker,
+                    market="US", exchange="US")
+
+    # 영문 회사명 검색은 Yahoo Finance 검색 결과로 보강한다.
+    if query.isascii():
+        try:
+            quotes = yf.Search(query, max_results=max(10, limit * 2), news_count=0).quotes
+            us_exchanges = {"NMS", "NAS", "NYQ", "ASE", "PCX", "BTS", "NGM", "NCM", "NYS"}
+            for quote_index, quote in enumerate(quotes or []):
+                symbol = str(quote.get("symbol") or "").upper()
+                quote_type = str(quote.get("quoteType") or "").upper()
+                exchange_code = str(quote.get("exchange") or "").upper()
+                if (not symbol or symbol.endswith((".KS", ".KQ")) or
+                        quote_type not in {"EQUITY", "ETF"} or
+                        exchange_code not in us_exchanges):
+                    continue
+                name = quote.get("longname") or quote.get("shortname") or symbol
+                exact = symbol == query_upper or str(name).casefold() == query_fold
+                starts = symbol.startswith(query_upper) or str(name).casefold().startswith(query_fold)
+                rank = 1 if exact else (70 + quote_index) if starts else (180 + quote_index)
+                exchange = quote.get("exchDisp") or exchange_code or "US"
+                _append(rank, name=name, ticker=symbol, market="US", exchange=exchange)
+        except Exception:
+            pass
+
+    ranked.sort(key=lambda item: (item[0], item[1]["name"].casefold(), item[1]["ticker"]))
+    return _enrich_krx_suggestion_status(
+        [item for _, item in ranked[:limit]], query
+    )
 
 # =============================================================================
 # 지표 계산
 # =============================================================================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     c = df["Close"]
-
+    
     # 핵심 추세 지표
     for w in [5, 20, 60, 120]:
         df[f"MA{w}"] = c.rolling(w).mean()
     df["EMA20"] = c.ewm(span=20, adjust=False).mean()
     df["EMA50"] = c.ewm(span=50, adjust=False).mean()
-
+    
     # MACD (12, 26, 9)
     ema12 = c.ewm(span=12, adjust=False).mean()
     ema26 = c.ewm(span=26, adjust=False).mean()
@@ -742,299 +1711,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# =============================================================================
-# 암호화폐 데이터 수집 (Binance / CoinGecko) — 주식(yfinance) 데이터 계층 대체
-# =============================================================================
-_BINANCE_BASES = [
-    "https://api.binance.com", "https://api1.binance.com",
-    "https://api2.binance.com", "https://data-api.binance.vision",
-]
-_BINANCE_FAPI = "https://fapi.binance.com"
-_REQ_HEADERS = {"User-Agent": "CryptoOracle/3.0 (+vercel)"}
-
-def _binance_get(path: str, params: dict = None, fapi: bool = False, timeout: int = 8):
-    """Binance 공개 REST 호출 (다중 베이스 폴백)."""
-    bases = [_BINANCE_FAPI] if fapi else _BINANCE_BASES
-    last_err = None
-    for base in bases:
-        try:
-            r = requests.get(base + path, params=params, headers=_REQ_HEADERS, timeout=timeout)
-            if r.status_code == 200:
-                return r.json()
-            last_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            last_err = str(e)
-            continue
-    return None
-
-def _period_to_kline(period: str):
-    """분석 period → (Binance interval, limit). 지표 계산용 충분한 캔들 확보."""
-    table = {
-        "1d":  ("15m", 96),   "3d":  ("1h", 72),   "1wk": ("2h", 84),
-        "2wk": ("4h", 84),    "1mo": ("4h", 180),  "3mo": ("1d", 120),
-        "6mo": ("1d", 200),   "1y":  ("1d", 365),  "2y":  ("1d", 730),
-        "5y":  ("1w", 260),   "max": ("1w", 520),
-    }
-    return table.get(period, ("1d", 365))
-
-@ttl_cache(60)
-def fetch_klines(symbol: str, interval: str, limit: int):
-    """Binance 현물 klines (실패 시 None)."""
-    return _binance_get("/api/v3/klines",
-                        {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
-
-@ttl_cache(30)
-def fetch_open_interest(symbol: str):
-    """무기한 선물 오픈인터레스트 — 현물 전용 코인은 None."""
-    data = _binance_get("/fapi/v1/openInterest", {"symbol": symbol}, fapi=True)
-    if data and "openInterest" in data:
-        try:
-            return float(data["openInterest"])
-        except Exception:
-            return None
-    return None
-
-@ttl_cache(60)
-def fetch_crypto_derivatives(symbol: str) -> Dict:
-    """공개 Binance USDⓈ-M 데이터로 펀딩·포지셔닝·ADL 위험을 구성한다."""
-    sym = str(symbol or "").upper()
-    result = {
-        "available": False,
-        "symbol": sym,
-        "funding_rate": None,
-        "funding_rate_pct": None,
-        "next_funding_time": None,
-        "mark_price": None,
-        "index_price": None,
-        "basis_pct": None,
-        "long_short_ratio": None,
-        "long_account_pct": None,
-        "short_account_pct": None,
-        "adl_risk": None,
-        "probability_adjustment": 0.0,
-        "reasons": [],
-        "liquidation_source": "Binance forceOrder WebSocket",
-    }
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            premium_future = executor.submit(
-                _binance_get, "/fapi/v1/premiumIndex", {"symbol": sym}, True
-            )
-            ratio_future = executor.submit(
-                _binance_get,
-                "/futures/data/globalLongShortAccountRatio",
-                {"symbol": sym, "period": "5m", "limit": 1},
-                True,
-            )
-            adl_future = executor.submit(
-                _binance_get, "/fapi/v1/symbolAdlRisk", {"symbol": sym}, True
-            )
-            premium = premium_future.result() or {}
-            ratio_rows = ratio_future.result() or []
-            adl = adl_future.result() or {}
-
-        if isinstance(premium, dict) and premium.get("markPrice") is not None:
-            result["mark_price"] = float(premium["markPrice"])
-            result["index_price"] = float(premium.get("indexPrice") or 0) or None
-            funding = float(premium.get("lastFundingRate") or 0)
-            result["funding_rate"] = funding
-            result["funding_rate_pct"] = round(funding * 100.0, 5)
-            result["next_funding_time"] = int(premium.get("nextFundingTime") or 0) or None
-            if result["index_price"]:
-                result["basis_pct"] = round(
-                    (result["mark_price"] - result["index_price"]) / result["index_price"] * 100.0,
-                    4,
-                )
-
-        ratio = ratio_rows[-1] if isinstance(ratio_rows, list) and ratio_rows else {}
-        if isinstance(ratio, dict) and ratio.get("longShortRatio") is not None:
-            result["long_short_ratio"] = round(float(ratio["longShortRatio"]), 4)
-            result["long_account_pct"] = round(float(ratio.get("longAccount") or 0) * 100.0, 2)
-            result["short_account_pct"] = round(float(ratio.get("shortAccount") or 0) * 100.0, 2)
-
-        if isinstance(adl, dict) and adl.get("adlRisk"):
-            result["adl_risk"] = str(adl["adlRisk"]).upper()
-
-        adjustment = 0.0
-        funding_pct = result.get("funding_rate_pct")
-        if funding_pct is not None:
-            if funding_pct >= 0.05:
-                adjustment -= 2.5
-                result["reasons"].append("양(+)의 펀딩비 과열로 롱 쏠림 위험 반영")
-            elif funding_pct <= -0.05:
-                adjustment += 2.5
-                result["reasons"].append("음(-)의 펀딩비 과열로 숏 쏠림 위험 반영")
-
-        long_pct = result.get("long_account_pct")
-        if long_pct is not None:
-            if long_pct >= 60.0:
-                adjustment -= min(4.0, (long_pct - 58.0) * 0.35)
-                result["reasons"].append("전체 계정 롱 비율 과밀로 역방향 위험 반영")
-            elif long_pct <= 40.0:
-                adjustment += min(4.0, (42.0 - long_pct) * 0.35)
-                result["reasons"].append("전체 계정 숏 비율 과밀로 숏커버 가능성 반영")
-
-        result["probability_adjustment"] = round(max(-6.0, min(6.0, adjustment)), 2)
-        result["available"] = any(
-            result.get(key) is not None
-            for key in ("funding_rate_pct", "long_short_ratio", "adl_risk")
-        )
-    except Exception as exc:
-        result["error"] = str(exc)
-    return result
-
-@ttl_cache(30)
-def fetch_ticker_24h(symbol: str):
-    """24시간 티커 통계 (현재가·고저·거래량·등락률)."""
-    d = _binance_get("/api/v3/ticker/24hr", {"symbol": symbol})
-    if not d or "lastPrice" not in d:
-        return None
-    try:
-        return {
-            "price": float(d["lastPrice"]),
-            "change_pct": float(d.get("priceChangePercent", 0)),
-            "high_24h": float(d.get("highPrice", 0)),
-            "low_24h": float(d.get("lowPrice", 0)),
-            "volume_24h": float(d.get("quoteVolume", 0)),
-            "count": int(d.get("count", 0)),
-        }
-    except Exception:
-        return None
-
-@ttl_cache(60)
-def fetch_tickers_batch(symbols_tuple):
-    """여러 심볼의 24h 티커를 한 번에 조회 → {symbol: {price, change_pct, volume}}."""
-    syms = list(symbols_tuple)
-    # Binance는 symbols 파라미터에 공백 없는 압축 JSON 배열을 요구 (공백 포함 시 거부)
-    data = _binance_get("/api/v3/ticker/24hr", {"symbols": json.dumps(syms, separators=(",", ":"))})
-    out = {}
-    if isinstance(data, list):
-        for d in data:
-            try:
-                out[d["symbol"]] = {
-                    "price": float(d["lastPrice"]),
-                    "change_pct": float(d.get("priceChangePercent", 0)),
-                    "volume": float(d.get("quoteVolume", 0)),
-                }
-            except Exception:
-                continue
-    return out
-
-@ttl_cache(600)
-def fetch_fear_greed():
-    """암호화폐 공포·탐욕 지수 (alternative.me, 무료·무인증). 실패 시 None."""
-    try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=6, headers=_REQ_HEADERS)
-        if r.status_code == 200:
-            v = (r.json() or {}).get("data", [{}])[0]
-            return {"value": int(v["value"]), "label": v.get("value_classification", "")}
-    except Exception:
-        pass
-    return None
-
-# 코인 시장 개요 유니버스 (주요 코인 + 인기 알트)
-CRYPTO_OVERVIEW_UNIVERSE = (
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT",
-    "AVAXUSDT", "LINKUSDT", "TRXUSDT", "DOTUSDT", "LTCUSDT", "SUIUSDT", "BCHUSDT",
-    "NEARUSDT", "APTUSDT", "PEPEUSDT", "SHIBUSDT", "ARBUSDT", "OPUSDT",
-    "INJUSDT", "ATOMUSDT", "FILUSDT", "RENDERUSDT", "TIAUSDT", "SEIUSDT",
-)
-
-def _contains_hangul(value: str) -> bool:
-    return bool(re.search(r"[가-힣]", str(value or "")))
-
-@ttl_cache(86400)
-def _translate_to_korean(text: str) -> str:
-    """영문 뉴스 제목을 한국어로 번역한다. 실패 시 원문을 반환한다."""
-    source = html_lib.unescape(str(text or "").strip())
-    if not source or _contains_hangul(source):
-        return source
-    try:
-        response = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "auto", "tl": "ko", "dt": "t", "q": source},
-            headers=_REQ_HEADERS,
-            timeout=8,
-        )
-        if response.status_code != 200:
-            return source
-        body = response.json()
-        translated = "".join(
-            str(segment[0] or "")
-            for segment in (body[0] or [])
-            if isinstance(segment, list) and segment
-        ).strip()
-        return translated if translated and _contains_hangul(translated) else source
-    except Exception:
-        return source
-
-def _fetch_coin_news(symbol: str):
-    """코인 관련 Google News RSS (주식 뉴스 쿼리 대체)."""
-    news = []
-    if not FEEDPARSER_AVAILABLE:
-        return news
-    base = symbol
-    for q in _QUOTE_ASSETS:
-        if base.endswith(q):
-            base = base[:-len(q)]
-            break
-    try:
-        url = f"https://news.google.com/rss/search?q={quote(base + ' crypto')}&hl=en-US&gl=US&ceid=US:en"
-        entries = list(feedparser.parse(url).entries[:6])
-        titles = [html_lib.unescape(str(getattr(e, "title", "") or "").strip()) for e in entries]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(titles)))) as executor:
-            translated_titles = list(executor.map(_translate_to_korean, titles))
-        for e, original_title, title_ko in zip(entries, titles, translated_titles):
-            news.append({
-                "title": original_title,
-                "title_ko": title_ko or original_title,
-                "original_title": original_title,
-                "translation_source": "Google Translate" if title_ko and title_ko != original_title else "",
-                "link": e.link,
-                "publisher": getattr(e, "source", type("", (), {"title": "Google News"})()).title,
-                "published": getattr(e, "published", ""),
-                "source_type": "google_news",
-            })
-    except Exception:
-        pass
-    return news
-
 @ttl_cache(120)   # 2분
-def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
-    # ── 암호화폐(Binance) 경로 — 주식(yfinance) 데이터 계층 대체 ──────────────
-    sym = (ticker or "").strip().upper().replace("/", "").replace("-", "")
-    if not sym.endswith(_QUOTE_ASSETS):
-        sym = f"{sym}USDT"
-    interval, limit = _period_to_kline(period)
-    raw = fetch_klines(sym, interval, limit)
-    if not raw:
-        return None, None, f"데이터 없음: {sym}"
-    try:
-        df = pd.DataFrame(raw, columns=[
-            "t", "Open", "High", "Low", "Close", "Volume",
-            "ct", "qav", "trades", "tbb", "tbq", "ig"])
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        # 분/시간봉은 Unix초, 일/주봉은 yyyy-mm-dd 문자열 (Lightweight Charts 규격)
-        if interval.endswith(("m", "h")):
-            df["Date"] = [int(x / 1000) for x in df["t"]]
-        else:
-            df["Date"] = pd.to_datetime(df["t"], unit="ms").dt.strftime("%Y-%m-%d")
-        df = df[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
-        df = add_indicators(df)               # 검증된 공통 기술지표 엔진 재사용
-        df = df.dropna(subset=["Close"])
-        news = _fetch_coin_news(sym)
-        d = df.where(pd.notna(df), other=None).to_dict(orient="list")
-        return d, news, sym
-    except Exception as e:
-        print(f"[Coinview Error] fetch_coin_data 예외: {e}")
-        return None, None, f"조회 중 예외 발생: {str(e)}"
-
-    # ── [LEGACY · 도달 불가] 아래는 기존 yfinance 주식 경로 (비활성) ──────────
-    interval = "1d"
-    if market == "KRX" and False:
+def fetch_stock_data(ticker: str, market: str, period: str = "1y"):
+    sym = ticker.strip().upper()
+    if market == "KRX" and sym.isdigit():
         sym = f"{sym}.KS"
-
+        
     interval = "1d"
     yf_period = period
     if period == "1d":
@@ -1077,7 +1759,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
 
     try:
         obj = yf.Ticker(sym)
-
+        
         # 1. 1차 시도: 요청받은 분봉 단위로 조회
         try:
             df = obj.history(period=fetch_period, interval=interval, auto_adjust=True)
@@ -1087,7 +1769,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
                 df = pd.DataFrame()
             else:
                 raise e
-
+        
         # 코스닥 종목(.KS -> .KQ) 교체 후 재시도 로직
         if (df is None or df.empty) and market == "KRX" and sym.endswith(".KS"):
             sym = sym.replace(".KS", ".KQ")
@@ -1098,7 +1780,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
                     df = pd.DataFrame()
                 else:
                     raise e
-
+            
         # 2. 2차 시도: 분봉 조회가 실패하거나 데이터가 부족한 경우 일봉으로 Fallback
         # TypeError: 'NoneType' object is not subscriptable 오류가 발생한 경우 df가 빈 DataFrame일 수 있음
         if (df is None or df.empty or len(df) < 20) and interval != "1d":
@@ -1111,7 +1793,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
                     df = pd.DataFrame()
                 else:
                     raise e
-
+            
         if df is None or df.empty:
             return None, None, f"데이터 없음: {sym}"
         # MultiIndex 처리 (안전하게)
@@ -1124,10 +1806,10 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             return None, None, f"컬럼 누락: {missing}"
-
+            
         df = add_indicators(df)
         df = df.dropna(subset=["Close"])
-
+        
         # 원래 요청한 기간(period)에 맞게 데이터 자르기 (지표 계산 후)
         # 일봉/분봉 조회일 경우 지표 계산용 과거 데이터를 잘라내고 원래 원했던 기간만큼만 필터링
         if interval == "1d":
@@ -1154,7 +1836,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
                 target_dates = unique_dates[-21:] # 1달은 약 21영업일
             else:
                 target_dates = unique_dates
-
+            
             df = df[np.isin(df.index.date, target_dates)]
 
         # 뉴스 — 감성 분석용 헤드라인 수집: 구글 뉴스 RSS + 야후 파이낸스 RSS
@@ -1209,7 +1891,7 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
         # 분봉 데이터인 경우 인덱스 이름이 "Datetime"일 수 있으므로 "Date"로 통일
         if "Datetime" in df2.columns:
             df2.rename(columns={"Datetime": "Date"}, inplace=True)
-
+            
         # Lightweight Charts가 인식할 수 있도록 날짜를 yyyy-mm-dd 문자열 또는 Unix Timestamp 형식으로 반환해야 함
         # 일봉은 %Y-%m-%d 문자열로, 분봉은 Unix Timestamp(초 단위)로 변환
         if interval == "1d":
@@ -1221,11 +1903,11 @@ def fetch_coin_data(ticker: str, market: str, period: str = "1y"):
             # pandas 버전에 따라 astype("int64")가 나노초(2.x) 또는 초(3.x)를 반환하는
             # 호환성 문제를 방지하기 위해 Timestamp.timestamp()를 사용해 항상 초 단위로 변환
             df2["Date"] = [int(ts.timestamp()) for ts in df2["Date"]]
-
+            
         d = df2.where(pd.notna(df2), other=None).to_dict(orient="list")
         return d, news, sym
     except Exception as e:
-        print(f"[Coinview Error] fetch_coin_data 예외 발생: {e}")
+        print(f"[StockOracle Error] fetch_stock_data 예외 발생: {e}")
         return None, None, f"조회 중 예외 발생: {str(e)}"
 
 class _NasdaqFullDayHolidayCalendar(AbstractHolidayCalendar):
@@ -1585,33 +2267,6 @@ def fetch_arty_daily_data(ticker: str, market: str) -> Dict | None:
 
     required = ["Open", "High", "Low", "Close", "Volume"]
 
-    if market == "CRYPTO":
-        try:
-            rows = fetch_klines(sym, "1d", 520)
-            if not rows:
-                return None
-            result = {
-                "Open": [float(row[1]) for row in rows],
-                "High": [float(row[2]) for row in rows],
-                "Low": [float(row[3]) for row in rows],
-                "Close": [float(row[4]) for row in rows],
-                "Volume": [float(row[5]) for row in rows],
-                "Date": [dt.fromtimestamp(int(row[0]) / 1000).strftime("%Y-%m-%d") for row in rows],
-            }
-            result["_history_meta"] = {
-                "provider": "Binance Futures",
-                "requested_symbol": sym,
-                "resolved_symbol": sym,
-                "attempts": [{"symbol": sym, "period": "520d", "rows": len(rows)}],
-                "total_available_bars": len(rows),
-                "first_date": result["Date"][0],
-                "last_date": result["Date"][-1],
-                "history_exhausted": len(rows) < 220,
-            }
-            return result
-        except Exception:
-            return None
-
     def _normalize(frame):
         if frame is None or frame.empty:
             return pd.DataFrame()
@@ -1796,21 +2451,21 @@ def fetch_naver(code: str):
         }
         resp = requests.get(url, headers=hdrs, timeout=10)
         resp.raise_for_status()
-
+        
         soup = BeautifulSoup(resp.text, "html.parser")
-
+        
         # 가격 (JSON 실패시 Fallback)
         if not r["price"]:
             el = soup.select_one(".no_today .blind")
             if el: r["price"] = el.text.replace(",","")
-
+        
         # 주요 지표
         for k, s in [("market_cap","#_market_sum"),("per","#_per"),("pbr","#_pbr")]:
             e = soup.select_one(s)
             # 네이버 시가총액(#_market_sum)은 '1,882조\n\n5,017'처럼 내부 개행/공백을
             # 포함한다 → 단일 공백으로 정규화해 줄바꿈 깨짐 방지.
             r[k] = re.sub(r"\s+", " ", e.text).strip() if e else "-"
-
+            
         # 뉴스 섹션
         for item in soup.select(".news_section ul li")[:5]:
             a = item.select_one("span > a")
@@ -1839,12 +2494,12 @@ def fetch_naver(code: str):
                     ))
         except Exception:
             pass
-
+                
         # 공시 섹션 (별도 페이지 조회)
         url_notice = f"https://finance.naver.com/item/news_notice.naver?code={code}"
         resp_notice = requests.get(url_notice, headers=hdrs, timeout=5)
         soup_notice = BeautifulSoup(resp_notice.text, "html.parser")
-
+        
         for row in soup_notice.select("tbody tr")[:5]:
             title_a = row.select_one(".title a")
             date_td = row.select_one(".date")
@@ -1863,14 +2518,14 @@ def fetch_naver(code: str):
                 th = tr.select_one("th")
                 if not th: continue
                 title = th.text.strip()
-
+                
                 key = None
                 if "ROE" in title: key = "roe"
                 elif "부채비율" in title: key = "debt"
                 elif "PER" in title: key = "per"
                 elif "EPS" in title: key = "eps"
                 elif "영업이익률" in title: key = "op_margin"
-
+                
                 if key:
                     vals = []
                     for td in tr.select("td"):
@@ -1994,13 +2649,13 @@ KR_STOCK_MAP = {
 }
 
 US_TICKERS = [
-    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "BRK-B", "LLY", "AVGO", "JPM", "V", "UNH", "XOM",
-    "MA", "JNJ", "PG", "HD", "COST", "ABBV", "MRK", "ADBE", "CVX", "PEP", "KO", "BAC", "ACN", "NFLX", "LIN",
-    "MCD", "TMO", "AMD", "DIS", "ABT", "WMT", "CSCO", "INTU", "PFE", "CMCSA", "ORCL", "QCOM", "NKE", "UPS",
-    "TXN", "PM", "GE", "IBM", "AMGN", "HON", "UNP", "SBUX", "BA", "MMM", "CAT", "GS", "MS", "C", "BLK", "SPGI",
-    "AXP", "LOW", "TGT", "TJX", "CVS", "CI", "ELV", "DE", "PLD", "AMT", "NOW", "ISRG", "ZTS", "GILD", "SYK",
+    "AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "BRK-B", "LLY", "AVGO", "JPM", "V", "UNH", "XOM", 
+    "MA", "JNJ", "PG", "HD", "COST", "ABBV", "MRK", "ADBE", "CVX", "PEP", "KO", "BAC", "ACN", "NFLX", "LIN", 
+    "MCD", "TMO", "AMD", "DIS", "ABT", "WMT", "CSCO", "INTU", "PFE", "CMCSA", "ORCL", "QCOM", "NKE", "UPS", 
+    "TXN", "PM", "GE", "IBM", "AMGN", "HON", "UNP", "SBUX", "BA", "MMM", "CAT", "GS", "MS", "C", "BLK", "SPGI", 
+    "AXP", "LOW", "TGT", "TJX", "CVS", "CI", "ELV", "DE", "PLD", "AMT", "NOW", "ISRG", "ZTS", "GILD", "SYK", 
     "BKNG", "MDT", "ADP", "LRCX", "ADI", "MU", "VRTX", "REGN", "SO", "DUK", "SLB", "EOG", "COP", "MRSH", "AON",
-    "PGR", "CB", "CL", "MO", "EMR", "ETN", "ITW", "PH", "USB", "PNC", "TFC", "COF", "MET", "PRU", "ALL", "TRV",
+    "PGR", "CB", "CL", "MO", "EMR", "ETN", "ITW", "PH", "USB", "PNC", "TFC", "COF", "MET", "PRU", "ALL", "TRV", 
     "AIG", "HIG", "PLTR", "IONQ", "JOBY", "ACHR", "SOFI", "AFRM", "UPST", "RIVN", "LCID", "NKLA", "DNA", "PATH"
 ]
 
@@ -2195,7 +2850,7 @@ def fetch_investor_flow(ticker: str) -> dict:
         실패: {"ok": False, "reason": "<상세 원인>"}
     """
     code = str(ticker).replace(".KS", "").replace(".KQ", "").strip()
-    if not code.isdigit() or len(code) != 6:
+    if not _is_krx_short_code(code):
         return {"ok": False, "reason": "KRX 6자리 코드 아님"}
 
     # ── 공통 파서: 다양한 응답 구조에서 행 리스트 추출 ────────────────────
@@ -2420,47 +3075,47 @@ def fetch_metrics(item):
     try:
         t = yf.Ticker(item["ticker"])
         i = t.info
-
+        
         # Basic Price Data
         if item["market_type"] == "US":
             price, _, _ = get_us_realtime_price(t)
         else:
             fi = t.fast_info
             price = fi.last_price if hasattr(fi, 'last_price') else (i.get("currentPrice") or i.get("regularMarketPrice"))
-
+            
         if not price: return None
-
+        
         # Metadata Update
         if item["market_type"] == "US":
             item["name"] = i.get("shortName", item["name"])
         item["cat"] = i.get("sector", "Unknown")
-
+        
         # Signal (Consensus)
         rec = i.get("recommendationKey", "").lower()
         if rec == "buy": item["signal"] = "매수"
         elif rec == "strong_buy": item["signal"] = "적극 매수"
         else: item["signal"] = "중립"
-
+        
         mkt_cap = i.get("marketCap", 0)
-
+        
         # Quality Factors
-        roic = i.get("returnOnEquity", 0)
+        roic = i.get("returnOnEquity", 0) 
         debt_raw = i.get("debtToEquity", 999)
         if debt_raw is None: debt_raw = 999
         debt_ratio = debt_raw * 100 if debt_raw < 10 else debt_raw
-
+        
         fcf = i.get("freeCashflow", 0)
         if fcf is None: fcf = i.get("operatingCashflow", -1)
 
         # Value & Growth Factors
         peg = i.get("pegRatio")
         per = i.get("trailingPE")
-
+        
         if peg is None and per is not None:
             growth = i.get("earningsGrowth")
             if growth and growth > 0:
                 peg = per / (growth * 100)
-
+        
         # Profitability Init
         op_margin = i.get("operatingMargins", 0)
         eps = i.get("trailingEps", 0)
@@ -2494,19 +3149,19 @@ def fetch_metrics(item):
 
         if peg is None: peg = 999
         if per is None: per = 999
-
+        
         # Momentum Factor
         high52 = i.get("fiftyTwoWeekHigh", price)
         prox = price / high52 if high52 else 0
-
+        
         ma50 = i.get("fiftyDayAverage", 0)
         ma200 = i.get("twoHundredDayAverage", 0)
         # 정배열 조건 (가격 >= 50일선 >= 200일선)
         is_ma_aligned = (price >= ma50) and (ma50 >= ma200) and (ma200 > 0)
-
+        
         # 3-year Profit Check
         is_profitable = (op_margin is not None and op_margin > 0) or (eps is not None and eps > 0)
-
+        
         item["market_cap"] = mkt_cap
         item["roic"] = roic if roic else 0
         item["roe"]  = roic if roic else 0   # returnOnEquity 값 (소수 단위)
@@ -2522,7 +3177,7 @@ def fetch_metrics(item):
         item["is_profitable"] = is_profitable
         item["op_margin"] = op_margin
         item["earnings_growth"] = i.get("earningsGrowth", 0)
-
+        
         return item
     except:
         return None
@@ -2747,37 +3402,37 @@ def fetch_kr_toss_metrics(item: dict):
         t = yf.Ticker(ticker)
         i = t.info
         fi = t.fast_info
-
+        
         price = (fi.last_price if hasattr(fi, 'last_price') else None) or i.get("currentPrice") or i.get("regularMarketPrice")
         if not price or price <= 0: return None
-
+        
         mkt_cap = i.get("marketCap", 0)
         # 1. 시가총액: 1,000억 원 이상
         if mkt_cap < 100_000_000_000: return None
-
+            
         roic = i.get("returnOnEquity")
         debt_raw = i.get("debtToEquity")
         per = i.get("trailingPE") or i.get("forwardPE")
         op_margin = i.get("operatingMargins")
         earnings_growth = i.get("earningsGrowth")
-
+        
         # 2. 영업이익률: 직전 분기 0% 이상 (데이터 없으면 패스)
         if op_margin is not None and op_margin < 0: return None
-
+            
         # 3. ROE: 최근 1년(TTM) 10% 이상 (데이터 없으면 패스)
         if roic is not None and roic < 0.10: return None
-
+            
         # 4. PER: 0배 초과 ~ 20배 이하 (데이터 없으면 패스)
         if per is not None and not (0 < per <= 20): return None
-
+            
         # 5. 순이익 증감률: 최근 1년(TTM) 10% 이상 (데이터 없으면 패스)
         if earnings_growth is not None and earnings_growth < 0.10: return None
-
+            
         # 6. 부채비율: 직전 분기 100% 이하 (데이터 없으면 패스)
         if debt_raw is not None:
             debt_ratio = debt_raw * 100 if debt_raw < 10 else debt_raw
             if debt_ratio > 100: return None
-
+            
         # 통과 시 결과 반환
         change_pct = (i.get("regularMarketChangePercent") or 0) * 100
         sector     = i.get("sector") or i.get("industry") or "Unknown"
@@ -2790,7 +3445,7 @@ def fetch_kr_toss_metrics(item: dict):
         analyst_signal = analyst_map.get(rec_key, "중립")
         high52 = i.get("fiftyTwoWeekHigh") or price
         prox = price / high52 if high52 else 0
-
+        
         return {
             "market":       "국내",
             "ticker":       ticker,
@@ -3632,7 +4287,7 @@ def fetch_screener(sort_by: str = "price", sort_order: str = "desc") -> dict:
             res = future.result()
             if res is not None:
                 kr_processed.append(res)
-
+    
     # ── 정렬 ──────────────────────────────────────────────────
     sort_key_map = {
         "price":  "price_val",
@@ -4137,6 +4792,1032 @@ def _us_surge_score(a, pm_change_pct, rvol=0.0):
         elif k < 30: score += 3
 
     return score
+
+
+# =============================================================================
+# KR 개장 급등 추천 — 국내 장중 유동성·가격제한폭을 반영한 별도 모델
+# =============================================================================
+
+_KR_SURGE_MIN_PRICE = 1_000
+_KR_SURGE_MIN_CHANGE_PCT = 2.0
+_KR_SURGE_MIN_TURNOVER_KRW = 3_000_000_000       # 30억원
+_KR_SURGE_MIN_MARKET_CAP_KRW = 100_000_000_000   # 1,000억원
+_KR_SURGE_MAX_CHANGE_EXCLUSIVE = 29.0             # 상한가 잠김 추격 방지
+_KR_SURGE_SHORTLIST_SIZE = 24
+_KR_SURGE_RESULT_SIZE = 10
+_KR_SURGE_VI_RELEASE_COOLDOWN_SECONDS = 120
+_KR_SURGE_TRACKING_PATH = os.environ.get(
+    "KR_SURGE_TRACKING_PATH",
+    os.path.join(TMP_DIR, "stockoracle_kr_surge_tracking.json"),
+)
+_KR_SURGE_TRACKING_LOCK = threading.Lock()
+_KR_SURGE_VI_LOCK = threading.Lock()
+_KR_SURGE_VI_OBSERVATIONS: Dict[str, Dict[str, Any]] = {}
+_KR_SURGE_NAVER_API = "https://stock.naver.com/api"
+
+
+def _kr_surge_now() -> dt:
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        return dt.now(_ZI("Asia/Seoul"))
+    except Exception:
+        return dt.now()
+
+
+def _kr_surge_naver_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 StockOracle/1.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://stock.naver.com/",
+    }
+
+
+def _kr_surge_bool(value: Any) -> bool:
+    return str(value or "").strip().upper() in {"Y", "YES", "TRUE", "1", "ACTIVE", "ON"}
+
+
+def _kr_surge_vi_state(code: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """공급자 거래상태를 VI 상태로 정규화하고, 프로세스가 관측한 해제 전이를 보존한다."""
+    trade_stop = row.get("tradeStopType") or {}
+    raw_code = str(trade_stop.get("code") or "")
+    raw_name = str(trade_stop.get("name") or "")
+    raw_text = " ".join([
+        raw_code, raw_name, str(row.get("tradableStatusCode") or ""),
+        str(row.get("tradableStatus") or ""), str(row.get("marketStatus") or ""),
+    ]).upper()
+    vi_active = "VI" in raw_text or "VOLATILITY" in raw_text or "변동성완화" in raw_text
+    normal_trading = (
+        raw_name.upper() in {"", "TRADING", "NORMAL", "정상"}
+        and raw_code in {"", "0", "1"}
+        and str(row.get("tradableStatus") or "").lower() in {"", "tradable"}
+    )
+    observed_at = _kr_surge_now()
+    with _KR_SURGE_VI_LOCK:
+        previous = _KR_SURGE_VI_OBSERVATIONS.get(code) or {}
+        released_at = previous.get("released_at")
+        transition = None
+        if vi_active and not previous.get("active"):
+            transition = "발동"
+        elif not vi_active and previous.get("active"):
+            transition = "해제"
+            released_at = observed_at.isoformat()
+        _KR_SURGE_VI_OBSERVATIONS[code] = {
+            "active": vi_active,
+            "released_at": released_at,
+            "observed_at": observed_at.isoformat(),
+        }
+    seconds_since_release = None
+    if released_at:
+        try:
+            seconds_since_release = max(0, int((observed_at - dt.fromisoformat(released_at)).total_seconds()))
+        except Exception:
+            seconds_since_release = None
+    cooldown = seconds_since_release is not None and seconds_since_release < _KR_SURGE_VI_RELEASE_COOLDOWN_SECONDS
+    return {
+        "status": "active" if vi_active else ("released" if cooldown else "normal"),
+        "label": "VI 발동" if vi_active else ("VI 해제 직후" if cooldown else "VI 정상"),
+        "active": vi_active,
+        "transition": transition,
+        "released_at": released_at,
+        "seconds_since_release": seconds_since_release,
+        "cooldown_active": cooldown,
+        "provider_status": raw_name or raw_code or "미제공",
+        "provider_normal": normal_trading,
+        "observed_at": observed_at.isoformat(),
+        "transition_scope": "현재 프로세스 관측 구간",
+    }
+
+
+@ttl_cache(180)
+def _fetch_kr_surge_risk_flags() -> Dict[str, Any]:
+    """관리·시장경보 목록을 결합한다. 단기과열은 공급자 필드/연동 코드가 있을 때만 확정한다."""
+    flags: Dict[str, Dict[str, bool]] = {}
+    details: Dict[str, Dict[str, Any]] = {}
+    coverage = {"management": False, "caution": False, "warning": False,
+                "risk": False, "short_overheat": False}
+    errors: List[str] = []
+
+    def _flag(code: Any, key: str) -> None:
+        raw = str(code or "").strip().upper()
+        normalized = raw.zfill(6) if raw.isdigit() else raw
+        if _is_krx_short_code(normalized):
+            flags.setdefault(normalized, {})[key] = True
+
+    jobs = [
+        ("management", {"tradeType": "KRX", "marketType": "ALL", "orderType": "statusTag",
+                        "startIdx": 0, "pageSize": 500}),
+        ("caution", {"tradeType": "KRX", "marketType": "ALL", "orderType": "marketAlertType",
+                     "alertType": "01", "startIdx": 0, "pageSize": 500}),
+        ("warning", {"tradeType": "KRX", "marketType": "ALL", "orderType": "marketAlertType",
+                     "alertType": "02", "startIdx": 0, "pageSize": 500}),
+        ("risk", {"tradeType": "KRX", "marketType": "ALL", "orderType": "marketAlertType",
+                  "alertType": "03", "startIdx": 0, "pageSize": 500}),
+    ]
+
+    def _fetch(job: Tuple[str, Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
+        key, params = job
+        try:
+            response = requests.get(f"{_KR_SURGE_NAVER_API}/domestic/market/stock/default",
+                                    params=params, headers=_kr_surge_naver_headers(), timeout=7)
+            response.raise_for_status()
+            payload = response.json()
+            rows = payload if isinstance(payload, list) else list((payload or {}).get("content") or [])
+            return key, rows, None
+        except Exception as exc:
+            return key, [], f"{key}: {exc}"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        for key, rows, error in executor.map(_fetch, jobs):
+            if error:
+                errors.append(error)
+                continue
+            coverage[key] = True
+            for row in rows:
+                code = row.get("itemcode") or row.get("itemCode")
+                if key == "management":
+                    if str(row.get("manageStatusGb") or "0") not in {"", "0", "00"}:
+                        _flag(code, "management")
+                    if _kr_surge_bool(row.get("tradeStopYn")):
+                        _flag(code, "trading_halt")
+                    raw_code = str(code or "").strip().upper()
+                    normalized_code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
+                    if _is_krx_short_code(normalized_code):
+                        details[normalized_code] = {
+                            "management_status_code": str(row.get("manageStatusGb") or ""),
+                            "management_date": str(row.get("managementDate") or ""),
+                            "management_reason_code": str(row.get("managementReasonCode") or ""),
+                            "trading_halt_date": str(row.get("tradingHaltDate") or ""),
+                            "trading_halt_reason_code": str(row.get("tradingHaltReasonCode") or ""),
+                            "tradable_status": row.get("tradableStatus"),
+                            "tradable_status_code": row.get("tradableStatusCode"),
+                        }
+                else:
+                    _flag(code, key)
+                for field in ("shortTermOverheatYn", "overheatYn", "shortTermOverheated",
+                              "singlePriceTradingYn"):
+                    if _kr_surge_bool(row.get(field)):
+                        _flag(code, "short_overheat")
+                        coverage["short_overheat"] = True
+
+    # 증권사/공식 JSON 피드가 있으면 자동 동기화한다. 목록 행은 현재 지정 종목으로 간주한다.
+    short_overheat_url = os.environ.get("KR_SURGE_SHORT_OVERHEAT_URL", "").strip()
+    if short_overheat_url:
+        try:
+            external_headers = {"User-Agent": "StockOracle/1.0", "Accept": "application/json"}
+            token = os.environ.get("KR_SURGE_SHORT_OVERHEAT_TOKEN", "").strip()
+            if token:
+                external_headers["Authorization"] = f"Bearer {token}"
+            response = requests.get(short_overheat_url, headers=external_headers, timeout=8)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list):
+                rows = payload
+            else:
+                rows = ((payload or {}).get("items") or (payload or {}).get("content") or
+                        (payload or {}).get("data") or (payload or {}).get("stocks") or [])
+            if isinstance(rows, dict):
+                rows = rows.get("items") or rows.get("content") or rows.get("stocks") or list(rows.values())
+            for row in rows:
+                if isinstance(row, str):
+                    _flag(row, "short_overheat")
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                code = row.get("itemcode") or row.get("itemCode") or row.get("code") or row.get("stockCode")
+                active_value = row.get("active", row.get("designated", row.get("shortTermOverheatYn", True)))
+                if active_value is True or _kr_surge_bool(active_value):
+                    _flag(code, "short_overheat")
+            coverage["short_overheat"] = True
+        except Exception as exc:
+            errors.append(f"short_overheat_external: {exc}")
+
+    # 수동 코드 목록은 비상 폴백으로 유지한다.
+    configured = [c.strip().split(".")[0].zfill(6) for c in
+                  os.environ.get("KR_SURGE_SHORT_OVERHEAT_CODES", "").split(",") if c.strip()]
+    if configured:
+        coverage["short_overheat"] = True
+        for code in configured:
+            _flag(code, "short_overheat")
+    return {"flags": flags, "details": details, "coverage": coverage, "errors": errors,
+            "as_of": _kr_surge_now().isoformat(),
+            "short_overheat_source": ("외부 JSON 피드" if short_overheat_url and coverage["short_overheat"] else
+                                      "공급자 필드/연동 코드" if coverage["short_overheat"] else "미연동")}
+
+
+@ttl_cache(120)
+def _fetch_kr_surge_investor_flow() -> Dict[str, Any]:
+    """외국인·기관 순매수 랭킹을 가져오고 당일 장중 추정과 직전 확정을 구분한다."""
+    today = _kr_surge_now().strftime("%Y%m%d")
+    result: Dict[str, Any] = {"FOREIGNER": {}, "ORGANIZATION": {}, "errors": []}
+
+    def _fetch(investor: str) -> Tuple[str, Dict[str, Any], Optional[str]]:
+        try:
+            params = {"investorType": investor, "tradeType": "KRX", "marketType": "ALL",
+                      "startIdx": 0, "pageSize": 100, "periodType": "DAY"}
+            response = requests.get(f"{_KR_SURGE_NAVER_API}/domestic/market/trend/trendForeignOrg",
+                                    params=params, headers=_kr_surge_naver_headers(), timeout=7)
+            response.raise_for_status()
+            sections = (response.json() or {}).get("sections") or {}
+            mapped: Dict[str, Any] = {}
+            for side, sign in (("buyRankList", 1), ("sellRankList", -1)):
+                for rank, row in enumerate(sections.get(side) or [], 1):
+                    code = str(row.get("itemcode") or "").zfill(6)
+                    bizdate = str(row.get("bizdateTo") or row.get("bizdateFrom") or "")
+                    estimated = bool(row.get("estimated"))
+                    mapped[code] = {
+                        "net_volume": sign * abs(int(_kr_surge_float(row.get("accTradeVolume")))),
+                        "net_amount": sign * abs(int(_kr_surge_float(row.get("accTradeAmount")))),
+                        "rank": rank, "side": "buy" if sign > 0 else "sell",
+                        "bizdate": bizdate, "estimated": estimated,
+                        "as_of": row.get("toRankingAt") or bizdate,
+                        "intraday": bizdate == today and estimated,
+                    }
+            return investor, mapped, None
+        except Exception as exc:
+            return investor, {}, str(exc)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        for investor, mapped, error in executor.map(_fetch, ("FOREIGNER", "ORGANIZATION")):
+            result[investor] = mapped
+            if error:
+                result["errors"].append(f"{investor}: {error}")
+    result["as_of"] = _kr_surge_now().isoformat()
+    result["coverage_note"] = "당일 estimated=true만 장중 수급 점수에 반영; 랭킹 밖은 미관측"
+    return result
+
+
+@ttl_cache(120)
+def _fetch_kr_surge_program_flow() -> Dict[str, Any]:
+    """KOSPI/KOSDAQ 시장별 프로그램 순매수 최신 시간행을 반환한다."""
+    bizdate = _kr_surge_now().strftime("%Y%m%d")
+    result: Dict[str, Any] = {}
+    for market in ("KOSPI", "KOSDAQ"):
+        try:
+            params = {"tradeType": "KRX", "krxMarketType": market, "bizdate": bizdate,
+                      "startIdx": 0, "pageSize": 1, "periodType": "TIME"}
+            response = requests.get(f"{_KR_SURGE_NAVER_API}/domestic/market/trendProgram",
+                                    params=params, headers=_kr_surge_naver_headers(), timeout=7)
+            response.raise_for_status()
+            row = next(iter((response.json() or {}).get("content") or []), {})
+            result[market] = {
+                "net_amount": int(_kr_surge_float(row.get("totalDiffPureBuyAmt"))),
+                "arbitrage_net_amount": int(_kr_surge_float(row.get("diffPureBuyAmt"))),
+                "non_arbitrage_net_amount": int(_kr_surge_float(row.get("biDiffPureBuyAmt"))),
+                "bizdate": row.get("bizdate"), "time": row.get("time"),
+                "available": bool(row),
+            }
+        except Exception as exc:
+            result[market] = {"available": False, "error": str(exc)}
+    return result
+
+
+@ttl_cache(900)
+def _fetch_kr_surge_sector_context(codes: Tuple[str, ...]) -> Dict[str, Any]:
+    """후보 종목의 네이버 업종 번호를 확인하고 동시간 업종 등락률에 연결한다."""
+    sectors: Dict[str, Dict[str, Any]] = {}
+    try:
+        response = requests.get(f"{_KR_SURGE_NAVER_API}/domestic/market/upjong/list",
+                                params={"startIdx": 0, "pageSize": 100, "sortType": "changeRate"},
+                                headers=_kr_surge_naver_headers(), timeout=7)
+        response.raise_for_status()
+        for row in response.json() or []:
+            sectors[str(row.get("no") or "")] = row
+    except Exception:
+        return {"by_code": {}, "available": False}
+
+    def _industry(code: str) -> Tuple[str, Optional[str]]:
+        try:
+            response = requests.get(f"{_KR_SURGE_NAVER_API}/domestic/detail/{code}/stock/industry",
+                                    params={"page": 1, "pageSize": 1, "marketType": "ALL"},
+                                    headers=_kr_surge_naver_headers(), timeout=6)
+            response.raise_for_status()
+            return code, str((response.json() or {}).get("upjongNo") or "") or None
+        except Exception:
+            return code, None
+
+    by_code: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for code, sector_no in executor.map(_industry, codes):
+            row = sectors.get(sector_no or "") or {}
+            by_code[code] = {
+                "available": bool(row), "no": sector_no, "name": row.get("name"),
+                "change_pct": _kr_surge_float(row.get("changeRate")) if row else None,
+                "rise_count": int(_kr_surge_float(row.get("riseCnt"))) if row else None,
+                "fall_count": int(_kr_surge_float(row.get("fallCnt"))) if row else None,
+                "as_of": row.get("thistime"),
+            }
+    return {"by_code": by_code, "available": True, "as_of": _kr_surge_now().isoformat()}
+
+
+def _kr_surge_float(value: Any, default: float = 0.0) -> float:
+    """네이버 실시간 응답의 숫자/문자열 값을 유한 실수로 정규화한다."""
+    try:
+        if value is None or value == "":
+            return default
+        number = float(str(value).replace(",", ""))
+        return number if np.isfinite(number) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _krx_tick_size(price: float, market: str = "KOSPI") -> int:
+    """KRX 주권시장 호가가격단위. KOSDAQ은 10만원 이상도 100원 단위다."""
+    p = max(0.0, _kr_surge_float(price))
+    market_name = str(market or "").upper()
+    if p < 1_000:
+        return 1
+    if p < 5_000:
+        return 5
+    if p < 10_000:
+        return 10
+    if p < 50_000:
+        return 50
+    if p < 100_000:
+        return 100
+    if "KOSDAQ" in market_name or market_name in {"KQ", "KOSDAQ_GLOBAL"}:
+        return 100
+    if p < 500_000:
+        return 500
+    return 1_000
+
+
+def _round_krx_price(price: float, market: str = "KOSPI", mode: str = "nearest") -> int:
+    """목표가·손절가를 해당 시장의 유효 호가로 맞춘다."""
+    value = max(0.0, _kr_surge_float(price))
+    tick = _krx_tick_size(value, market)
+    units = value / tick
+    if mode == "floor":
+        rounded = math.floor(units) * tick
+    elif mode == "ceil":
+        rounded = math.ceil(units) * tick
+    else:
+        rounded = round(units) * tick
+    return int(max(tick, rounded))
+
+
+def _kr_surge_session(now: Optional[dt] = None) -> Dict[str, str]:
+    """KRX 공식 거래시간을 기준으로 현재 국내 세션을 반환한다."""
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        current = now or dt.now(_ZI("Asia/Seoul"))
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=_ZI("Asia/Seoul"))
+        else:
+            current = current.astimezone(_ZI("Asia/Seoul"))
+    except Exception:
+        current = now or dt.now()
+    hhmm = current.hour * 60 + current.minute
+    time_label = current.strftime("%H:%M")
+    if current.weekday() >= 5:
+        session, label = "closed", f"휴장일 · 직전 확정 시세 (KST {time_label})"
+    elif 9 * 60 <= hhmm < 15 * 60 + 30:
+        session, label = "regular", f"KRX 정규장 (KST {time_label})"
+    elif 7 * 60 + 30 <= hhmm < 9 * 60:
+        session, label = "preopen", f"장전 시간외·동시호가 (KST {time_label})"
+    elif 15 * 60 + 40 <= hhmm < 18 * 60:
+        session, label = "afterhours", f"장후 시간외 (KST {time_label})"
+    else:
+        session, label = "closed", f"장 외 시간 · 직전 확정 시세 (KST {time_label})"
+    return {"session": session, "session_label": label, "as_of": current.isoformat()}
+
+
+def _fetch_kr_surge_quotes(tickers: List[str]) -> List[Dict[str, Any]]:
+    """네이버 국내 통합시세를 배치 조회한다. 종목명은 내부 맵을 신뢰한다."""
+    name_by_code: Dict[str, str] = {}
+    ticker_by_code: Dict[str, str] = {}
+    for name, ticker in KR_STOCK_MAP.items():
+        code = ticker.split(".")[0]
+        # 중복 별칭보다 먼저 선언된 표준명을 유지한다.
+        name_by_code.setdefault(code, name)
+        ticker_by_code.setdefault(code, ticker)
+
+    codes = list(dict.fromkeys(t.split(".")[0] for t in tickers if t))
+    output: List[Dict[str, Any]] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 StockOracle/1.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://finance.naver.com/",
+    }
+    for start in range(0, len(codes), 40):
+        batch = codes[start:start + 40]
+        url = "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(batch)
+        try:
+            response = requests.get(url, timeout=7, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+            datas: List[Dict[str, Any]] = list((payload or {}).get("datas") or [])
+            # 구형 polling 응답 구조도 유지해 공급자 스키마 전환에 대응한다.
+            if not datas:
+                rows = ((payload or {}).get("result") or {}).get("areas") or []
+                for area in rows:
+                    datas.extend(area.get("datas") or [])
+        except Exception:
+            continue
+
+        for row in datas:
+            code = str(row.get("itemCode") or "").zfill(6)
+            if code not in ticker_by_code:
+                continue
+            integrated = row.get("integratedPriceInfo") or {}
+            exchange = row.get("stockExchangeType") or {}
+            over = row.get("overMarketPriceInfo") or {}
+            price = _kr_surge_float(row.get("closePriceRaw") or integrated.get("closePriceRaw"))
+            change = _kr_surge_float(row.get("compareToPreviousClosePriceRaw"))
+            direction = str((row.get("compareToPreviousPrice") or {}).get("code") or "")
+            direction_name = str((row.get("compareToPreviousPrice") or {}).get("name") or "").upper()
+            if direction in {"5", "4"} or "FALL" in direction_name or "하락" in direction_name:
+                change = -abs(change)
+            elif direction in {"2", "1"} or "RIS" in direction_name or "상승" in direction_name:
+                change = abs(change)
+            prev_close = price - change if price > 0 else 0.0
+            ratio = _kr_surge_float(row.get("fluctuationsRatioRaw"))
+            if ratio == 0 and prev_close > 0:
+                ratio = change / prev_close * 100
+
+            market_code = str(exchange.get("code") or ("KQ" if ticker_by_code[code].endswith(".KQ") else "KS"))
+            market_name = "KOSDAQ" if market_code in {"KQ", "KOSDAQ", "KOSDAQ_GLOBAL"} else "KOSPI"
+            open_price = _kr_surge_float(integrated.get("openPriceRaw") or row.get("openPriceRaw"))
+            high_price = _kr_surge_float(integrated.get("highPriceRaw") or row.get("highPriceRaw"))
+            low_price = _kr_surge_float(integrated.get("lowPriceRaw") or row.get("lowPriceRaw"))
+            volume = _kr_surge_float(integrated.get("accumulatedTradingVolumeRaw") or row.get("accumulatedTradingVolumeRaw"))
+            turnover = _kr_surge_float(integrated.get("accumulatedTradingValueRaw") or row.get("accumulatedTradingValueRaw"))
+            market_cap = _kr_surge_float(row.get("marketValueFullRaw"))
+            trade_stop = row.get("tradeStopType") or {}
+            trade_status = str(trade_stop.get("name") or "")
+            vi = _kr_surge_vi_state(code, row)
+            short_overheat = any(_kr_surge_bool(row.get(field)) for field in (
+                "shortTermOverheatYn", "overheatYn", "shortTermOverheated", "singlePriceTradingYn"
+            ))
+            output.append({
+                "ticker": ticker_by_code[code], "code": code, "name": name_by_code.get(code, code),
+                "market": market_name, "price": price, "prev_close": prev_close,
+                "change_pct": ratio, "open": open_price, "high": high_price, "low": low_price,
+                "volume": volume, "turnover": turnover, "market_cap": market_cap,
+                "market_status": row.get("marketStatus"), "tradable_status": row.get("tradableStatus"),
+                "tradable_status_code": row.get("tradableStatusCode"),
+                "tradable_updated_at": row.get("tradableStatusUpdatedAt"),
+                "trade_status": trade_status, "trade_status_code": trade_stop.get("code"),
+                "vi": vi, "short_overheat": short_overheat,
+                "local_traded_at": row.get("localTradedAt"),
+                "over_market_status": over.get("overMarketStatus"),
+            })
+    return output
+
+
+def _kr_surge_rvol(volume: float, avg_daily_volume: float, session: str, now: Optional[dt] = None) -> Optional[float]:
+    """장 경과율로 보정한 국내 상대거래량. 기반 데이터가 없으면 None을 반환한다."""
+    volume = _kr_surge_float(volume)
+    avg = _kr_surge_float(avg_daily_volume)
+    if volume <= 0 or avg <= 0:
+        return None
+    elapsed_ratio = 1.0
+    if session == "regular":
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            current = now or dt.now(_ZI("Asia/Seoul"))
+            minutes = current.hour * 60 + current.minute - 9 * 60
+            elapsed_ratio = min(1.0, max(0.08, minutes / 390.0))
+        except Exception:
+            elapsed_ratio = 0.5
+    elif session == "preopen":
+        elapsed_ratio = 0.08
+    return round(volume / (avg * elapsed_ratio), 2)
+
+
+def _kr_surge_exclusion_reasons(quote: Dict[str, Any], flags: Dict[str, bool]) -> List[str]:
+    """추천 전에 적용할 하드 제외 사유를 일관된 라벨로 반환한다."""
+    reasons: List[str] = []
+    vi = quote.get("vi") or {}
+    if vi.get("active"):
+        reasons.append("VI 발동")
+    elif vi.get("cooldown_active"):
+        reasons.append("VI 해제 후 2분 안정화 대기")
+    if quote.get("tradable_status") not in {None, "", "tradable"}:
+        reasons.append("주문 불가 상태")
+    trade_status = str(quote.get("trade_status") or "").upper()
+    if trade_status not in {"", "TRADING", "NORMAL", "정상"} and not vi.get("active"):
+        reasons.append("거래정지/비정상 거래상태")
+    labels = {
+        "management": "관리종목", "caution": "투자주의", "warning": "투자경고",
+        "risk": "투자위험", "short_overheat": "단기과열", "trading_halt": "거래정지",
+    }
+    for key, label in labels.items():
+        if flags.get(key) or (key == "short_overheat" and quote.get("short_overheat")):
+            reasons.append(label)
+    return list(dict.fromkeys(reasons))
+
+
+def _kr_surge_score(quote: Dict[str, Any], analysis: Dict[str, Any], rvol: Optional[float]) -> Tuple[int, Dict[str, int]]:
+    """국내 개장 급등 점수와 감사 가능한 항목별 점수를 함께 반환한다."""
+    change = _kr_surge_float(quote.get("change_pct"))
+    price = _kr_surge_float(quote.get("price"))
+    turnover = _kr_surge_float(quote.get("turnover"))
+    market_cap = _kr_surge_float(quote.get("market_cap"))
+    if (price < _KR_SURGE_MIN_PRICE or change < _KR_SURGE_MIN_CHANGE_PCT or
+            change >= _KR_SURGE_MAX_CHANGE_EXCLUSIVE or
+            turnover < _KR_SURGE_MIN_TURNOVER_KRW or
+            market_cap < _KR_SURGE_MIN_MARKET_CAP_KRW):
+        return -1, {}
+
+    if change >= 12: momentum = 20
+    elif change >= 8: momentum = 18
+    elif change >= 5: momentum = 15
+    elif change >= 3: momentum = 11
+    else: momentum = 7
+
+    if turnover >= 300_000_000_000: liquidity = 15
+    elif turnover >= 100_000_000_000: liquidity = 13
+    elif turnover >= 30_000_000_000: liquidity = 10
+    elif turnover >= 10_000_000_000: liquidity = 7
+    else: liquidity = 4
+
+    rv = rvol or 0.0
+    if rv >= 3: volume_score = 10
+    elif rv >= 2: volume_score = 8
+    elif rv >= 1.5: volume_score = 6
+    elif rv >= 1: volume_score = 4
+    elif rv >= 0.7: volume_score = 2
+    else: volume_score = 0
+
+    high = _kr_surge_float(quote.get("high"), price)
+    low = _kr_surge_float(quote.get("low"), price)
+    open_price = _kr_surge_float(quote.get("open"), price)
+    position = ((price - low) / (high - low) * 100) if high > low else 50.0
+    off_high = ((high - price) / high * 100) if high > 0 else 0.0
+    intraday = 5 if 60 <= position <= 92 else (3 if position > 92 else (2 if position >= 35 else 0))
+    intraday += 3 if price >= open_price > 0 else 0
+    intraday += 2 if off_high <= 2 else (1 if off_high <= 5 else 0)
+    intraday = min(10, intraday)
+
+    rsi = (analysis.get("rsi") or {}).get("v")
+    macd = analysis.get("macd") or {}
+    adx = analysis.get("adx") or {}
+    rs = analysis.get("rs") or {}
+    squeeze = analysis.get("squeeze") or {}
+    obv = analysis.get("obv") or {}
+    technical = 0
+    if macd and macd.get("macd", 0) > macd.get("signal", 0): technical += 4
+    if adx.get("direction") == "bullish": technical += 4
+    if squeeze and squeeze.get("momentum", 0) > 0: technical += 4
+    if rs and _kr_surge_float(rs.get("rs20")) > 0: technical += 3
+
+    stability = 5 if market_cap >= 1_000_000_000_000 else (3 if market_cap >= 300_000_000_000 else 1)
+    if rsi is not None and 45 <= rsi <= 75: stability += 3
+    if obv.get("trend") == "accumulation": stability += 2
+    stability = min(10, stability)
+
+    supply = quote.get("supply") or {}
+    foreigner = supply.get("foreigner") or {}
+    institution = supply.get("institution") or {}
+    f_observed = bool(foreigner.get("intraday"))
+    i_observed = bool(institution.get("intraday"))
+    f_net = _kr_surge_float(foreigner.get("net_amount"))
+    i_net = _kr_surge_float(institution.get("net_amount"))
+    supply_score = 0
+    if f_observed and i_observed and f_net > 0 and i_net > 0:
+        supply_score = 12
+    elif f_observed and i_observed and f_net + i_net > 0:
+        supply_score = 8
+    elif (f_observed and f_net > 0) or (i_observed and i_net > 0):
+        supply_score = 5
+    elif f_observed or i_observed:
+        supply_score = 1
+
+    program = (quote.get("market_flow") or {}).get("program") or {}
+    sector = (quote.get("market_flow") or {}).get("sector") or {}
+    program_score = 0
+    if program.get("available"):
+        program_net = _kr_surge_float(program.get("net_amount"))
+        program_score += 3 if program_net >= 100_000_000_000 else (2 if program_net > 0 else 0)
+    if sector.get("available"):
+        sector_change = _kr_surge_float(sector.get("change_pct"))
+        program_score += 5 if sector_change >= 2 else (3 if sector_change >= 0.5 else (1 if sector_change > 0 else 0))
+    program_score = min(8, program_score)
+
+    penalty = 0
+    if change >= 20: penalty += 10
+    if rsi is not None and rsi > 82: penalty += 8
+    if position > 97 and change > 12: penalty += 5
+    if adx.get("adx", 0) > 35 and adx.get("direction") == "bearish": penalty += 8
+    if f_observed and i_observed and f_net < 0 and i_net < 0: penalty += 6
+    if sector.get("available") and _kr_surge_float(sector.get("change_pct")) <= -1: penalty += 4
+    breakdown = {
+        "모멘텀": momentum, "거래대금": liquidity, "상대거래량": volume_score,
+        "장중지지": intraday, "기술추세": min(15, technical), "안정성": stability,
+        "외인·기관": supply_score, "프로그램·업종": program_score, "과열감점": -penalty,
+    }
+    return max(0, min(100, sum(breakdown.values()))), breakdown
+
+
+def _kr_surge_item(quote: Dict[str, Any], analysis: Dict[str, Any], rvol: Optional[float],
+                   session: str) -> Optional[Dict[str, Any]]:
+    """추천 카드 1건의 가격·근거·위험 정보를 구성하고 경계조건을 재검증한다."""
+    score, breakdown = _kr_surge_score(quote, analysis, rvol)
+    if score < 0:
+        return None
+    price = _kr_surge_float(quote.get("price"))
+    prev_close = _kr_surge_float(quote.get("prev_close"))
+    market = str(quote.get("market") or "KOSPI")
+    day_high = _kr_surge_float(quote.get("high"), price)
+    day_low = _kr_surge_float(quote.get("low"), price)
+    day_open = _kr_surge_float(quote.get("open"), price)
+    change_pct = _kr_surge_float(quote.get("change_pct"))
+    atr = _kr_surge_float(analysis.get("atr")) or max(day_high - day_low, price * 0.025)
+    upper_limit = _round_krx_price(prev_close * 1.30, market, "floor") if prev_close > 0 else 0
+    target_raw = min(price + atr * 1.2, upper_limit) if upper_limit > price else price + atr * 1.2
+    target = _round_krx_price(target_raw, market, "floor")
+    stop_raw = max(day_low - atr * 0.10, price - atr * 0.65)
+    stop = _round_krx_price(min(stop_raw, price - _krx_tick_size(price, market)), market, "floor")
+    entry_low = _round_krx_price(max(day_open if 0 < day_open < price else 0, price - atr * 0.25), market, "ceil")
+    entry_low = min(entry_low, int(price))
+    entry_high = _round_krx_price(price, market, "nearest")
+    target_return = ((target - price) / price * 100) if price > 0 else 0.0
+    stop_return = ((stop - price) / price * 100) if price > 0 else 0.0
+    risk_reward = ((target - price) / (price - stop)) if price > stop > 0 else 0.0
+    position = ((price - day_low) / (day_high - day_low) * 100) if day_high > day_low else 50.0
+    off_high = ((day_high - price) / day_high * 100) if day_high > 0 else 0.0
+    remaining_to_limit = ((upper_limit - price) / price * 100) if upper_limit > price else 0.0
+
+    rsi = (analysis.get("rsi") or {}).get("v")
+    adx = analysis.get("adx") or {}
+    rs = analysis.get("rs") or {}
+    squeeze = analysis.get("squeeze") or {}
+    reasons = [
+        f"전일 종가 대비 +{change_pct:.2f}% · 장중 고가 대비 -{off_high:.2f}%",
+        f"누적 거래대금 {quote.get('turnover', 0) / 100_000_000:,.0f}억원 · 유동성 필터 통과",
+    ]
+    if rvol is not None:
+        reasons.append(f"장 경과율 보정 RVOL {rvol:.2f}배")
+    if rs and _kr_surge_float(rs.get("rs20")) > 0:
+        reasons.append(f"{market} 지수 대비 20일 +{_kr_surge_float(rs.get('rs20')):.1f}% 상대강도")
+    if adx.get("direction") == "bullish":
+        reasons.append(f"ADX {adx.get('adx', 0):.1f} · 상승 추세 우위")
+    elif squeeze and squeeze.get("momentum", 0) > 0:
+        reasons.append("TTM Squeeze 모멘텀 양수")
+
+    supply = quote.get("supply") or {}
+    for key, label in (("foreigner", "외국인"), ("institution", "기관")):
+        flow = supply.get(key) or {}
+        if flow:
+            amount = _kr_surge_float(flow.get("net_amount"))
+            state = "장중 추정" if flow.get("intraday") else f"직전 확정({flow.get('bizdate') or '일자 미상'})"
+            direction = "순매수" if amount > 0 else "순매도"
+            reasons.append(f"{label} {state} {direction} {abs(amount) / 100_000_000:,.0f}억원 · 랭킹 {flow.get('rank', '-')}위")
+    market_flow = quote.get("market_flow") or {}
+    program = market_flow.get("program") or {}
+    sector = market_flow.get("sector") or {}
+    if program.get("available"):
+        program_net = _kr_surge_float(program.get("net_amount"))
+        reasons.append(f"{market} 프로그램 {'순매수' if program_net >= 0 else '순매도'} {abs(program_net) / 100_000_000:,.0f}억원")
+    if sector.get("available"):
+        reasons.append(f"{sector.get('name') or '업종'} 동시간 등락률 {float(sector.get('change_pct') or 0):+.2f}%")
+
+    warnings = []
+    if change_pct >= 15: warnings.append("급등폭 15% 이상 · VI 이후 변동성 확대 및 추격매수 주의")
+    if 0 < remaining_to_limit <= 5: warnings.append(f"상한가까지 {remaining_to_limit:.1f}% · 호가 공백 위험")
+    if rsi is not None and rsi > 75: warnings.append(f"RSI {rsi:.1f} · 단기 과열")
+    if day_open > 0 and price < day_open: warnings.append("현재가가 시가 아래 · 시가 회복 확인 전 진입 보류")
+    if rvol is not None and rvol < 1: warnings.append("시간 보정 거래량이 평소보다 낮음")
+    if not analysis: warnings.append("일봉 기술 데이터 부족 · 시세·유동성 중심의 조건부 관찰")
+    if session != "regular": warnings.append("정규장 외 시세 · 다음 정규장 체결가와 거래량 재확인 필요")
+    if not (supply.get("foreigner") or {}).get("intraday"):
+        warnings.append("외국인 당일 장중 순매수 랭킹 미관측 · 수급 점수 미반영")
+    if not (supply.get("institution") or {}).get("intraday"):
+        warnings.append("기관 당일 장중 추정치 미제공 · 직전 확정치는 참고만 하고 점수 미반영")
+
+    if score >= 75: confidence = "조건부 강력"
+    elif score >= 60: confidence = "조건부 추천"
+    elif score >= 45: confidence = "주목"
+    else: confidence = "관찰"
+    return {
+        "ticker": quote.get("ticker"), "code": quote.get("code"), "name": quote.get("name"),
+        "market": market, "price": int(price), "prev_close": int(prev_close),
+        "change_pct": round(change_pct, 2), "open": int(day_open), "high": int(day_high), "low": int(day_low),
+        "turnover": int(_kr_surge_float(quote.get("turnover"))),
+        "market_cap": int(_kr_surge_float(quote.get("market_cap"))),
+        "rvol": rvol, "intraday_position": round(position, 1), "off_high_pct": round(off_high, 2),
+        "score": score, "score_breakdown": breakdown, "confidence_label": confidence,
+        "entry_low": entry_low, "entry_high": entry_high, "target_price": target, "stop_loss": stop,
+        "target_return": round(target_return, 2), "stop_return": round(stop_return, 2),
+        "risk_reward": round(risk_reward, 2), "upper_limit": upper_limit,
+        "holding_period": "당일 30분~3시간 · 종가 전 재평가",
+        "entry_condition": "시가 또는 진입 구간 재지지와 거래량 유지 확인 후 분할 접근",
+        "reasons": reasons[:10], "warning": warnings,
+        "rsi": rsi, "adx": adx.get("adx"), "rs20": rs.get("rs20"),
+        "technical_complete": bool(analysis), "quote_time": quote.get("local_traded_at"),
+        "vi": quote.get("vi") or {"status": "unknown", "label": "VI 상태 미확인"},
+        "risk_flags": quote.get("risk_flags") or {},
+        "supply": supply, "market_flow": market_flow,
+    }
+
+
+def _kr_surge_tracking_mode() -> Dict[str, str]:
+    configured = bool(os.environ.get("KR_SURGE_TRACKING_PATH"))
+    if configured:
+        return {"mode": "configured_file", "label": "구성된 서버 파일 저장소",
+                "durability": "배포 환경의 볼륨 지속성에 따름"}
+    if os.name == "nt":
+        return {"mode": "local_temp_file", "label": "로컬 임시 파일",
+                "durability": "OS 임시파일 정리 전까지"}
+    return {"mode": "serverless_ephemeral", "label": "서버리스 /tmp 임시 저장",
+            "durability": "콜드 스타트·인스턴스 교체 시 유실 가능"}
+
+
+def _kr_surge_load_tracking_unlocked() -> Dict[str, Any]:
+    try:
+        with open(_KR_SURGE_TRACKING_PATH, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict) and isinstance(data.get("events"), list):
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return {"version": 1, "events": [], "updated_at": None}
+
+
+def _kr_surge_save_tracking_unlocked(data: Dict[str, Any]) -> None:
+    directory = os.path.dirname(os.path.abspath(_KR_SURGE_TRACKING_PATH))
+    os.makedirs(directory, exist_ok=True)
+    temp_path = os.path.join(directory, f".{Path(_KR_SURGE_TRACKING_PATH).name}.{os.getpid()}.tmp")
+    with open(temp_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, separators=(",", ":"))
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, _KR_SURGE_TRACKING_PATH)
+
+
+def _record_kr_surge_recommendations(items: List[Dict[str, Any]], session_info: Dict[str, Any]) -> Dict[str, Any]:
+    """정규장 추천 발생 시점의 가격과 후속 평가 일정을 서버 저널에 기록한다."""
+    mode = _kr_surge_tracking_mode()
+    if session_info.get("session") != "regular" or not items:
+        return {**mode, "recorded": 0, "reason": "정규장 추천이 없어 신규 이벤트를 기록하지 않음"}
+    try:
+        recommended_at = dt.fromisoformat(str(session_info.get("as_of")))
+    except Exception:
+        recommended_at = _kr_surge_now()
+    trade_date = recommended_at.date().isoformat()
+    close_due = recommended_at.replace(hour=15, minute=30, second=0, microsecond=0)
+    recorded = 0
+    with _KR_SURGE_TRACKING_LOCK:
+        data = _kr_surge_load_tracking_unlocked()
+        existing = {str(event.get("event_id")) for event in data.get("events") or []}
+        for rank, item in enumerate(items, 1):
+            code = str(item.get("code") or "").zfill(6)
+            event_id = f"{trade_date}:{code}"
+            if not code.strip("0") or event_id in existing:
+                continue
+            price = int(_kr_surge_float(item.get("price")))
+            due_m30 = recommended_at + timedelta(minutes=30)
+            due_m60 = recommended_at + timedelta(hours=1)
+            def _timed_checkpoint(label: str, due_at: dt) -> Dict[str, Any]:
+                if due_at > close_due:
+                    return {"label": label, "due_at": due_at.isoformat(), "status": "unavailable",
+                            "reason": f"추천 시각상 정규장 {label} 관측 불가"}
+                return {"label": label, "due_at": due_at.isoformat(), "status": "pending"}
+            event = {
+                "event_id": event_id, "trade_date": trade_date,
+                "code": code, "ticker": item.get("ticker"), "name": item.get("name"),
+                "market": item.get("market"), "rank": rank, "score": item.get("score"),
+                "recommended_at": recommended_at.isoformat(), "entry_price": price,
+                "checkpoints": {
+                    "m30": _timed_checkpoint("30분", due_m30),
+                    "m60": _timed_checkpoint("1시간", due_m60),
+                    "close": {"label": "종가", "due_at": close_due.isoformat(), "status": "pending"},
+                },
+            }
+            data.setdefault("events", []).append(event)
+            existing.add(event_id)
+            recorded += 1
+        cutoff = recommended_at - timedelta(days=30)
+        retained = []
+        for event in data.get("events") or []:
+            try:
+                if dt.fromisoformat(str(event.get("recommended_at"))) >= cutoff:
+                    retained.append(event)
+            except Exception:
+                continue
+        data["events"] = retained[-500:]
+        data["updated_at"] = _kr_surge_now().isoformat()
+        try:
+            _kr_surge_save_tracking_unlocked(data)
+        except OSError as exc:
+            return {**mode, "recorded": 0, "error": str(exc)}
+    return {**mode, "recorded": recorded, "event_count": len(data.get("events") or [])}
+
+
+def _kr_surge_checkpoint_return(entry_price: Any, price: Any) -> Optional[float]:
+    entry = _kr_surge_float(entry_price)
+    observed = _kr_surge_float(price)
+    if entry <= 0 or observed <= 0:
+        return None
+    return round((observed - entry) / entry * 100, 2)
+
+
+def _kr_surge_performance_payload(update: bool = True) -> Dict[str, Any]:
+    """기한이 지난 체크포인트를 최신 시세로 평가하고 전체 성과 요약을 반환한다."""
+    now = _kr_surge_now()
+    mode = _kr_surge_tracking_mode()
+    with _KR_SURGE_TRACKING_LOCK:
+        data = _kr_surge_load_tracking_unlocked()
+        events = data.get("events") or []
+        pending_codes = sorted({str(event.get("code")) for event in events
+                                if any((cp or {}).get("status") == "pending"
+                                       for cp in (event.get("checkpoints") or {}).values())})
+        quotes_by_code: Dict[str, Dict[str, Any]] = {}
+        if update and pending_codes:
+            ticker_by_code = {ticker.split(".")[0]: ticker for ticker in KR_STOCK_MAP.values()}
+            pending_tickers = [ticker_by_code[code] for code in pending_codes if code in ticker_by_code]
+            quotes_by_code = {str(q.get("code")): q for q in _fetch_kr_surge_quotes(pending_tickers)}
+        changed = False
+        for event in events:
+            event_date = str(event.get("trade_date") or "")
+            quote = quotes_by_code.get(str(event.get("code")))
+            checkpoints = event.get("checkpoints") or {}
+            for key, checkpoint in checkpoints.items():
+                if checkpoint.get("status") != "pending":
+                    continue
+                try:
+                    due_at = dt.fromisoformat(str(checkpoint.get("due_at")))
+                except Exception:
+                    checkpoint["status"] = "unavailable"
+                    checkpoint["reason"] = "평가 예정시각 오류"
+                    changed = True
+                    continue
+                if now < due_at:
+                    continue
+                if now.date().isoformat() != event_date:
+                    checkpoint["status"] = "unavailable"
+                    checkpoint["reason"] = "당일 자동 관측 누락"
+                    changed = True
+                    continue
+                if not quote or _kr_surge_float(quote.get("price")) <= 0:
+                    continue
+                observed_price = int(_kr_surge_float(quote.get("price")))
+                checkpoint.update({
+                    "status": "completed", "price": observed_price,
+                    "return_pct": _kr_surge_checkpoint_return(event.get("entry_price"), observed_price),
+                    "observed_at": now.isoformat(),
+                    "delay_seconds": max(0, int((now - due_at).total_seconds())),
+                    "quote_time": quote.get("local_traded_at"),
+                    "observation": "예정시각 이후 최초 서버 관측값",
+                })
+                changed = True
+        if changed:
+            data["updated_at"] = now.isoformat()
+            try:
+                _kr_surge_save_tracking_unlocked(data)
+            except OSError as exc:
+                mode["write_error"] = str(exc)
+
+    summaries: Dict[str, Any] = {}
+    for key, label in (("m30", "30분"), ("m60", "1시간"), ("close", "종가")):
+        completed = [((event.get("checkpoints") or {}).get(key) or {}) for event in events]
+        completed = [cp for cp in completed if cp.get("status") == "completed" and cp.get("return_pct") is not None]
+        returns = [float(cp.get("return_pct")) for cp in completed]
+        summaries[key] = {
+            "label": label, "completed": len(returns),
+            "average_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
+            "win_rate_pct": round(sum(1 for value in returns if value > 0) / len(returns) * 100, 1) if returns else None,
+        }
+    serialized_events = sorted(events, key=lambda event: str(event.get("recommended_at") or ""), reverse=True)[:100]
+    return {
+        "events": serialized_events, "summary": summaries, "event_count": len(events),
+        "as_of": now.isoformat(), "storage": mode,
+        "method": "추천 시점 대비 예정시각 이후 최초 서버 관측 수익률",
+        "limitations": [
+            "화면/서버 폴링이 중단되면 체크포인트가 관측 불가로 남을 수 있습니다.",
+            "delay_seconds가 0보다 크면 정확한 예정시각 체결가가 아니라 이후 최초 관측가입니다.",
+            mode.get("durability", "저장소 지속성은 배포 환경에 따릅니다."),
+        ],
+    }
+
+
+@ttl_cache(180)  # 개장 급등은 3분마다 다시 평가한다.
+def fetch_kr_opening_surge() -> Dict[str, Any]:
+    """국내 대형·중형 관심 유니버스에서 실시간 개장 급등 후보 Top 10을 선별한다."""
+    session_info = _kr_surge_session()
+    session = session_info["session"]
+    tickers = list(dict.fromkeys(
+        ticker for name, ticker in KR_STOCK_MAP.items() if not name.endswith("우")
+    ))
+    try:
+        quotes = _fetch_kr_surge_quotes(tickers)
+        risk_snapshot = _fetch_kr_surge_risk_flags()
+        risk_by_code = risk_snapshot.get("flags") or {}
+        excluded_counts: Dict[str, int] = {}
+        eligible: List[Dict[str, Any]] = []
+        numeric_pass_count = 0
+        for quote in quotes:
+            numeric_pass = (
+                _kr_surge_float(quote.get("price")) >= _KR_SURGE_MIN_PRICE
+                and _KR_SURGE_MIN_CHANGE_PCT <= _kr_surge_float(quote.get("change_pct")) < _KR_SURGE_MAX_CHANGE_EXCLUSIVE
+                and _kr_surge_float(quote.get("turnover")) >= _KR_SURGE_MIN_TURNOVER_KRW
+                and _kr_surge_float(quote.get("market_cap")) >= _KR_SURGE_MIN_MARKET_CAP_KRW
+            )
+            if not numeric_pass:
+                continue
+            numeric_pass_count += 1
+            flags = dict(risk_by_code.get(str(quote.get("code"))) or {})
+            quote["risk_flags"] = flags
+            exclusions = _kr_surge_exclusion_reasons(quote, flags)
+            if exclusions:
+                for reason in exclusions:
+                    excluded_counts[reason] = excluded_counts.get(reason, 0) + 1
+                continue
+            eligible.append(quote)
+        eligible.sort(key=lambda q: (
+            _kr_surge_float(q.get("change_pct")), math.log10(max(1, _kr_surge_float(q.get("turnover"))))
+        ), reverse=True)
+        shortlist = eligible[:_KR_SURGE_SHORTLIST_SIZE]
+        if not shortlist:
+            return {
+                "items": [], "note": "현재 유니버스에서 상승률·거래대금·시가총액 조건을 모두 충족한 종목이 없습니다.",
+                **session_info,
+                "scope": {"universe_count": len(tickers), "quote_count": len(quotes),
+                          "numeric_pass_count": numeric_pass_count, "preliminary_count": 0, "analyzed_count": 0},
+                "criteria": {"min_change_pct": _KR_SURGE_MIN_CHANGE_PCT, "min_turnover_krw": _KR_SURGE_MIN_TURNOVER_KRW,
+                             "min_market_cap_krw": _KR_SURGE_MIN_MARKET_CAP_KRW, "max_change_exclusive": _KR_SURGE_MAX_CHANGE_EXCLUSIVE,
+                             "hard_exclusions": ["VI 발동·해제 후 2분", "관리종목", "투자주의", "투자경고", "투자위험", "단기과열", "거래정지"]},
+                "risk_filter": {"coverage": risk_snapshot.get("coverage"), "excluded_counts": excluded_counts,
+                                "short_overheat_source": risk_snapshot.get("short_overheat_source"),
+                                "errors": risk_snapshot.get("errors")},
+            }
+
+        analysis_tickers = [q["ticker"] for q in shortlist]
+        investor_flow = _fetch_kr_surge_investor_flow()
+        program_flow = _fetch_kr_surge_program_flow()
+        sector_context = _fetch_kr_surge_sector_context(tuple(str(q.get("code")) for q in shortlist))
+        for quote in shortlist:
+            code = str(quote.get("code"))
+            quote["supply"] = {
+                "foreigner": (investor_flow.get("FOREIGNER") or {}).get(code),
+                "institution": (investor_flow.get("ORGANIZATION") or {}).get(code),
+                "coverage_note": investor_flow.get("coverage_note"),
+            }
+            quote["market_flow"] = {
+                "program": program_flow.get(str(quote.get("market"))) or {"available": False},
+                "sector": ((sector_context.get("by_code") or {}).get(code) or {"available": False}),
+            }
+        benchmarks = ["^KQ11", "^KS11"]
+        hist = yf.download(list(dict.fromkeys(analysis_tickers + benchmarks)), period="3mo", interval="1d",
+                           progress=False, auto_adjust=True, threads=True, timeout=10)
+
+        def _history_for(symbol: str) -> Optional[pd.DataFrame]:
+            if hist is None or hist.empty:
+                return None
+            if not isinstance(hist.columns, pd.MultiIndex):
+                return hist.copy() if len(analysis_tickers) == 1 else None
+            for level in range(hist.columns.nlevels):
+                try:
+                    if symbol in hist.columns.get_level_values(level):
+                        return hist.xs(symbol, axis=1, level=level).dropna(how="all")
+                except Exception:
+                    continue
+            return None
+
+        benchmark_map = {"KOSPI": _history_for("^KS11"), "KOSDAQ": _history_for("^KQ11")}
+        results: List[Dict[str, Any]] = []
+        for quote in shortlist:
+            df = _history_for(str(quote.get("ticker")))
+            analysis: Dict[str, Any] = {}
+            avg_volume = 0.0
+            if df is not None and len(df) >= 10:
+                analysis = _us_analyze_ticker(df, benchmark_map.get(str(quote.get("market"))))
+                try:
+                    vols = df["Volume"].dropna().astype(float)
+                    # 당일 미완성 봉이 섞여도 최근 20개 중앙 구간 평균으로 왜곡을 제한한다.
+                    avg_volume = float(vols.iloc[-21:-1].mean()) if len(vols) > 2 else float(vols.mean())
+                except Exception:
+                    avg_volume = 0.0
+            rvol = _kr_surge_rvol(quote.get("volume", 0), avg_volume, session)
+            item = _kr_surge_item(quote, analysis, rvol, session)
+            if item:
+                results.append(item)
+        results.sort(key=lambda item: (item.get("score", 0), item.get("turnover", 0)), reverse=True)
+        selected = results[:_KR_SURGE_RESULT_SIZE]
+        tracking = _record_kr_surge_recommendations(selected, session_info)
+        return {
+            "items": selected, "ts": int(time.time()), **session_info,
+            "scope": {"universe_count": len(tickers), "quote_count": len(quotes),
+                      "numeric_pass_count": numeric_pass_count, "preliminary_count": len(eligible),
+                      "analyzed_count": len(shortlist)},
+            "criteria": {"min_change_pct": _KR_SURGE_MIN_CHANGE_PCT, "min_turnover_krw": _KR_SURGE_MIN_TURNOVER_KRW,
+                         "min_market_cap_krw": _KR_SURGE_MIN_MARKET_CAP_KRW, "max_change_exclusive": _KR_SURGE_MAX_CHANGE_EXCLUSIVE,
+                         "hard_exclusions": ["VI 발동·해제 후 2분", "관리종목", "투자주의", "투자경고", "투자위험", "단기과열", "거래정지"]},
+            "risk_filter": {"coverage": risk_snapshot.get("coverage"), "excluded_counts": excluded_counts,
+                            "short_overheat_source": risk_snapshot.get("short_overheat_source"),
+                            "errors": risk_snapshot.get("errors")},
+            "flow_coverage": {"investor_errors": investor_flow.get("errors"),
+                              "investor_note": investor_flow.get("coverage_note"),
+                              "sector_available": sector_context.get("available"),
+                              "program_available": {m: bool((program_flow.get(m) or {}).get("available")) for m in ("KOSPI", "KOSDAQ")}},
+            "tracking": tracking,
+            "methodology": ["통합 현재가·전일비", "누적 거래대금", "장 경과율 보정 RVOL", "장중 고가·시가 지지",
+                            "ATR·ADX·RSI·MACD", "외국인·기관 수급", "시장 프로그램·업종 수급",
+                            "VI·시장경보 하드 제외", "KOSPI/KOSDAQ 상대강도", "상한가·과열 감점"],
+            "disclaimer": "추천이 아니라 조건부 모멘텀 스캔입니다. 당일 장중 추정치만 수급 점수에 반영하며, 단기과열 커버리지가 미연동이면 화면에 명시합니다.",
+        }
+    except Exception as exc:
+        return {"error": str(exc), "items": [], **session_info}
 
 # =============================================================================
 # KR 장기 투자 전용 분석 모듈
@@ -5254,33 +6935,17 @@ def classify_market_state(dd: Dict, close: float, rsi: float,
 
 def get_market_weights(market: str) -> dict:
     """시장별 최적화된 팩터 가중치 반환"""
-    if market == "CRYPTO":
-        # 코인: 24시간 고변동성 — 모멘텀·변동성·거래량 비중 강화, 재무(quality) 0
-        return {"trend": 25.0, "momentum": 35.0, "volatility": 20.0, "volume": 20.0, "quality": 0.0}
     if market == "US":
         return {"trend": 40.0, "momentum": 25.0, "volatility": 15.0, "volume": 10.0, "quality": 10.0}
     else:
         return {"trend": 20.0, "momentum": 35.0, "volatility": 25.0, "volume": 20.0, "quality": 0.0}
 
 def check_market_regime(market: str, symbol: str = "") -> str:
-    """시장 전체의 추세를 판단하여 투자 비중 조절 신호 발생"""
-    if market == "CRYPTO":
-        try:
-            rows = fetch_klines("BTCUSDT", "1d", 150)
-            closes = np.array([float(row[4]) for row in rows or []], dtype=float)
-            if len(closes) < 120:
-                return "NEUTRAL"
-            current_close = float(closes[-1])
-            ma60 = float(np.mean(closes[-60:]))
-            ma120 = float(np.mean(closes[-120:]))
-            if current_close < ma120 and ma60 < ma120:
-                return "BEAR"
-            if current_close > ma60 > ma120:
-                return "BULL"
-        except Exception:
-            pass
-        return "NEUTRAL"
-    index_ticker = "^KS11" if market == "KRX" else "^GSPC"
+    """종목 시장의 대표지수 추세를 판단한다 (KOSPI/KOSDAQ/S&P 500)."""
+    if market == "KRX":
+        index_ticker = "^KQ11" if str(symbol).upper().endswith(".KQ") else "^KS11"
+    else:
+        index_ticker = "^GSPC"
     try:
         df = yf.Ticker(index_ticker).history(period="6mo")
         if df.empty or len(df) < 120:
@@ -5288,7 +6953,7 @@ def check_market_regime(market: str, symbol: str = "") -> str:
         current_close = df['Close'].iloc[-1]
         ma60 = df['Close'].rolling(60).mean().iloc[-1]
         ma120 = df['Close'].rolling(120).mean().iloc[-1]
-
+        
         if current_close < ma120 and ma60 < ma120:
             return "BEAR"
         elif current_close > ma60 > ma120:
@@ -5580,7 +7245,7 @@ def analyze_score(dd: Dict, market: str = "KRX", period: str = "1y"):
 
     # ── [AI 종합 진단 및 미래 예측 시나리오 추가] ──
     ai_msgs = []
-
+    
     # 1. 핵심 요약 및 매수/매도 타이밍 조건
     if score >= 65:
         ai_msgs.append("[핵심 요약] BUY (매수 우위)")
@@ -5615,7 +7280,7 @@ def analyze_score(dd: Dict, market: str = "KRX", period: str = "1y"):
     ai_strategy = {
         "step": "💡 AI 종합 진단 및 트레이딩 전략",
         "result": " | ".join(ai_msgs),
-        "score": round(score - 50, 1),
+        "score": round(score - 50, 1), 
         "weight": "종합"
     }
 
@@ -5666,83 +7331,59 @@ def calc_probability(score: float, dd: Dict) -> tuple:
     prob_down = round(100.0 - prob_up, 1)
     return round(prob_up, 1), prob_down
 
-def get_round_digits(price: float, market: str) -> int:
-    """시장과 가격대에 맞는 표시 정밀도. 저가 코인의 유효 자릿수를 보존한다."""
-    if price is None:
-        return 2
-    try:
-        if np.isnan(price):
-            return 2
-    except (TypeError, ValueError):
-        return 2
-    if market in ("US", "CRYPTO"):
-        ap = abs(float(price))
-        if ap >= 100:
-            return 2
-        if ap >= 1:
-            return 4
-        if ap >= 0.01:
-            return 6
-        return 8
-    return 0 if market == "KRX" else 2
-
-
 EVENT_RISK_KEYWORDS = {
-    "security": [
-        "hack", "hacked", "exploit", "breach", "stolen", "drained", "private key",
-        "해킹", "취약점", "탈취", "유출", "공격", "브리지 사고",
+    "earnings_negative": [
+        "earnings miss", "misses estimates", "profit warning", "guidance cut", "cuts guidance",
+        "lowered guidance", "weak guidance", "어닝 쇼크", "실적 쇼크", "실적 부진", "가이던스 하향",
+        "전망 하향", "목표가 하향", "적자전환", "적자 전환",
     ],
-    "regulatory": [
-        "sec lawsuit", "regulatory action", "ban", "enforcement", "investigation", "delist",
-        "규제", "소송", "조사", "제재", "금지", "상장폐지", "상폐",
+    "legal": [
+        "lawsuit", "class action", "sec investigation", "doj probe", "antitrust", "fraud",
+        "recall", "소송", "피소", "조사", "수사", "제재", "과징금", "횡령", "배임", "분식",
     ],
-    "protocol": [
-        "network halt", "outage", "chain halt", "consensus failure", "depeg", "downtime",
-        "네트워크 중단", "체인 중단", "장애", "디페깅", "합의 실패",
+    "fda": [
+        "fda", "clinical hold", "complete response letter", "crl", "trial failed",
+        "임상 실패", "허가 반려", "승인 지연", "FDA", "식약처", "품목허가 반려",
     ],
-    "liquidity": [
-        "withdrawal suspended", "withdrawals suspended", "suspends withdrawals", "liquidity crisis",
-        "insolvency", "bankruptcy", "liquidation cascade",
-        "출금 중단", "지급 불능", "파산", "대규모 청산", "유동성 위기",
+    "disclosure_negative": [
+        "공시", "유상증자", "전환사채", "cb발행", "bw발행", "관리종목", "상장폐지",
+        "불성실공시", "감사의견", "거래정지", "투자주의", "투자경고",
     ],
 }
 
-PREDICTION_LEARNING_REPO_OWNER = os.getenv("COINVIEW_LEARNING_REPO_OWNER", "7nani4u")
-PREDICTION_LEARNING_REPO_NAME = os.getenv("COINVIEW_LEARNING_REPO_NAME", "Coinview")
-PREDICTION_LEARNING_BRANCH = os.getenv("COINVIEW_LEARNING_BRANCH", "main")
+PREDICTION_LEARNING_REPO_OWNER = os.getenv("STOCKORACLE_LEARNING_REPO_OWNER", "7nani4u")
+PREDICTION_LEARNING_REPO_NAME = os.getenv("STOCKORACLE_LEARNING_REPO_NAME", "StockOracle")
+PREDICTION_LEARNING_BRANCH = os.getenv("STOCKORACLE_LEARNING_BRANCH", "main")
 PREDICTION_LEARNING_REPO_PATH = os.getenv(
-    "COINVIEW_LEARNING_REPO_PATH",
+    "STOCKORACLE_LEARNING_REPO_PATH",
     "docs/backtests/prediction_learning.jsonl",
 )
 PREDICTION_LEARNING_GITHUB_TOKEN = (
-    os.getenv("COINVIEW_LEARNING_GITHUB_TOKEN")
+    os.getenv("STOCKORACLE_LEARNING_GITHUB_TOKEN")
     or os.getenv("GITHUB_TOKEN")
     or ""
 ).strip()
 PREDICTION_LEARNING_PATH = os.getenv(
-    "COINVIEW_PREDICTION_LOG",
+    "STOCKORACLE_PREDICTION_LOG",
     os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         *PREDICTION_LEARNING_REPO_PATH.split("/"),
     ),
 )
-PREDICTION_LEARNING_ENABLED = os.getenv("COINVIEW_LEARNING_ENABLED", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}
 _PREDICTION_LEARNING_EVENTS_CACHE: list[dict] | None = None
 _PREDICTION_LEARNING_EVENTS_CACHE_TS: float = 0.0
 _PREDICTION_LEARNING_EVENTS_CACHE_TTL: float = 60.0
 
 def calc_event_risk(symbol: str, market: str, news_items: list | None = None,
                     disclosures: list | None = None, signal_confidence: Dict | None = None) -> Dict:
-    """해킹·규제·프로토콜 장애·유동성 뉴스를 코인 진입 위험 점수로 변환."""
+    """실적/FDA/소송/공시/가이던스 이벤트를 매수 위험 점수로 변환."""
     points = 0
     reasons: list[str] = []
     days_to_earnings = None
 
-    if market != "CRYPTO" and signal_confidence:
+    if signal_confidence:
         days_to_earnings = signal_confidence.get("days_to_earnings")
-    if market != "CRYPTO" and days_to_earnings is None:
+    if days_to_earnings is None:
         try:
             from market_briefing.confidence_engine import get_earnings_proximity
             ep = get_earnings_proximity(symbol)
@@ -5772,19 +7413,19 @@ def calc_event_risk(symbol: str, market: str, news_items: list | None = None,
                 continue
             if any(kw.lower() in text for kw in kws):
                 matched.add(group)
-                if group == "security":
-                    points += 20; reasons.append(f"{source}: 해킹·보안 사고 위험")
-                elif group == "regulatory":
-                    points += 16; reasons.append(f"{source}: 규제·소송·상장폐지 위험")
-                elif group == "protocol":
-                    points += 18; reasons.append(f"{source}: 네트워크·프로토콜 장애 위험")
-                elif group == "liquidity":
-                    points += 18; reasons.append(f"{source}: 거래소·유동성·대규모 청산 위험")
+                if group == "earnings_negative":
+                    points += 14; reasons.append(f"{source}: 실적/가이던스 부정 이벤트")
+                elif group == "legal":
+                    points += 16; reasons.append(f"{source}: 소송·조사·제재 이벤트")
+                elif group == "fda":
+                    points += 14; reasons.append(f"{source}: FDA/임상/허가 이벤트")
+                elif group == "disclosure_negative":
+                    points += 12; reasons.append(f"{source}: 희석·관리·거래정지성 공시 위험")
 
     points = int(min(45, points))
     level = "high" if points >= 28 else "medium" if points >= 12 else "low"
     if not reasons:
-        reasons.append("수집된 뉴스에서 해킹·규제·프로토콜·유동성 고위험 이벤트가 확인되지 않음")
+        reasons.append("확인된 임박 실적·소송·FDA·부정 공시 이벤트 없음")
     return {
         "score": points,
         "level": level,
@@ -5882,7 +7523,7 @@ def _github_headers(write: bool = False) -> Dict[str, str]:
     h = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "Coinview-learning-sync",
+        "User-Agent": "StockOracle-learning-sync",
     }
     if write and PREDICTION_LEARNING_GITHUB_TOKEN:
         h["Authorization"] = f"Bearer {PREDICTION_LEARNING_GITHUB_TOKEN}"
@@ -5912,7 +7553,7 @@ def _github_read_prediction_learning_text() -> str | None:
         return None
 
 def _github_append_prediction_learning_line(line: str) -> None:
-    """토큰이 있으면 설정된 Coinview 저장소의 학습 로그 파일에 직접 커밋한다."""
+    """토큰이 있으면 7nani4u/StockOracle의 학습 로그 파일에 직접 커밋한다."""
     if not PREDICTION_LEARNING_GITHUB_TOKEN:
         return
     try:
@@ -5934,7 +7575,7 @@ def _github_append_prediction_learning_line(line: str) -> None:
             return
         new_text = (old_text.rstrip("\n") + "\n" if old_text else "") + line + "\n"
         payload = {
-            "message": "chore: append Coinview prediction learning event",
+            "message": "chore: append StockOracle prediction learning event",
             "content": base64.b64encode(new_text.encode("utf-8")).decode("ascii"),
             "branch": PREDICTION_LEARNING_BRANCH,
         }
@@ -6255,7 +7896,7 @@ def calc_risk(price: float, atr: float, market: str = "KRX", dd: Dict = None,
               event_risk: Dict | None = None, learning_adjustment: Dict | None = None,
               chart_patterns: list[Dict] | None = None) -> Dict:
     if not atr or np.isnan(atr): atr = price * 0.02
-    rnd = get_round_digits(price, market)
+    rnd = 4 if market == "US" else 2
 
     # ── 변동성 동적 계수 산출 ──────────────────────────────────────────
     atr_pct = atr / price * 100  # ATR의 현재가 대비 비율(%)
@@ -7576,7 +9217,7 @@ def calc_arty_smma_fractal(
     ATR은 반드시 ``dd``의 일봉 OHLC에서 내부 계산한다.
     """
     del atr
-    rnd = get_round_digits(last_price, market)
+    rnd = 4 if market == "US" else 2
     result_base = {
         "method": "SMMA 21·50·200 + 확정 Williams Fractal",
         "timeframe": "일봉",
@@ -8104,7 +9745,7 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
     if bb_l_raw is not None and float(bb_l_raw) <= 0:
         bb_l_raw = None
 
-    rnd = get_round_digits(last_price, market)
+    rnd = 4 if market == "US" else 2
 
     # ── 변동성 동적 계수 ──────────────────────────────────────────────
     atr_pct = atr / last_price * 100
@@ -8572,6 +10213,34 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
             * (0.90 if _trend <= 1 else 1.08 if _trend >= 3 else 1.0),
             0.65, 1.55,
         )
+        # 도달 확률은 충분한 과거 경로 표본이 필요하지만, 예상 기간은 현재 ATR과
+        # 최근 실제 이동속도만으로도 조건부 추정이 가능하다. 두 준비 조건을 분리해
+        # 확률 표본이 희소한 종목에서 기간만 불필요하게 비는 현상을 방지한다.
+        _period_model_ready = bool(
+            _atr_observed
+            and np.isfinite(atr_d) and atr_d > 0
+            and len(closes) >= 40
+            and len(_raw_lows) >= 40
+            and len(_raw_highs) >= 40
+            and np.isfinite(recent_speed) and recent_speed > 0
+        )
+
+        def _model_period(distance_atr: float, probability: float | None,
+                          prev_min: int, prev_max: int) -> tuple[int, int]:
+            """ATR 거리·최근 속도·거래량·추세로 30거래일 이내 조건부 기간을 계산한다."""
+            effective_speed = _clip(recent_speed, 0.12, 1.80)
+            base_days = max(1.0, distance_atr / effective_speed) * speed_factor
+            # 확률이 있으면 희소 도달일수록 기간을 늘리고, 없으면 중립 보정만 적용한다.
+            rarity_factor = 1.0 + _clip(
+                (50.0 - float(probability)) / 100.0 if probability is not None else 0.18,
+                0.0, 0.50,
+            )
+            raw_min = max(1, math.floor(base_days * 0.70 * rarity_factor))
+            raw_max = max(raw_min, math.ceil(base_days * 1.80 * rarity_factor))
+            return (
+                min(30, max(prev_min, raw_min)),
+                min(30, max(prev_max, raw_max, raw_min)),
+            )
 
         result = []
         previous_prob_mid = previous_prob_low = previous_prob_high = 100.0
@@ -8580,6 +10249,8 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
             distance_atr = max(0.0, (last_price - price) / max(atr_d, 1e-9))
             probability_mid = probability_low = probability_high = None
             days_min = days_max = None
+            period_source = None
+            period_note = None
             if _step_stats_ready:
                 hit_days = []
                 for path in _reach_paths:
@@ -8622,7 +10293,39 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
                     raw_days_max = max(raw_days_min, math.ceil(float(np.percentile(hit_days, 75)) * speed_factor))
                     days_min = max(previous_days_min, raw_days_min)
                     days_max = max(previous_days_max, raw_days_max, days_min)
-                    previous_days_min, previous_days_max = days_min, days_max
+                    period_source = "empirical"
+                    period_note = f"과거 도달 사례 {len(hit_days)}건의 25~75백분위"
+                else:
+                    # 가격·ATR·거래량 데이터는 충분하지만 해당 깊이의 과거 도달 사례가
+                    # 희소한 경우, 기간만 비워 두면 확률과 기간의 데이터 상태가 서로
+                    # 모순된다. ATR 거리÷최근 변동 속도를 중심값으로 삼고 거래량·추세
+                    # 보정(speed_factor)과 도달 희소도를 반영해 조건부 기간을 추정한다.
+                    days_min, days_max = _model_period(
+                        distance_atr, probability_mid,
+                        previous_days_min, previous_days_max,
+                    )
+                    period_source = "model"
+                    period_note = (
+                        f"과거 도달 사례 {len(hit_days)}건(<{min_hits}) · "
+                        "ATR 거리·최근 변동 속도·거래량·추세 기반 추정"
+                    )
+                previous_days_min, previous_days_max = days_min, days_max
+
+            # 경험 경로 기반 확률 산정 조건을 통과하지 못해도, 가격·ATR·최근 속도
+            # 데이터가 충분하면 기간은 독립적으로 계산한다. 데이터 부족과 희소 표본을
+            # 같은 상태로 취급하지 않기 위한 최종 정합성 보정이다.
+            if days_min is None and _period_model_ready:
+                days_min, days_max = _model_period(
+                    distance_atr, probability_mid,
+                    previous_days_min, previous_days_max,
+                )
+                period_source = "model"
+                period_note = (
+                    "과거 경로 표본 부족 · ATR 거리·최근 변동 속도·거래량·추세 기반 추정"
+                    if probability_mid is None else
+                    "과거 도달 기간 표본 부족 · ATR 거리·최근 변동 속도·거래량·추세 기반 추정"
+                )
+                previous_days_min, previous_days_max = days_min, days_max
 
             nearest_anchor = min(
                 anchors,
@@ -8646,6 +10349,8 @@ def calc_buy_price(dd: Dict, last_price: float, atr: float, score: float, indica
                 "days_min": days_min,
                 "days_max": days_max,
                 "period_label": None if days_min is not None else "기간 산정 불가",
+                "period_source": period_source,
+                "period_note": period_note,
                 "allocation_pct": allocations[_idx],
                 "basis": anchor_label,
             })
@@ -9078,7 +10783,7 @@ def calc_pullback_analysis(dd: Dict, last_price: float, atr: float, score: float
     bb_l    = bb_l_arr[-1] if bb_l_arr else 0.0
     bb_m    = bb_m_arr[-1] if bb_m_arr else 0.0
     rsi_val = rsi_arr[-1] if rsi_arr else 50.0
-    rnd = get_round_digits(last_price, market)
+    rnd     = 4 if market == "US" else 0
 
     if not atr or atr != atr:
         atr = last_price * 0.02
@@ -9596,7 +11301,7 @@ def calc_target_price(dd: Dict, last_price: float, atr: float, period: str, mark
     if not atr or np.isnan(atr):
         atr = last_price * 0.02
 
-    rnd = get_round_digits(last_price, market)
+    rnd = 4 if market == "US" else 2
     _profile = _prediction_feature_profile(dd, last_price, atr, market)
 
     # ── 추세 강도 분석 (0 ~ 4, RSI 과매수 시 -1 보정) ──────────────────
@@ -9746,7 +11451,7 @@ def _apply_signal_confidence_to_target(target: Dict, signal_confidence: Dict | N
     if not target or not signal_confidence or last_price <= 0:
         return target
     try:
-        rnd = get_round_digits(last_price, market)
+        rnd = 4 if market == "US" else 2
         conf = float(signal_confidence.get("confidence") or 50.0)
         sig = str(signal_confidence.get("signal") or "").upper()
         interval = signal_confidence.get("confidence_interval") or {}
@@ -9894,7 +11599,7 @@ def _build_long_term_targets(dd: Dict, last_price: float, atr: float, market: st
     if last_price <= 0:
         return []
     try:
-        rnd = get_round_digits(last_price, market)
+        rnd = 4 if market == "US" else 2
         profile = (base_target or {}).get("prediction_profile") or _prediction_feature_profile(dd, last_price, atr, market)
         fscore = _fundamental_score_from_context(naver, us_enriched, industry_info)
         trend = float(profile.get("trend_score") or 0.0)
@@ -9956,7 +11661,7 @@ def _normalize_target_output(target: Dict, current_price: float, market: str = "
     """Keep target prices and displayed returns aligned to the same current price."""
     if not target or current_price <= 0:
         return target
-    rnd = get_round_digits(current_price, market)
+    rnd = 4 if market == "US" else 2
 
     def _num(v: Any) -> float | None:
         try:
@@ -9992,7 +11697,7 @@ def holt_winters_forecast(dd: Dict, days: int = 30):
         closes = [float(c) for c in dd.get("Close", []) if c is not None]
         dates = dd.get("Date", [])
         if len(closes) < 30: return None
-
+        
         # ── Holt's Double Exponential Smoothing 파라미터 ──────────────
         # alpha=0.3: 레벨 평활 (낮을수록 안정적, 노이즈 저감)
         # beta=0.05: 트렌드 평활 (낮을수록 과도한 기울기 방지)
@@ -10047,17 +11752,17 @@ def linear_forecast(dd: Dict, days: int):
         closes = [float(c) for c in dd.get("Close", []) if c is not None]
         dates = dd.get("Date", [])
         if len(closes) < 20: return None
-
+        
         y = np.array(closes)
         x = np.arange(len(y))
-
+        
         # Linear Fit (Degree 1)
         slope, intercept = np.polyfit(x, y, 1)
-
+        
         # Predict
         future_x = np.arange(len(y), len(y) + days)
         preds = slope * future_x + intercept
-
+        
         last_d = datetime.datetime.strptime(dates[-1], "%Y-%m-%d") if dates else datetime.datetime.now()
         fds = []
         d = last_d
@@ -10065,7 +11770,7 @@ def linear_forecast(dd: Dict, days: int):
             d += datetime.timedelta(days=1)
             while d.weekday() >= 5: d += datetime.timedelta(days=1)
             fds.append(d.strftime("%Y-%m-%d"))
-
+            
         # ── 신뢰구간 동적화: 최근 30일 변동성 + sqrt 스케일 ─────────
         vol = np.std(closes[-30:]) if len(closes) >= 30 else closes[-1] * 0.03
 
@@ -10088,28 +11793,28 @@ def xgb_forecast(dd: Dict, days: int = 30):
     try:
         closes = [float(c) for c in dd.get("Close", []) if c is not None]
         if len(closes) < 60: return None
-
+        
         # Calculate recent momentum (short vs long MA)
         short_ma = np.mean(closes[-5:])
         long_ma = np.mean(closes[-20:])
         momentum_strength = (short_ma - long_ma) / long_ma
-
+        
         last_price = closes[-1]
         preds = []
-
+        
         # Simulation parameters
         decay = 0.95 # Momentum decay factor
         current_price = last_price
-
+        
         # Estimated daily drift based on momentum
         # If momentum is 0.05 (5%), daily drift might be approx 0.05/20 per day initially
         drift = momentum_strength * last_price * 0.1
-
+        
         for _ in range(days):
             drift *= decay # Momentum fades over time
             current_price += drift
             preds.append(round(current_price, 2))
-
+        
         return preds
     except Exception:
         return None
@@ -10118,376 +11823,408 @@ def xgb_forecast(dd: Dict, days: int = 30):
 # 섹터 흐름 기본 종목 목록 (메인 페이지 /api/market/sector-summary 용)
 # =============================================================================
 _SECTOR_DEFAULT_STOCKS: list = [
-    # ── 1행 (7섹터) ──────────────────────────────────────────────────
-    # 🔧 반도체
-    {"code": "005930", "name": "삼성전자",        "market": "KOSPI", "sector": "반도체"},
-    {"code": "000660", "name": "SK하이닉스",      "market": "KOSPI", "sector": "반도체"},
-    # ⚡ 전력기기
-    {"code": "010120", "name": "LS일렉트릭",      "market": "KOSPI", "sector": "전력기기"},
-    {"code": "267260", "name": "HD현대일렉트릭",  "market": "KOSPI", "sector": "전력기기"},
-    # 🚢 조선
-    {"code": "009540", "name": "HD한국조선해양",  "market": "KOSPI", "sector": "조선"},
-    {"code": "010140", "name": "삼성중공업",      "market": "KOSPI", "sector": "조선"},
-    # 🛡️ 방산
-    {"code": "012450", "name": "한화에어로스페이스", "market": "KOSPI", "sector": "방산"},
-    {"code": "079550", "name": "LIG넥스원",       "market": "KOSPI", "sector": "방산"},
-    # ⛽ 정유
-    {"code": "096770", "name": "SK이노베이션",    "market": "KOSPI", "sector": "정유"},
-    {"code": "010950", "name": "S-Oil",           "market": "KOSPI", "sector": "정유"},
-    # 🚗 자동차
-    {"code": "005380", "name": "현대차",          "market": "KOSPI", "sector": "자동차"},
-    {"code": "000270", "name": "기아",            "market": "KOSPI", "sector": "자동차"},
-    # 🔋 배터리
-    {"code": "373220", "name": "LG에너지솔루션",  "market": "KOSPI", "sector": "배터리"},
-    {"code": "006400", "name": "삼성SDI",         "market": "KOSPI", "sector": "배터리"},
-    # ── 2행 (7섹터) ──────────────────────────────────────────────────
-    # 🧬 바이오
-    {"code": "068270", "name": "셀트리온",        "market": "KOSPI", "sector": "바이오"},
-    {"code": "207940", "name": "삼성바이오로직스", "market": "KOSPI", "sector": "바이오"},
-    # 🏦 금융
-    {"code": "105560", "name": "KB금융",          "market": "KOSPI", "sector": "금융"},
-    {"code": "055550", "name": "신한지주",        "market": "KOSPI", "sector": "금융"},
-    # 🌐 인터넷
-    {"code": "035420", "name": "NAVER",           "market": "KOSPI", "sector": "인터넷"},
-    {"code": "035720", "name": "카카오",          "market": "KOSPI", "sector": "인터넷"},
-    # 📡 통신
-    {"code": "017670", "name": "SK텔레콤",        "market": "KOSPI", "sector": "통신"},
-    {"code": "030200", "name": "KT",              "market": "KOSPI", "sector": "통신"},
-    # 🧪 화학
-    {"code": "051910", "name": "LG화학",          "market": "KOSPI", "sector": "화학"},
-    {"code": "011170", "name": "롯데케미칼",      "market": "KOSPI", "sector": "화학"},
-    # 🏭 철강
-    {"code": "005490", "name": "POSCO홀딩스",     "market": "KOSPI", "sector": "철강"},
-    {"code": "004020", "name": "현대제철",        "market": "KOSPI", "sector": "철강"},
-    # 💡 에너지
-    {"code": "015760", "name": "한국전력",        "market": "KOSPI", "sector": "에너지"},
-    {"code": "036460", "name": "한국가스공사",    "market": "KOSPI", "sector": "에너지"},
+    # 24개 업종 · 업종당 대표 종목 2개 (화면에서는 등락률순 정렬)
+    {"code": "005930", "name": "삼성전자",       "market": "KOSPI",  "sector": "제조"},
+    {"code": "000660", "name": "SK하이닉스",     "market": "KOSPI",  "sector": "제조"},
+    {"code": "105560", "name": "KB금융",         "market": "KOSPI",  "sector": "금융"},
+    {"code": "055550", "name": "신한지주",       "market": "KOSPI",  "sector": "금융"},
+    {"code": "051910", "name": "LG화학",         "market": "KOSPI",  "sector": "화학"},
+    {"code": "011170", "name": "롯데케미칼",     "market": "KOSPI",  "sector": "화학"},
+    {"code": "000100", "name": "유한양행",       "market": "KOSPI",  "sector": "제약"},
+    {"code": "128940", "name": "한미약품",       "market": "KOSPI",  "sector": "제약"},
+    {"code": "139480", "name": "이마트",         "market": "KOSPI",  "sector": "유통"},
+    {"code": "023530", "name": "롯데쇼핑",       "market": "KOSPI",  "sector": "유통"},
+    {"code": "005380", "name": "현대차",         "market": "KOSPI",  "sector": "운송장비·부품"},
+    {"code": "000270", "name": "기아",           "market": "KOSPI",  "sector": "운송장비·부품"},
+    {"code": "097950", "name": "CJ제일제당",     "market": "KOSPI",  "sector": "음식료·담배"},
+    {"code": "033780", "name": "KT&G",           "market": "KOSPI",  "sector": "음식료·담배"},
+    {"code": "005490", "name": "POSCO홀딩스",    "market": "KOSPI",  "sector": "금속"},
+    {"code": "004020", "name": "현대제철",       "market": "KOSPI",  "sector": "금속"},
+    {"code": "383220", "name": "F&F",            "market": "KOSPI",  "sector": "섬유·의류"},
+    {"code": "020000", "name": "한섬",           "market": "KOSPI",  "sector": "섬유·의류"},
+    {"code": "012750", "name": "에스원",         "market": "KOSPI",  "sector": "일반서비스"},
+    {"code": "034310", "name": "NICE",           "market": "KOSPI",  "sector": "일반서비스"},
+    {"code": "213500", "name": "한솔제지",       "market": "KOSPI",  "sector": "종이·목재"},
+    {"code": "009580", "name": "무림P&P",        "market": "KOSPI",  "sector": "종이·목재"},
+    {"code": "004980", "name": "성신양회",       "market": "KOSPI",  "sector": "비금속"},
+    {"code": "183190", "name": "아세아시멘트",   "market": "KOSPI",  "sector": "비금속"},
+    {"code": "395400", "name": "SK리츠",         "market": "KOSPI",  "sector": "부동산"},
+    {"code": "330590", "name": "롯데리츠",       "market": "KOSPI",  "sector": "부동산"},
+    {"code": "003490", "name": "대한항공",       "market": "KOSPI",  "sector": "운송·창고"},
+    {"code": "011200", "name": "HMM",            "market": "KOSPI",  "sector": "운송·창고"},
+    {"code": "066570", "name": "LG전자",         "market": "KOSPI",  "sector": "전기·전자"},
+    {"code": "009150", "name": "삼성전기",       "market": "KOSPI",  "sector": "전기·전자"},
+    {"code": "032830", "name": "삼성생명",       "market": "KOSPI",  "sector": "보험"},
+    {"code": "005830", "name": "DB손해보험",     "market": "KOSPI",  "sector": "보험"},
+    {"code": "035420", "name": "NAVER",          "market": "KOSPI",  "sector": "IT 서비스"},
+    {"code": "035720", "name": "카카오",         "market": "KOSPI",  "sector": "IT 서비스"},
+    {"code": "000720", "name": "현대건설",       "market": "KOSPI",  "sector": "건설"},
+    {"code": "006360", "name": "GS건설",         "market": "KOSPI",  "sector": "건설"},
+    {"code": "352820", "name": "하이브",         "market": "KOSPI",  "sector": "오락·문화"},
+    {"code": "079160", "name": "CJ CGV",         "market": "KOSPI",  "sector": "오락·문화"},
+    {"code": "034020", "name": "두산에너빌리티", "market": "KOSPI",  "sector": "기계·장비"},
+    {"code": "267260", "name": "HD현대일렉트릭", "market": "KOSPI",  "sector": "기계·장비"},
+    {"code": "015760", "name": "한국전력",       "market": "KOSPI",  "sector": "전기·가스"},
+    {"code": "036460", "name": "한국가스공사",   "market": "KOSPI",  "sector": "전기·가스"},
+    {"code": "017670", "name": "SK텔레콤",       "market": "KOSPI",  "sector": "통신"},
+    {"code": "030200", "name": "KT",             "market": "KOSPI",  "sector": "통신"},
+    {"code": "006800", "name": "미래에셋증권",   "market": "KOSPI",  "sector": "증권"},
+    {"code": "039490", "name": "키움증권",       "market": "KOSPI",  "sector": "증권"},
+    {"code": "145720", "name": "덴티움",         "market": "KOSPI",  "sector": "의료·정밀기기"},
+    {"code": "003160", "name": "디아이",         "market": "KOSPI",  "sector": "의료·정밀기기"},
 ]
 
-# =============================================================================
-# ⚡ 레버리지 예측 엔진 + 🔮 통합 예측 빌더 (Coinview 이식 + 신규)
-# =============================================================================
-def calc_leverage_recommendation(price, atr, atr_pct, volatility_30d,
-                                 rsi, volume_ratio, macd=0.0, macd_signal=0.0, score=50,
-                                 bb_upper=0.0, bb_lower=0.0, ema12=0.0, ema26=0.0):
-    """적정 레버리지(1~20x)·방향·등급·손절/익절·진입 시그널 자동 산출.
-    [변경] 펀딩비(선물) 요소 제거 — ATR·변동성·RSI·거래량 기반으로만 산출."""
-    if not atr_pct or atr_pct <= 0:
-        atr_pct = 2.0
-    base_lev = min(20.0, 20.0 / max(atr_pct, 0.5))           # ATR 클수록 레버리지↓
-    vol_factor = 1.0
-    if   volatility_30d > 150: vol_factor = 0.4
-    elif volatility_30d > 100: vol_factor = 0.6
-    elif volatility_30d > 80:  vol_factor = 0.75
-    elif volatility_30d > 60:  vol_factor = 0.85
-    elif volatility_30d < 30:  vol_factor = 1.1
-    rsi_factor = 1.0
-    if   rsi < 20 or rsi > 80: rsi_factor = 0.7
-    elif rsi < 25 or rsi > 75: rsi_factor = 0.85
-    vol_spike_factor = 1.0
-    if   volume_ratio > 3.0: vol_spike_factor = 0.8
-    elif volume_ratio > 2.0: vol_spike_factor = 0.9
-    final_lev = base_lev * vol_factor * rsi_factor * vol_spike_factor
 
-    if volatility_30d < 40 and final_lev >= 10:
-        risk_grade, risk_color, risk_desc = "Low", "#3fb950", "안전: 변동성이 낮고 추세가 안정적"
-        recommended = int(max(10, min(20, round(final_lev))))
-    elif volatility_30d < 70 and final_lev >= 5:
-        risk_grade, risk_color, risk_desc = "Medium", "#d29922", "주의: 일반적인 시장 상태"
-        recommended = int(max(5, min(9, round(final_lev))))
-    elif volatility_30d < 120 or final_lev >= 3:
-        risk_grade, risk_color, risk_desc = "High", "#f85149", "위험: 변동성이 높음, 레버리지 축소 권장"
-        recommended = int(max(3, min(4, round(final_lev))))
-    else:
-        risk_grade, risk_color, risk_desc = "Extreme", "#ff0000", "극도 위험: 극심한 변동성, 현물 거래 권장"
-        recommended = int(max(1, min(2, round(final_lev))))
+def _fallback_sector_summary() -> dict:
+    """외부 장애 시 추가 시세 호출 없이 24개 업종 골격을 즉시 반환한다."""
+    from market_briefing.sector_flow import build_sector_flow
 
-    is_ema_bullish = ema12 > ema26 if (ema12 and ema26) else False
-    is_macd_bullish = macd > macd_signal
-    is_overbought = rsi > 70 or (bb_upper > 0 and price >= bb_upper)
-    is_oversold   = rsi < 30 or (bb_lower > 0 and price <= bb_lower)
-    if score >= 65:
-        position, position_desc = ("Neutral", "강한 상승이나 단기 과열 (조정 주의)") if is_overbought \
-            else ("Long", "강한 상승 추세 (AI 및 지표 우수)")
-    elif score <= 35:
-        position, position_desc = ("Neutral", "강한 하락이나 단기 투매 (반등 주의)") if is_oversold \
-            else ("Short", "강한 하락 추세 (AI 및 지표 약세)")
-    else:
-        if is_ema_bullish and is_macd_bullish and rsi > 50:
-            position, position_desc = ("Short", "볼린저 상단 저항 (단기 하락 전환 예상)") if (bb_upper > 0 and price >= bb_upper) \
-                else ("Long", "단기 상승 모멘텀 (EMA 정배열 및 MACD 호조)")
-        elif not is_ema_bullish and not is_macd_bullish and rsi < 50:
-            position, position_desc = ("Long", "볼린저 하단 지지 (단기 반등 예상)") if (bb_lower > 0 and price <= bb_lower) \
-                else ("Short", "단기 하락 모멘텀 (EMA 역배열 및 MACD 약세)")
-        else:
-            position, position_desc = "Neutral", "추세 불분명 (관망 권장)"
+    snapshots = [{**item, "quote": {}} for item in _SECTOR_DEFAULT_STOCKS]
+    result = build_sector_flow(snapshots)
+    result["source"] = "StockOracle KOSPI 대체 데이터"
+    result["is_fallback"] = True
+    result["performance"] = {"cache_hit": False, "fallback": True, "total_ms": 0.0}
+    for sector in result.get("sectors", []):
+        sector["upcode"] = ""
+        # 대체 모드도 클릭 시 최신 quote를 다시 비교해 상위 종목을 결정한다.
+        sector["top_stocks"] = []
+    return result
 
-    position_size_pct = round(min(10.0, 10.0 / max(recommended, 1)), 1)
-    stop_loss_pct  = round(atr_pct * 1.5, 2)
-    take_profit_pct = round(stop_loss_pct * 2.0, 2)
-    lev_stop_loss_pct = round(stop_loss_pct * recommended, 1)
-    long_stop = price + atr * 0.5;  short_stop = price - atr * 0.5
-    trading_signals = {
-        "long":  {"stop": round(long_stop, 8),  "limit": round(long_stop * 1.001, 8),
-                  "sl": round(price - atr * 1.5, 8), "tp": round(price * (1 + take_profit_pct/100), 8),
-                  "leverage": recommended},
-        "short": {"stop": round(short_stop, 8), "limit": round(short_stop * 0.999, 8),
-                  "sl": round(price + atr * 1.5, 8), "tp": round(price * (1 - take_profit_pct/100), 8),
-                  "leverage": recommended},
-    }
+
+@ttl_cache(300)
+def _fallback_sector_top_stocks(sector_name: str) -> dict:
+    from market_briefing.data_fetcher import fetch_stock_list_quote_only
+
+    configs = [item for item in _SECTOR_DEFAULT_STOCKS if item.get("sector") == sector_name]
+    if not configs:
+        return {"error": "지원하지 않는 코스피 업종입니다."}
+    snapshots = fetch_stock_list_quote_only(configs, max_workers=2)
+    stocks = []
+    for snapshot in snapshots:
+        quote = snapshot.get("quote") or {}
+        try:
+            pct = float(quote.get("change_pct_num"))
+        except (TypeError, ValueError):
+            pct = None
+        stocks.append({
+            "code": snapshot.get("code", ""),
+            "name": snapshot.get("name") or snapshot.get("code", ""),
+            "change_pct": round(pct, 2) if pct is not None else None,
+            "price": quote.get("price_num"),
+            "direction": "up" if pct is not None and pct > 0 else "down" if pct is not None and pct < 0 else "flat",
+        })
+    stocks.sort(key=lambda item: (
+        item["change_pct"] is None,
+        -(item["change_pct"] or 0),
+        item["name"],
+    ))
     return {
-        "position": position, "position_desc": position_desc,
-        "recommended_leverage": recommended, "max_leverage": min(recommended * 2, 20),
-        "risk_grade": risk_grade, "risk_color": risk_color, "risk_desc": risk_desc,
-        "position_size_pct": position_size_pct, "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct, "lev_stop_loss_pct": lev_stop_loss_pct,
-        "trading_signals": trading_signals,
-        "factors": {
-            "base_leverage": round(base_lev, 2), "vol_factor": round(vol_factor, 2),
-            "rsi_factor": round(rsi_factor, 2),
-            "vol_spike_factor": round(vol_spike_factor, 2), "atr_pct": round(atr_pct, 2),
-            "volatility_30d": round(volatility_30d, 1) if volatility_30d else None,
-        },
+        "sector": sector_name,
+        "stocks": stocks[:2],
+        "source": "StockOracle KOSPI 대체 데이터",
+        "is_fallback": True,
     }
 
-def calc_liquidation_risk(price, leverage, position, atr_pct, mmr=0.005):
-    """격리 마진 기준 청산가·청산 위험도(ATR 버퍼) 산출."""
-    lev = max(1, int(leverage or 1))
-    if not price or price <= 0:
-        return None
-    liq = price * (1 + 1.0/lev - mmr) if position == "Short" else price * (1 - 1.0/lev + mmr)
-    distance_pct = abs(liq - price) / price * 100
-    atr_buffer = (distance_pct / atr_pct) if atr_pct and atr_pct > 0 else 99
-    if   atr_buffer <= 1.5: level, color, desc = "매우 높음", "#ff0000", "변동성 1.5 ATR 내 청산 — 즉시 레버리지 축소"
-    elif atr_buffer <= 3:   level, color, desc = "높음", "#f85149", "변동성 3 ATR 내 청산 가능 — 손절 필수"
-    elif atr_buffer <= 6:   level, color, desc = "보통", "#d29922", "일반적 안전 마진 — 손절 준수 시 관리 가능"
-    else:                   level, color, desc = "낮음", "#3fb950", "청산가까지 충분한 거리 확보"
-    return {"liquidation_price": round(liq, 8), "distance_pct": round(distance_pct, 2),
-            "atr_buffer": round(atr_buffer, 1), "level": level, "color": color, "desc": desc}
 
-def calc_trend_strength(score, ema12, ema26, rsi, adx=0.0):
-    """추세 강도(0~100)·등급 산출 (ADX 있으면 가중)."""
-    strength = abs(score - 50) * 1.4
-    if ema12 and ema26 and ema26 != 0:
-        strength += min(abs(ema12 - ema26) / ema26 * 100 * 4, 22)
-    if rsi >= 60 or rsi <= 40:
-        strength += 8
-    if adx:
-        strength = strength * 0.7 + min(adx, 100) * 0.3
-    strength = max(0, min(100, strength))
-    grade = "매우 강함" if strength >= 70 else "강함" if strength >= 45 else "보통" if strength >= 25 else "약함 (횡보)"
-    return round(strength, 0), grade
+_PEER_INDUSTRY_GROUPS: dict = {
+    "KRX": {
+        "반도체": [("005930.KS", "삼성전자"), ("000660.KS", "SK하이닉스"), ("000990.KS", "DB하이텍"), ("042700.KS", "한미반도체"), ("403870.KQ", "HPSP")],
+        "전력기기": [("010120.KS", "LS일렉트릭"), ("267260.KS", "HD현대일렉트릭"), ("298040.KS", "효성중공업"), ("062040.KS", "산일전기")],
+        "조선": [("009540.KS", "HD한국조선해양"), ("010140.KS", "삼성중공업"), ("042660.KS", "한화오션"), ("329180.KS", "HD현대중공업")],
+        "방산": [("012450.KS", "한화에어로스페이스"), ("079550.KS", "LIG넥스원"), ("047810.KS", "한국항공우주"), ("064350.KS", "현대로템"), ("272210.KS", "한화시스템")],
+        "정유": [("096770.KS", "SK이노베이션"), ("010950.KS", "S-Oil"), ("078930.KS", "GS"), ("267250.KS", "HD현대")],
+        "자동차": [("005380.KS", "현대차"), ("000270.KS", "기아"), ("012330.KS", "현대모비스"), ("161390.KS", "한국타이어앤테크놀로지"), ("018880.KS", "한온시스템")],
+        "배터리": [("373220.KS", "LG에너지솔루션"), ("006400.KS", "삼성SDI"), ("247540.KQ", "에코프로비엠"), ("003670.KS", "포스코퓨처엠"), ("066970.KQ", "엘앤에프")],
+        "바이오": [("068270.KS", "셀트리온"), ("207940.KS", "삼성바이오로직스"), ("196170.KQ", "알테오젠"), ("028300.KQ", "HLB"), ("000100.KS", "유한양행")],
+        "금융": [("105560.KS", "KB금융"), ("055550.KS", "신한지주"), ("086790.KS", "하나금융지주"), ("316140.KS", "우리금융지주"), ("024110.KS", "기업은행")],
+        "인터넷·게임": [("035420.KS", "NAVER"), ("035720.KS", "카카오"), ("259960.KS", "크래프톤"), ("036570.KS", "엔씨소프트"), ("251270.KS", "넷마블")],
+        "통신": [("017670.KS", "SK텔레콤"), ("030200.KS", "KT"), ("032640.KS", "LG유플러스")],
+        "화학": [("051910.KS", "LG화학"), ("011170.KS", "롯데케미칼"), ("009830.KS", "한화솔루션"), ("011780.KS", "금호석유"), ("010060.KS", "OCI홀딩스")],
+        "철강": [("005490.KS", "POSCO홀딩스"), ("004020.KS", "현대제철"), ("010130.KS", "고려아연"), ("460860.KS", "동국제강"), ("001430.KS", "세아베스틸지주")],
+        "에너지": [("015760.KS", "한국전력"), ("036460.KS", "한국가스공사"), ("034020.KS", "두산에너빌리티"), ("018670.KS", "SK가스"), ("078930.KS", "GS")],
+    },
+    "US": {
+        "Technology": [("AAPL", "Apple"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"), ("AVGO", "Broadcom"), ("ORCL", "Oracle")],
+        "Communication Services": [("GOOGL", "Alphabet"), ("META", "Meta"), ("NFLX", "Netflix"), ("DIS", "Disney"), ("TMUS", "T-Mobile")],
+        "Consumer Cyclical": [("AMZN", "Amazon"), ("TSLA", "Tesla"), ("HD", "Home Depot"), ("NKE", "Nike"), ("SBUX", "Starbucks")],
+        "Consumer Defensive": [("WMT", "Walmart"), ("COST", "Costco"), ("PG", "Procter & Gamble"), ("KO", "Coca-Cola"), ("PEP", "PepsiCo")],
+        "Financial Services": [("JPM", "JPMorgan"), ("BAC", "Bank of America"), ("GS", "Goldman Sachs"), ("MS", "Morgan Stanley"), ("V", "Visa")],
+        "Healthcare": [("LLY", "Eli Lilly"), ("UNH", "UnitedHealth"), ("JNJ", "Johnson & Johnson"), ("MRK", "Merck"), ("ABBV", "AbbVie")],
+        "Energy": [("XOM", "Exxon Mobil"), ("CVX", "Chevron"), ("COP", "ConocoPhillips"), ("EOG", "EOG Resources"), ("SLB", "SLB")],
+        "Industrials": [("GE", "GE Aerospace"), ("CAT", "Caterpillar"), ("HON", "Honeywell"), ("RTX", "RTX"), ("BA", "Boeing")],
+        "Basic Materials": [("LIN", "Linde"), ("FCX", "Freeport-McMoRan"), ("NEM", "Newmont"), ("NUE", "Nucor"), ("DOW", "Dow")],
+        "Utilities": [("NEE", "NextEra Energy"), ("SO", "Southern Company"), ("DUK", "Duke Energy"), ("AEP", "AEP"), ("EXC", "Exelon")],
+        "Real Estate": [("PLD", "Prologis"), ("AMT", "American Tower"), ("EQIX", "Equinix"), ("SPG", "Simon Property"), ("O", "Realty Income")],
+    },
+}
 
-def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, prob_down,
-                     derivatives: Dict | None = None):
-    """🔮 예측 탭 통합 데이터: 방향성·2단계 진입·손절·목표·파생 위험."""
-    def v(k):
-        a = dd.get(k, [])
-        try: return float(a[-1])
-        except Exception: return 0.0
-    rsi = v("RSI"); ema12 = dd.get("EMA12") and v("EMA12") or 0.0
-    macd = v("MACD"); ema_s = v("EMA20"); ema_l = v("EMA50")
-    adx = v("ADX"); vol_30d = (leverage_info or {}).get("factors", {}).get("volatility_30d") or 0.0
+_US_DETAILED_PEER_GROUPS = {
+    "Semiconductors": {
+        "keywords": ("semiconductor",),
+        "members": [("NVDA", "NVIDIA"), ("AVGO", "Broadcom"), ("AMD", "AMD"), ("INTC", "Intel"), ("QCOM", "Qualcomm")],
+    },
+    "Consumer Electronics": {
+        "keywords": ("consumer electronics", "computer hardware"),
+        "members": [("AAPL", "Apple"), ("DELL", "Dell"), ("HPQ", "HP"), ("SONY", "Sony"), ("LOGI", "Logitech")],
+    },
+    "Software": {
+        "keywords": ("software",),
+        "members": [("MSFT", "Microsoft"), ("ORCL", "Oracle"), ("CRM", "Salesforce"), ("ADBE", "Adobe"), ("NOW", "ServiceNow")],
+    },
+    "Internet Content": {
+        "keywords": ("internet content", "interactive media"),
+        "members": [("GOOGL", "Alphabet"), ("META", "Meta"), ("SNAP", "Snap"), ("PINS", "Pinterest"), ("RDDT", "Reddit")],
+    },
+    "Auto Manufacturers": {
+        "keywords": ("auto manufacturer", "automobile manufacturer"),
+        "members": [("TSLA", "Tesla"), ("GM", "General Motors"), ("F", "Ford"), ("STLA", "Stellantis"), ("RIVN", "Rivian")],
+    },
+    "Banks": {
+        "keywords": ("bank",),
+        "members": [("JPM", "JPMorgan"), ("BAC", "Bank of America"), ("WFC", "Wells Fargo"), ("C", "Citigroup"), ("USB", "U.S. Bancorp")],
+    },
+    "Drug Manufacturers": {
+        "keywords": ("drug manufacturer", "biotechnology"),
+        "members": [("LLY", "Eli Lilly"), ("JNJ", "Johnson & Johnson"), ("MRK", "Merck"), ("ABBV", "AbbVie"), ("PFE", "Pfizer")],
+    },
+    "Oil & Gas": {
+        "keywords": ("oil & gas", "oil and gas"),
+        "members": [("XOM", "Exxon Mobil"), ("CVX", "Chevron"), ("COP", "ConocoPhillips"), ("BP", "BP"), ("SHEL", "Shell")],
+    },
+    "Aerospace & Defense": {
+        "keywords": ("aerospace", "defense"),
+        "members": [("RTX", "RTX"), ("LMT", "Lockheed Martin"), ("NOC", "Northrop Grumman"), ("GD", "General Dynamics"), ("BA", "Boeing")],
+    },
+}
 
-    if prob_up - prob_down >= 8:    direction = "LONG"
-    elif prob_down - prob_up >= 8:  direction = "SHORT"
-    else:                           direction = "NEUTRAL"
-    if not atr or atr <= 0:
-        atr = price * 0.02
-    lev = (leverage_info or {}).get("recommended_leverage", 3)
+_KRX_PEER_KEYWORDS = {
+    "반도체": ("반도체", "semiconductor"), "전력기기": ("전력기기", "전기장비", "electrical equipment"),
+    "조선": ("조선", "shipbuilding"), "방산": ("방산", "항공우주", "aerospace", "defense"),
+    "정유": ("정유", "석유", "oil", "refining"), "자동차": ("자동차", "auto", "vehicle"),
+    "배터리": ("배터리", "이차전지", "battery"), "바이오": ("바이오", "제약", "pharma", "biotech"),
+    "금융": ("금융", "은행", "보험", "financial", "bank"), "인터넷·게임": ("인터넷", "게임", "software", "interactive"),
+    "통신": ("통신", "telecom"), "화학": ("화학", "chemical"), "철강": ("철강", "steel", "metal"),
+    "에너지": ("에너지", "전력", "가스", "energy", "utility"),
+}
 
-    # 손절 1.5 ATR, 목표 3.0/4.5/6.0 ATR → 1차 R:R 1:2.
-    # 숏은 진입·추가 진입·손절·목표를 모두 가격축 반대 방향으로 대칭 계산한다.
-    if direction == "SHORT":
-        entry_low, entry_high = price - atr * 0.10, price + atr * 0.25
-        second_low, second_high = price + atr * 0.50, price + atr * 1.00
-        stop_loss = price + atr * 1.5
-        targets = [round(price - atr * m, 8) for m in (3.0, 4.5, 6.0)]
-    elif direction == "LONG":
-        entry_low, entry_high = price - atr * 0.25, price + atr * 0.10
-        second_low, second_high = price - atr * 1.00, price - atr * 0.50
-        stop_loss = price - atr * 1.5
-        targets = [round(price + atr * m, 8) for m in (3.0, 4.5, 6.0)]
-    else:
-        entry_low, entry_high = price - atr * 0.25, price + atr * 0.25
-        second_low, second_high = price - atr * 0.75, price + atr * 0.75
-        stop_loss = price - atr * 1.5
-        targets = [round(price + atr * m, 8) for m in (2.0, 3.0, 4.0)]
-    target_pcts = [round((t - price) / price * 100, 2) for t in targets]
-    risk_dist = abs(price - stop_loss); reward_dist = abs(targets[0] - price)
-    rr_ratio = round(reward_dist / risk_dist, 2) if risk_dist > 0 else 0
 
-    liq = calc_liquidation_risk(price, lev, ("Short" if direction == "SHORT" else "Long"), atr_pct)
-    trend_val, trend_grade = calc_trend_strength(score, ema_s, ema_l, rsi, adx)
-    conf = abs(prob_up - prob_down) * 0.6 + trend_val * 0.4
-    conf += {"Low": 5, "Medium": 0, "High": -8, "Extreme": -15}.get((leverage_info or {}).get("risk_grade", "Medium"), 0)
-    confidence = int(max(5, min(95, conf)))
-    if   vol_30d >= 120: vol_risk = ("매우 높음", "#ff0000")
-    elif vol_30d >= 80:  vol_risk = ("높음", "#f85149")
-    elif vol_30d >= 50:  vol_risk = ("보통", "#d29922")
-    else:                vol_risk = ("낮음", "#3fb950")
-
-    dir_kr = {"LONG": "롱(상승)", "SHORT": "숏(하락)", "NEUTRAL": "관망"}[direction]
-    entry_prefix = "매수" if direction == "LONG" else "숏 진입" if direction == "SHORT" else "관망"
-    if direction == "SHORT":
-        invalidation_text = "손절가 이상 종가 안착 시 숏 시나리오 무효"
-        stop_action = "가격 상승 시 손실이 확대되므로 손절가 이상에서 숏 포지션 정리"
-    elif direction == "LONG":
-        invalidation_text = "손절가 이하 종가 이탈 시 롱 시나리오 무효"
-        stop_action = "가격 하락 시 손실이 확대되므로 손절가 이하에서 롱 포지션 정리"
-    else:
-        invalidation_text = "방향 확정 전 신규 레버리지 진입 보류"
-        stop_action = "롱·숏 확률 차이가 8%p 미만이면 관망을 우선"
-
-    def _zone(low, high):
-        return {"low": round(min(low, high), 8), "high": round(max(low, high), 8)}
-
-    trade_plan = {
-        "direction": direction,
-        "direction_kr": dir_kr,
-        "first_entry": _zone(entry_low, entry_high),
-        "second_entry": _zone(second_low, second_high),
-        "first_label": f"⚡ 1차 {entry_prefix} 구간 (ATR 기반) · 소액 탐색",
-        "second_label": f"📍 2차 {entry_prefix} 구간 · 주 진입",
-        "stop_loss": round(stop_loss, 8),
-        "stop_distance_atr": 1.5,
-        "invalidation_text": invalidation_text,
-        "stop_action": stop_action,
-        "risk_basis": ["ATR 1.5배 손절", "격리 마진 기준 청산가", "펀딩비·롱숏 비율·ADL 위험"],
-        "derivatives": derivatives or {},
-    }
-    return {
-        "prob_up": prob_up, "prob_down": prob_down,
-        "direction": direction, "direction_kr": dir_kr, "recommended_leverage": lev,
-        "entry_zone": _zone(entry_low, entry_high),
-        "stop_loss": round(stop_loss, 8),
-        "trade_plan": trade_plan,
-        "targets": [
-            {"label": "1차 목표가", "price": targets[0], "pct": target_pcts[0]},
-            {"label": "2차 목표가", "price": targets[1], "pct": target_pcts[1]},
-            {"label": "3차 목표가", "price": targets[2], "pct": target_pcts[2]},
-        ],
-        "risk": {
-            "rr_ratio": rr_ratio, "confidence": confidence,
-            "volatility_risk": {"level": vol_risk[0], "color": vol_risk[1], "value": round(vol_30d, 1)},
-            "liquidation_risk": liq,
-            "trend_strength": {"value": trend_val, "grade": trend_grade},
-        },
-    }
-
-def align_prediction_stop_with_detailed_entries(prediction: Dict, buy_price: Dict,
-                                                current_price: float, atr: float) -> Dict:
-    """상세 A/B/C 분할 진입 단계 전체 바깥에 방향별 공통 손절가를 배치한다."""
-    if not prediction or not buy_price or not current_price:
-        return prediction
-    plan = prediction.get("trade_plan") or {}
-    direction = str(plan.get("direction") or prediction.get("direction") or "NEUTRAL").upper()
-    if direction not in ("LONG", "SHORT"):
-        return prediction
-
-    source_prices: list[float] = []
-    for group_name in ("aggressive_bands", "recommended_bands"):
-        for band in buy_price.get(group_name) or []:
-            for step in band.get("steps") or []:
-                try:
-                    value = float(step.get("price"))
-                    if value > 0:
-                        source_prices.append(value)
-                except (TypeError, ValueError):
-                    continue
-    if not source_prices:
-        return prediction
-
-    price = float(current_price)
-    buffer_value = max(float(atr or 0.0) * 0.5, price * 0.001)
-    existing = float(plan.get("stop_loss") or prediction.get("stop_loss") or price)
-    if direction == "SHORT":
-        detailed_entries = [price * 2.0 - value for value in source_prices]
-        aligned_stop = max(existing, max(detailed_entries) + buffer_value)
-    else:
-        aligned_stop = min(existing, min(source_prices) - buffer_value)
-    aligned_stop = max(price * 0.000001, aligned_stop)
-
-    rounded_stop = round(aligned_stop, 8)
-    plan["stop_loss"] = rounded_stop
-    prediction["stop_loss"] = rounded_stop
-    first_target = ((prediction.get("targets") or [{}])[0]).get("price")
+def _related_symbols_from_yahoo(symbol: str, limit: int = 5) -> list[tuple[str, str]]:
+    """정적 업종군 미분류 시 Yahoo 관련 종목을 제한적으로 보조 사용한다."""
     try:
-        risk_distance = abs(rounded_stop - price)
-        reward_distance = abs(float(first_target) - price)
-        if risk_distance > 0:
-            prediction.setdefault("risk", {})["rr_ratio"] = round(reward_distance / risk_distance, 2)
-    except (TypeError, ValueError):
+        url = f"https://query1.finance.yahoo.com/v6/finance/recommendationsbysymbol/{quote(symbol)}"
+        payload = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5).json()
+        results = ((payload.get("finance") or {}).get("result") or [])
+        recommended = (results[0].get("recommendedSymbols") or []) if results else []
+        return [(str(item.get("symbol") or "").upper(), str(item.get("symbol") or "").upper())
+                for item in recommended[:limit] if item.get("symbol")]
+    except Exception:
+        return []
+
+
+def _is_ticker_display_name(name: str, ticker: str) -> bool:
+    """표시명이 비었거나 티커/6자리 코드 자체인지 판별한다."""
+    value = str(name or "").strip().upper()
+    ticker = str(ticker or "").strip().upper()
+    bare_ticker = ticker.split(".", 1)[0]
+    return not value or value in {ticker, bare_ticker} or bool(
+        re.fullmatch(r"[0-9A-Z]{6}(?:\.(?:KS|KQ))?", value)
+    )
+
+
+@ttl_cache(86400)
+def _yahoo_security_display_name(ticker: str) -> str:
+    """정적 맵에 없는 해외 종목명을 Yahoo 검색 결과에서 보완한다."""
+    try:
+        response = requests.get(
+            "https://query1.finance.yahoo.com/v1/finance/search",
+            params={"q": ticker, "quotesCount": 8, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        for item in response.json().get("quotes") or []:
+            if str(item.get("symbol") or "").upper() != ticker.upper():
+                continue
+            name = str(item.get("longname") or item.get("shortname") or "").strip()
+            if not _is_ticker_display_name(name, ticker):
+                return name
+    except Exception:
         pass
-    return prediction
+    return ""
 
-# =============================================================================
-# 라우팅
-# =============================================================================
-def build_crypto_signal_confidence(
-    technical_score: float,
-    ai_score: float | None,
-    regime: str,
-    news_items: list | None = None,
-    volatility_pct: float = 0.0,
-) -> Dict:
-    """주식 재무·실적 API 없이 코인 분석 신호의 일치도 계약을 생성한다."""
-    tech = _clip(float(technical_score), 0.0, 100.0)
-    ai = _clip(float(ai_score), 0.0, 100.0) if ai_score is not None else 50.0
-    market_score = {"BULL": 70.0, "NEUTRAL": 50.0, "BEAR": 30.0}.get(regime, 50.0)
-    components = [tech, ai, market_score]
-    weighted = tech * 0.55 + ai * 0.25 + market_score * 0.20
-    dispersion = float(np.std(components))
 
-    positive_words = ("surge", "rally", "approval", "adoption", "inflow", "upgrade", "상승", "급등", "승인", "채택", "유입")
-    negative_words = ("hack", "exploit", "lawsuit", "ban", "outflow", "liquidation", "하락", "급락", "해킹", "규제", "유출", "청산")
-    titles = [str((item or {}).get("title") or "").lower() for item in (news_items or []) if (item or {}).get("title")]
-    pos = sum(any(word in title for word in positive_words) for title in titles)
-    neg = sum(any(word in title for word in negative_words) for title in titles)
-    sentiment_score = _clip(50.0 + (pos - neg) * 8.0, 10.0, 90.0)
-    if titles:
-        weighted = weighted * 0.90 + sentiment_score * 0.10
+def _resolve_peer_display_name(ticker: str, supplied_name: str, market: str) -> str:
+    """동종기업 티커를 실제 종목명으로 바꾸며, 코드 자체는 반환하지 않는다."""
+    ticker = str(ticker or "").strip().upper()
+    supplied_name = str(supplied_name or "").strip()
+    if not _is_ticker_display_name(supplied_name, ticker):
+        return supplied_name
 
-    vol_penalty = _clip((float(volatility_pct or 0.0) - 4.0) * 0.8, 0.0, 12.0)
-    missing_penalty = 6.0 if ai_score is None else 0.0
-    confidence = _clip(80.0 - dispersion * 0.85 - vol_penalty - missing_penalty, 25.0, 88.0)
-    spread = _clip(12.0 + dispersion * 0.55 + vol_penalty, 12.0, 42.0)
-    lower = _clip(confidence - spread / 2.0, 0.0, 100.0)
-    upper = _clip(confidence + spread / 2.0, 0.0, 100.0)
-    signal = "BUY" if weighted >= 60.0 else "SELL" if weighted <= 40.0 else "NEUTRAL"
-    regime_label = {"BULL": "Risk-On", "BEAR": "Risk-Off"}.get(regime, "Neutral")
-    reasons = []
-    if dispersion >= 18.0:
-        reasons.append("기술·복합·시장 신호 간 편차가 큼")
-    if vol_penalty:
-        reasons.append("코인 변동성 확대로 신뢰 구간을 보수적으로 확대")
-    if ai_score is None:
-        reasons.append("복합 점수 일부 미확보")
-    if not titles:
-        reasons.append("관련 뉴스 표본이 없어 뉴스 감정은 중립 처리")
+    # 앱이 관리하는 정적 비교군을 먼저 사용해 외부 호출을 최소화한다.
+    for groups in _PEER_INDUSTRY_GROUPS.values():
+        for members in groups.values():
+            for member_ticker, member_name in members:
+                if member_ticker.upper() == ticker and not _is_ticker_display_name(member_name, ticker):
+                    return member_name
+    for group in _US_DETAILED_PEER_GROUPS.values():
+        for member_ticker, member_name in group["members"]:
+            if member_ticker.upper() == ticker and not _is_ticker_display_name(member_name, ticker):
+                return member_name
+
+    if market == "KRX" or ticker.endswith((".KS", ".KQ")):
+        code = ticker.split(".", 1)[0]
+        for name, mapped_ticker in KR_STOCK_MAP.items():
+            if str(mapped_ticker).upper() == ticker and not _is_ticker_display_name(name, ticker):
+                return name
+        for item in _SECTOR_DEFAULT_STOCKS:
+            if item["code"] == code:
+                return item["name"]
+        try:
+            _, code_to_name = get_krx_code_map()
+            name = str(code_to_name.get(code) or "").strip()
+            if not _is_ticker_display_name(name, ticker):
+                return name
+        except Exception:
+            pass
+        return ""
+
+    # 해외 정적 한글 별칭을 보조하고, 그래도 없을 때만 Yahoo 이름 조회.
+    for name, mapped_ticker in US_STOCK_MAPPING.items():
+        if str(mapped_ticker).upper() == ticker and not _is_ticker_display_name(name, ticker):
+            return name
+    return _yahoo_security_display_name(ticker)
+
+
+def _resolve_peer_group(symbol: str, market: str, sector: str = "", industry: str = "") -> tuple[str, list[tuple[str, str]]]:
+    symbol = str(symbol or "").upper()
+    groups = _PEER_INDUSTRY_GROUPS.get(market, {})
+    context = f"{sector} {industry}".casefold().strip()
+    if market == "US" and context:
+        for group_name, group in _US_DETAILED_PEER_GROUPS.items():
+            if any(keyword.casefold() in context for keyword in group["keywords"]):
+                return group_name, group["members"]
+    for group_name, members in groups.items():
+        if any(member_symbol.upper() == symbol for member_symbol, _ in members):
+            return group_name, members
+    if market == "KRX":
+        for group_name, keywords in _KRX_PEER_KEYWORDS.items():
+            if any(keyword.casefold() in context for keyword in keywords):
+                return group_name, groups.get(group_name, [])
+    else:
+        for group_name in groups:
+            if context and (group_name.casefold() in context or context in group_name.casefold()):
+                return group_name, groups[group_name]
+    fallback_name = str(industry or sector or "관련 종목").strip()
+    return fallback_name, _related_symbols_from_yahoo(symbol)
+
+
+def _peer_frame(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    if isinstance(raw.columns, pd.MultiIndex):
+        for level in range(raw.columns.nlevels):
+            if symbol in raw.columns.get_level_values(level):
+                try:
+                    return raw.xs(symbol, axis=1, level=level).dropna(how="all")
+                except Exception:
+                    continue
+        return pd.DataFrame()
+    return raw.copy()
+
+
+def _peer_momentum_signal(df: pd.DataFrame) -> dict | None:
+    if df is None or df.empty or "Close" not in df:
+        return None
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+    if len(close) < 21 or float(close.iloc[-1]) <= 0:
+        return None
+    ret5 = (float(close.iloc[-1]) / float(close.iloc[-6]) - 1) * 100
+    ret20 = (float(close.iloc[-1]) / float(close.iloc[-21]) - 1) * 100
+    ma20 = float(close.iloc[-20:].mean())
+    above_ma20 = float(close.iloc[-1]) >= ma20
+    delta = close.diff().dropna()
+    avg_gain = float(delta.clip(lower=0).iloc[-14:].mean())
+    avg_loss = float((-delta.clip(upper=0)).iloc[-14:].mean())
+    if avg_loss <= 0:
+        rsi = 100.0 if avg_gain > 0 else 50.0
+    elif avg_gain <= 0:
+        rsi = 0.0
+    else:
+        rsi = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    score = (50.0 + max(-14.0, min(14.0, ret5 * 1.8)) +
+             max(-14.0, min(14.0, ret20 * 0.65)) + (7.0 if above_ma20 else -7.0) +
+             max(-5.0, min(5.0, (rsi - 50.0) * 0.2)))
+    up_probability = round(max(15.0, min(85.0, score)), 1)
     return {
-        "confidence": round(confidence, 1),
-        "weighted_score": round(weighted, 1),
-        "signal": signal,
-        "confidence_interval": {
-            "lower": round(lower, 1), "upper": round(upper, 1),
-            "spread": round(upper - lower, 1), "reason": reasons,
-        },
-        "macro_regime": {"regime": regime_label, "components": {"btc_regime": regime}},
-        "sector_relative": {},
-        "days_to_earnings": None,
-        "earnings_risk": False,
-        "sentiment": {
-            "overall": "positive" if sentiment_score > 55 else "negative" if sentiment_score < 45 else "neutral",
-            "sentiment_score": round(sentiment_score, 1),
-            "sentiment_source": "keyword",
-            "source_breakdown": {"google_news": len(titles)} if titles else {},
-            "quality": "limited" if len(titles) < 3 else "normal",
-            "effective_n": len(titles),
-            "credibility_weighted": False,
-            "reasons": [],
-        },
-        "cap_reasons": reasons,
+        "last": round(float(close.iloc[-1]), 4), "return_5d": round(ret5, 2),
+        "return_20d": round(ret20, 2), "above_ma20": above_ma20,
+        "rsi": round(rsi, 1), "up_probability": up_probability,
+        "down_probability": round(100.0 - up_probability, 1),
+        "trend": "상승" if up_probability >= 57 else "하락" if up_probability <= 43 else "혼조",
+    }
+
+
+@ttl_cache(300)
+def build_peer_industry_outlook(symbol: str, market: str, company: str = "", sector: str = "", industry: str = "") -> dict:
+    """동종기업 가격 모멘텀을 집계해 업계 상승·하락 가능성과 비교표를 만든다."""
+    symbol = str(symbol or "").upper()
+    market = "KRX" if str(market or "").upper() == "KRX" or symbol.endswith((".KS", ".KQ")) else "US"
+    group_name, members = _resolve_peer_group(symbol, market, sector, industry)
+    peer_members = []
+    for ticker, supplied_name in members:
+        if ticker.upper() == symbol:
+            continue
+        display_name = _resolve_peer_display_name(ticker, supplied_name, market)
+        # 이름을 확인하지 못한 종목은 코드로 대체하지 않고 비교 목록에서 제외한다.
+        if display_name:
+            peer_members.append((ticker, display_name))
+        if len(peer_members) >= 5:
+            break
+    download_symbols = [symbol] + [ticker for ticker, _ in peer_members]
+    if len(download_symbols) < 2:
+        return {"ok": False, "reason": "비교 가능한 동종기업 데이터가 부족합니다.", "symbol": symbol,
+                "company": company or symbol, "market": market, "sector": sector, "industry": industry or group_name}
+    try:
+        raw = yf.download(download_symbols, period="3mo", interval="1d", progress=False,
+                          auto_adjust=True, threads=True, timeout=8)
+    except Exception:
+        raw = pd.DataFrame()
+
+    peers = []
+    for ticker, name in peer_members:
+        signal = _peer_momentum_signal(_peer_frame(raw, ticker))
+        if signal:
+            peers.append({"ticker": ticker, "name": name, **signal})
+    selected = _peer_momentum_signal(_peer_frame(raw, symbol))
+    if not peers:
+        return {"ok": False, "reason": "동종기업 시세를 충분히 확보하지 못했습니다.", "symbol": symbol,
+                "company": company or symbol, "market": market, "sector": sector, "industry": industry or group_name}
+
+    up_probability = round(float(np.mean([peer["up_probability"] for peer in peers])), 1)
+    down_probability = round(100.0 - up_probability, 1)
+    avg_5d = round(float(np.mean([peer["return_5d"] for peer in peers])), 2)
+    avg_20d = round(float(np.mean([peer["return_20d"] for peer in peers])), 2)
+    breadth = round(sum(1 for peer in peers if peer["above_ma20"]) / len(peers) * 100, 1)
+    label = "상승 우위" if up_probability >= 57 else "하락 우위" if up_probability <= 43 else "방향 혼조"
+    reasons = [
+        f"동종기업 {len(peers)}개 평균 5일 수익률 {avg_5d:+.2f}%",
+        f"동종기업 평균 20일 수익률 {avg_20d:+.2f}%",
+        f"MA20 상회 종목 비율 {breadth:.1f}%",
+    ]
+    relative = None
+    if selected:
+        relative = round(selected["up_probability"] - up_probability, 1)
+    peers.sort(key=lambda item: item["up_probability"], reverse=True)
+    return {
+        "ok": True, "symbol": symbol, "company": company or symbol, "market": market,
+        "sector": sector or group_name, "industry": industry or group_name, "group_name": group_name,
+        "up_probability": up_probability, "down_probability": down_probability,
+        "label": label, "avg_return_5d": avg_5d,
+        "avg_return_20d": avg_20d, "breadth_above_ma20": breadth,
+        "peer_count": len(peers), "peers": peers, "selected": selected,
+        "relative_to_industry": relative, "reasons": reasons,
+        "basis": "최근 3개월 일봉 · 5일/20일 모멘텀 · MA20 · RSI 기반 상대 추정",
+        "generated_at": dt.now().isoformat(),
     }
 
 
@@ -10778,7 +12515,7 @@ def build_prediction_outlook(
         "6mo": 126, "1y": 252, "2y": 504, "5y": 1260,
     }.get(str(period), 22)
     horizon_label = {
-        "1d": "1개 캔들", "3d": "3개 캔들", "1wk": "1주", "2wk": "2주",
+        "1d": "1거래일", "3d": "3거래일", "1wk": "1주", "2wk": "2주",
         "1mo": "1개월", "6mo": "6개월", "1y": "1년", "2y": "2년", "5y": "5년",
     }.get(str(period), "1개월")
 
@@ -10825,7 +12562,7 @@ def build_prediction_outlook(
                 {"label": "거래량", "text": "최근 20봉 평균의 1.2배 이상"},
                 {"label": "지표", "text": "MACD 우위 · RSI 50~70"},
                 {"label": "현재 충족", "text": f"3개 조건 중 {up_checks_met}개"},
-                {"label": "예상 확인", "text": f"{up_days[0]}~{up_days[1]}개 캔들 · {horizon_label} 범위"},
+                {"label": "예상 확인", "text": f"{up_days[0]}~{up_days[1]}거래일 · {horizon_label} 범위"},
             ],
             "response": "저항을 종가로 돌파하고 거래량까지 확인될 때만 분할 접근하며, 돌파 전 추격은 보류합니다.",
         },
@@ -10844,7 +12581,7 @@ def build_prediction_outlook(
                 {"label": "상단", "value": round(side_hi, rnd), "note": "돌파 전 추격 제한"},
                 {"label": "지표", "text": "RSI 중립 · 거래량 감소"},
                 {"label": "현재 충족", "text": f"3개 조건 중 {side_checks_met}개"},
-                {"label": "예상 확인", "text": f"{side_days[0]}~{side_days[1]}개 캔들 · {horizon_label} 범위"},
+                {"label": "예상 확인", "text": f"{side_days[0]}~{side_days[1]}거래일 · {horizon_label} 범위"},
             ],
             "response": "박스권 안에서는 신규 진입을 서두르지 않고 하단 지지 또는 상단 돌파를 확인합니다.",
         },
@@ -10863,7 +12600,7 @@ def build_prediction_outlook(
                 {"label": "손실 제한", "value": round(stop_price, rnd), "note": "ATR·구조 기준 손절가"},
                 {"label": "지표", "text": "MACD 열위 · RSI 40 하회"},
                 {"label": "현재 충족", "text": f"3개 조건 중 {down_checks_met}개"},
-                {"label": "예상 확인", "text": f"{down_days[0]}~{down_days[1]}개 캔들 · {horizon_label} 범위"},
+                {"label": "예상 확인", "text": f"{down_days[0]}~{down_days[1]}거래일 · {horizon_label} 범위"},
             ],
             "response": "지지선 종가 이탈 시 진입 시나리오를 무효화하고 손절·현금 비중 관리를 우선합니다.",
         },
@@ -10924,19 +12661,6 @@ def build_prediction_outlook(
         else:
             data_gaps.append("외국인·기관 최신 수급 데이터 미확보")
         data_gaps.append("원/달러 환율은 현재 종목 분석 응답에 수치가 없을 때 확정 판단에서 제외")
-    elif market == "CRYPTO":
-        regime_value = {"BULL": "BTC 중기 상승", "BEAR": "BTC 중기 약세", "NEUTRAL": "BTC 중립"}.get(regime, "BTC 중립")
-        market_facts.append({
-            "label": "코인 시장 레짐", "value": regime_value,
-            "detail": "BTCUSDT 일봉의 60일·120일 가격 구조 기준",
-            "tone": "positive" if regime == "BULL" else "negative" if regime == "BEAR" else "neutral",
-        })
-        market_facts.append({
-            "label": "분석 변동성", "value": f"ATR {atr_value / last_price * 100.0:.2f}%",
-            "detail": "24시간 거래 시장이므로 주식 장 마감·실적 일정은 적용하지 않음",
-            "tone": "negative" if atr_value / last_price * 100.0 >= 5.0 else "neutral",
-        })
-        data_gaps.append("온체인 지갑 흐름·펀딩비·거래소별 호가 깊이는 현재 응답에 없으면 확정 판단에서 제외")
     else:
         sp = macro_components.get("sp500") or {}; vix = macro_components.get("vix") or {}; dxy = macro_components.get("dxy") or {}
         if sp.get("pct5d") is not None:
@@ -10953,7 +12677,7 @@ def build_prediction_outlook(
                                  "tone": "positive" if sector_rel.get("adjust", 0) > 0 else "negative" if sector_rel.get("adjust", 0) < 0 else "neutral"})
         earnings = (signal_confidence or {}).get("earnings") or {}
         if earnings.get("days_to_earnings") is not None:
-            days = int(earnings.get("days_to_earnings")); market_facts.append({"label": "실적", "value": f"D-{days}" if days >= 0 else "발표 경과", "detail": "5개 캔들 이내에는 갭 변동 위험 반영", "tone": "negative" if 0 <= days <= 5 else "neutral"})
+            days = int(earnings.get("days_to_earnings")); market_facts.append({"label": "실적", "value": f"D-{days}" if days >= 0 else "발표 경과", "detail": "5거래일 이내에는 갭 변동 위험 반영", "tone": "negative" if 0 <= days <= 5 else "neutral"})
         data_gaps.extend(["나스닥은 홈 시장 데이터가 있으면 재사용하며, 없으면 별도 호출하지 않음",
                           "최신 정책금리 수치가 응답에 없으면 금리 방향을 확정 판단에서 제외"])
 
@@ -11034,18 +12758,90 @@ def build_prediction_outlook(
         "data_scope": "현재 앱에서 확보 가능한 가격·거래량·기술지표·수급·시장 데이터 기준",
     }
 
+# =============================================================================
+# 라우팅
+# =============================================================================
 def route(path: str, params: Dict) -> Dict:
     # trailing slash는 do_GET에서 rstrip("/") 처리됨
     # path는 항상 /api/stock 형식 (슬래시 없음)
-    if path in ("/api/coin", "/api/stock"):
-        raw = params.get("ticker", "BTCUSDT")
+    if path == "/api/stock":
+        raw = params.get("ticker", "삼성전자")
         period = params.get("period", "1y")
         ticker, market, company = resolve_ticker(raw)
         if not ticker:
-            return {"error": f"'{raw}' 코인을 찾을 수 없습니다."}
-        dd, news, err_or_sym = fetch_coin_data(ticker, market, period)
+            return {"error": f"'{raw}' 종목을 찾을 수 없습니다."}
+        security_status = None
+        if market == "KRX":
+            security_status = get_krx_security_status(ticker)
+            if security_status.get("analysis_blocked"):
+                reason = security_status.get("block_reason") or "거래 제한 상태"
+                release_note = ""
+                if security_status.get("trading_halt"):
+                    release_label = security_status.get("halt_release_label") or "해제일 미정"
+                    release_condition = security_status.get("halt_release_condition") or ""
+                    release_note = f" 거래정지 예상 해제일: {release_label}"
+                    if release_condition:
+                        release_note += f" ({release_condition})"
+                    release_note += "."
+                return {
+                    "error": (
+                        f"{company or ticker}은(는) {reason} 종목이므로 분석을 차단했습니다."
+                        f"{release_note}"
+                    ),
+                    "error_code": "KRX_SECURITY_BLOCKED",
+                    "ticker": ticker,
+                    "market": market,
+                    "company": company,
+                    "security_status": security_status,
+                }
+        dd, news, err_or_sym = fetch_stock_data(ticker, market, period)
         if dd is None:
             return {"error": f"데이터 조회 실패: {err_or_sym}"}
+        listing_confidence_profile = None
+        if market == "KRX" and security_status:
+            listed_date = str(security_status.get("listed_date") or "")
+            history_status = None
+            try:
+                listing_age = (
+                    datetime.date.fromisoformat(_krx_session_date()) -
+                    datetime.date.fromisoformat(listed_date)
+                ).days
+            except ValueError:
+                listing_age = None
+            if listing_age is not None and 0 <= listing_age <= 250:
+                daily_history = _fetch_krx_listing_daily_history(ticker, listed_date)
+                daily_dates = tuple(date for date, _close in daily_history)
+                history_status = _build_listing_history_status(
+                    daily_dates if daily_dates else dd, listed_date
+                )
+            if history_status and history_status.get("applicable"):
+                close_history = (
+                    [close for _date, close in daily_history]
+                    if daily_history else _extract_daily_close_series(dd)
+                )
+                listing_confidence_profile = _prediction_history_confidence_profile(
+                    close_history, history_status.get("available_trading_days")
+                )
+                history_status["prediction_confidence"] = listing_confidence_profile
+                security_status["listing_history"] = history_status
+                if not history_status.get("data_sufficient"):
+                    stage_label = history_status.get("stage_label") or "데이터 부족"
+                    status_label = f"상장 데이터 {stage_label}"
+                    if status_label not in security_status["status_labels"]:
+                        security_status["status_labels"].append(status_label)
+                    warning = history_status.get("warning") or ""
+                    if warning and warning not in security_status["warnings"]:
+                        security_status["warnings"].append(warning)
+                confidence_cap = listing_confidence_profile.get("confidence_cap")
+                optimal_days = listing_confidence_profile.get("optimal_lookback_days")
+                confidence_label = f"예측 신뢰도 상한 {confidence_cap}%"
+                if optimal_days:
+                    confidence_label += f" · 최적 {optimal_days}일"
+                if confidence_label not in security_status["status_labels"]:
+                    security_status["status_labels"].append(confidence_label)
+                cap_reason = listing_confidence_profile.get("cap_reason") or ""
+                if cap_reason and cap_reason not in security_status["warnings"]:
+                    security_status["warnings"].append(cap_reason)
         sym = err_or_sym
         closes = dd.get("Close", [])
         last = float(closes[-1]) if closes else 0
@@ -11067,11 +12863,11 @@ def route(path: str, params: Dict) -> Dict:
                 ai_strategy["result"] += " | [시장 상태] 시장 전체 상승장(BULL) 진행 중: 적극 매수 유리"
             else:
                 ai_strategy = {"step": "💡 AI 종합 진단", "result": "시장 전체 상승장(BULL) 진행 중: 적극 매수 유리"}
-
-        # 부채비율 검증 로직 적용 (코인은 재무 데이터 없음 → 건너뜀)
+            
+        # 부채비율 검증 로직 적용
         try:
-            info = {} if market == "CRYPTO" else yf.Ticker(sym).info
-            if market != "CRYPTO" and not validate_financial_health(info):
+            info = yf.Ticker(sym).info
+            if not validate_financial_health(info):
                 if isinstance(ai_strategy, dict):
                     ai_strategy["result"] += " | ⚠️ [경고] 부채비율 150% 초과 또는 재무 데이터 누락으로 투자 위험 높음"
                 else:
@@ -11079,7 +12875,7 @@ def route(path: str, params: Dict) -> Dict:
                 score = min(score, 45)
         except:
             pass
-
+        
         # ── 기하학적 패턴 → 캔들 패턴 리스트 통합 (UI 표시용) ───────────────
         for gp in geo_patterns:
             raw_signal = str(gp.get("signal") or "")
@@ -11249,12 +13045,7 @@ def route(path: str, params: Dict) -> Dict:
         if market == "US" and us_enriched:
             _event_news += list(us_enriched.get("news") or [])
         event_risk = calc_event_risk(sym, market, _event_news, _event_disclosures)
-        learning_adjustment = (
-            calc_learning_adjustment(market)
-            if PREDICTION_LEARNING_ENABLED
-            else {"depth_extra": 0.0, "hold_score_delta": 0, "allocation_scale": 1.0,
-                  "sample_n": 0, "applied": False, "reason": "학습 로그 기능 비활성화"}
-        )
+        learning_adjustment = calc_learning_adjustment(market)
         risk             = calc_risk(
             last, atr_val, market, dd, event_risk, learning_adjustment,
             chart_patterns=geo_patterns,
@@ -11271,49 +13062,6 @@ def route(path: str, params: Dict) -> Dict:
         buy_price        = calc_buy_price(
             dd, last, atr_val, score, indicator_signals, market, period,
             event_risk, learning_adjustment, regime, prev, pct, arty_dd=arty_dd,
-        )
-
-        # ── ⚡ 레버리지 예측 엔진 + 🔮 통합 예측 (코인 전용) ─────────────────
-        def _round_price(p):
-            if p is None: return p
-            ap = abs(float(p))
-            if ap >= 100: return round(p, 2)
-            if ap >= 1:   return round(p, 4)
-            if ap >= 0.01: return round(p, 6)
-            return round(p, 8)
-        atr_pct = (atr_val / last * 100) if last else 2.0
-        _cl = [float(c) for c in (dd.get("Close") or []) if c]
-        if len(_cl) >= 16:
-            _arr = np.array(_cl[-31:], dtype=float)
-            _rets = np.diff(_arr) / _arr[:-1]
-            volatility_30d = float(np.nanstd(_rets) * np.sqrt(365) * 100)
-        else:
-            volatility_30d = atr_pct * 8
-        open_interest = fetch_open_interest(sym)
-        derivatives = fetch_crypto_derivatives(sym) if market == "CRYPTO" else {}
-        if derivatives and derivatives.get("available"):
-            derivative_adj = float(derivatives.get("probability_adjustment") or 0.0)
-            prob_up = round(max(3.0, min(97.0, float(prob_up) + derivative_adj)), 1)
-            prob_down = round(100.0 - prob_up, 1)
-        _vols = [float(x) for x in (dd.get("Volume") or []) if x]
-        _avg20 = (sum(_vols[-20:]) / max(len(_vols[-20:]), 1)) if _vols else 1.0
-        vol_ratio = (_vols[-1] / _avg20) if (_vols and _avg20 > 0) else 1.0
-        def _lv(k):
-            a = dd.get(k, [])
-            try: return float(a[-1])
-            except Exception: return 0.0
-        leverage_info = calc_leverage_recommendation(
-            price=last, atr=atr_val, atr_pct=atr_pct, volatility_30d=volatility_30d,
-            rsi=_lv("RSI"), volume_ratio=vol_ratio,
-            macd=_lv("MACD"), macd_signal=_lv("Signal_Line"), score=score,
-            bb_upper=_lv("BB_Upper"), bb_lower=_lv("BB_Lower"),
-            ema12=_lv("EMA20"), ema26=_lv("EMA50"))
-        prediction = build_prediction(
-            last, atr_val, atr_pct, score, leverage_info,
-            dd, prob_up, prob_down, derivatives,
-        )
-        prediction = align_prediction_stop_with_detailed_entries(
-            prediction, buy_price, last, atr_val,
         )
 
         # ── Step 5: HybridTurtle 복합 점수 (NCS/BQS/FWS) ────────────────────
@@ -11420,25 +13168,18 @@ def route(path: str, params: Dict) -> Dict:
                                              "source_type": "dart", "published": _d.get("date")})
                 except Exception:
                     pass
-            if market == "CRYPTO":
-                signal_confidence = build_crypto_signal_confidence(
-                    technical_score=_tech_sc,
-                    ai_score=_ai_sc,
-                    regime=regime,
-                    news_items=_news_in or None,
-                    volatility_pct=atr_pct,
-                )
-            else:
-                signal_confidence = build_signal_confidence(
-                    technical_score = _tech_sc,
-                    ai_score        = _ai_sc,
-                    market_score    = _mkt_sc,
-                    symbol          = sym,
-                    market          = market,
-                    stock_pct5d     = _pct5,
-                    news_items      = _news_in or None,
-                    include_sector  = (market == "US"),
-                )
+            signal_confidence = build_signal_confidence(
+                technical_score = _tech_sc,
+                ai_score        = _ai_sc,
+                market_score    = _mkt_sc,
+                symbol          = sym,
+                market          = market,
+                stock_pct5d     = _pct5,
+                news_items      = _news_in or None,
+                history_confidence = listing_confidence_profile,
+                # 거시/섹터/실적은 미국 종목에서 의미가 크나, KRX도 거시·실적은 적용.
+                include_sector  = (market == "US"),   # 섹터 ETF는 US 한정
+            )
         except Exception:
             signal_confidence = None   # 엔진 실패 시 기존 응답 유지
 
@@ -11450,10 +13191,7 @@ def route(path: str, params: Dict) -> Dict:
                 dd, last, atr_val, market, target_price, signal_confidence,
                 learning_adjustment, naver, us_enriched, toss_industry
             )
-            target_price["long_term_note"] = (
-                "장기 전망은 가격 구조·모멘텀·거래량·변동성을 함께 반영한 참고 범위입니다. "
-                "코인은 기업 재무가 없으므로 펀더멘털 점수를 사용하지 않습니다."
-            )
+            target_price["long_term_note"] = "장기 전망은 기업가치·성장성·산업 전망·실적 추세·기술 흐름·변동성을 함께 반영한 참고 범위입니다."
             target_price = _normalize_target_output(target_price, last, market)
         pullback_analysis = calc_pullback_analysis(dd, last, atr_val, score, market, target_price)
         prediction_outlook = build_prediction_outlook(
@@ -11469,10 +13207,9 @@ def route(path: str, params: Dict) -> Dict:
             atr_is_observed=bool(atrs and atrs[-1]),
         )
 
-        if PREDICTION_LEARNING_ENABLED:
-            _record_prediction_and_update_outcomes(
-                sym, market, period, dd, buy_price, risk, event_risk, learning_adjustment
-            )
+        _record_prediction_and_update_outcomes(
+            sym, market, period, dd, buy_price, risk, event_risk, learning_adjustment
+        )
 
         pattern_overlays = []
         try:
@@ -11481,21 +13218,15 @@ def route(path: str, params: Dict) -> Dict:
         except (ImportError, ValueError, TypeError, KeyError, IndexError):
             pattern_overlays = []
 
-        _price_rnd = get_round_digits(last, market)
+        _price_rnd = 4 if market == "US" else 2
         return {
             "symbol": sym, "company": company or sym, "market": market,
-            "last_close": _round_price(last), "prev_close": _round_price(prev),
+            "last_close": round(last, _price_rnd), "prev_close": round(prev, _price_rnd),
             "pct_change": round(pct, 2),
             "session_name": session_name,
             "rsi": round(float(dd.get("RSI", [50])[-1] or 50), 1),
             "volume": int(dd.get("Volume", [0])[-1] or 0),
-            "atr": _round_price(atr_val),
-            "atr_pct": round(atr_pct, 2),
-            "volatility_30d": round(volatility_30d, 1),
-            "open_interest": open_interest,
-            "derivatives": derivatives,
-            "leverage_info": leverage_info,
-            "prediction": prediction,
+            "atr": round(atr_val, _price_rnd),
             "score": score, "prob_up": prob_up, "prob_down": prob_down,
             "analysis_steps": steps, "ai_strategy": ai_strategy,
             "candlestick_patterns": patterns,
@@ -11539,25 +13270,8 @@ def route(path: str, params: Dict) -> Dict:
             "signal_confidence": signal_confidence,  # 신뢰도 종합(거시·섹터·실적·불일치·뉴스감정·신뢰구간)
             "event_risk": event_risk,
             "learning_adjustment": learning_adjustment,
+            "security_status": security_status,
         }
-
-    # ── 코인 시장 개요 (홈 대시보드: 주요 코인 + 공포·탐욕 + 등락 상위) ──────────
-    if path == "/api/crypto/overview":
-        tickers = fetch_tickers_batch(CRYPTO_OVERVIEW_UNIVERSE)
-        majors = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-        coins = []
-        for s in majors:
-            t = tickers.get(s)
-            if t:
-                coins.append({"symbol": s, "base": s[:-4],
-                              "price": t["price"], "change_pct": round(t["change_pct"], 2)})
-        rows = [{"symbol": s, "base": s[:-4], "change_pct": round(t["change_pct"], 2),
-                 "volume": t["volume"], "price": t["price"]} for s, t in tickers.items()]
-        gainers = sorted(rows, key=lambda x: x["change_pct"], reverse=True)[:6]
-        losers  = sorted(rows, key=lambda x: x["change_pct"])[:6]
-        by_vol  = sorted(rows, key=lambda x: x["volume"], reverse=True)   # 스크리너용 전체 목록
-        return {"coins": coins, "gainers": gainers, "losers": losers,
-                "by_volume": by_vol, "fng": fetch_fear_greed()}
 
     if path == "/api/screener":
         sort_by    = params.get("sort_by",    "price")
@@ -11645,26 +13359,38 @@ def route(path: str, params: Dict) -> Dict:
 
     if path == "/api/cron":
         try:
-            tickers = fetch_tickers_batch(CRYPTO_OVERVIEW_UNIVERSE)
-            fetch_fear_greed()
-            return {"status": "ok", "message": f"Coin cache warmed ({len(tickers)} Binance symbols)"}
+            fetch_screener()
+            fetch_toss_overseas_screener()
+            kr_surge_performance = _kr_surge_performance_payload(update=True)
+            return {"status": "ok", "message": "Cache warmed and KR surge performance updated",
+                    "kr_surge_performance": {"event_count": kr_surge_performance.get("event_count"),
+                                             "as_of": kr_surge_performance.get("as_of")}}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
     if path == "/api/price":
-        # Binance 24시간 현재가 전용 경량 엔드포인트 — 폴링용
+        # 미국 주식 현재가 전용 경량 엔드포인트 — 캐시 없음, 폴링용
         ticker_raw = params.get("ticker", "").strip()
-        ticker_r, market_r, _ = resolve_ticker(ticker_raw)
-        if not ticker_r or market_r != "CRYPTO":
-            return {"error": "유효한 코인 심볼이 필요합니다."}
-        quote = fetch_ticker_24h(ticker_r)
-        if quote and quote.get("price", 0) > 0:
-            p = float(quote["price"])
-            pct = float(quote.get("change_pct") or 0.0)
-            pc = p / (1.0 + pct / 100.0) if pct > -100 else p
-            rnd = get_round_digits(p, "CRYPTO")
-            return {"price": round(p, rnd), "prev_close": round(pc, rnd),
-                    "pct_change": round(pct, 4), "session_name": "24시간"}
+        market_p   = params.get("market", "US").strip().upper()
+        if not ticker_raw or market_p != "US":
+            return {"error": "ticker required, US market only"}
+        ticker_r, _, sym_r = resolve_ticker(ticker_raw)
+        if not ticker_r:
+            return {"error": f"'{ticker_raw}' not found"}
+        fetcher = _get_us_price_fetcher()
+        if fetcher is None:
+            return {"error": "fetcher unavailable"}
+        try:
+            res = fetcher.fetch(sym_r)
+            if res and res.price > 0:
+                p    = float(res.price)
+                pc   = float(res.prev_close) if res.prev_close else 0.0
+                pct  = (p - pc) / pc * 100 if pc else 0.0
+                sn   = _PRICE_TYPE_LABEL.get(res.price_type, "정규장")
+                return {"price": round(p, 4), "prev_close": round(pc, 4),
+                        "pct_change": round(pct, 4), "session_name": sn}
+        except Exception:
+            pass
         return {"error": "price unavailable"}
 
     if path == "/api/investor-flow":
@@ -11675,8 +13401,8 @@ def route(path: str, params: Dict) -> Dict:
         # resolve_ticker 우회: "005930.KS" 같은 ASCII 심볼이 US로 오분류되는 문제 방지
         # (resolve_ticker 규칙 4 — 전체 ASCII → US ticker 직접 처리)
         code = ticker_raw.replace(".KS", "").replace(".KQ", "").strip()
-        if code.isdigit() and len(code) == 6:
-            # yfinance KRX 형식(005930.KS / 005930.KQ) 또는 6자리 코드 → 직접 전달
+        if _is_krx_short_code(code):
+            # yfinance KRX 형식 또는 6자리 KRX 단축코드 → 직접 전달
             return fetch_investor_flow(ticker_raw)
         # 종목명 입력(예: 삼성전자) → resolve_ticker 경유
         ticker, market, _ = resolve_ticker(ticker_raw)
@@ -11700,17 +13426,26 @@ def route(path: str, params: Dict) -> Dict:
             limit = int(params.get("limit", 12))
         except (TypeError, ValueError):
             limit = 12
-        return {"items": search_coin_suggestions(q, limit)}
+        return {"items": search_stock_suggestions(q, limit)}
 
     if path == "/api/peer-outlook":
         ticker_raw = params.get("ticker", "").strip()
         if not ticker_raw:
             return {"ok": False, "reason": "ticker 파라미터가 필요합니다."}
+        ticker = ticker_raw.upper()
+        market = params.get("market", "").upper()
         company = params.get("company", "").strip()
-        ticker, market, resolved_company = resolve_ticker(ticker_raw)
-        if not ticker or market != "CRYPTO":
-            return {"ok": False, "reason": f"'{ticker_raw}' 코인을 확인하지 못했습니다."}
-        return build_crypto_peer_outlook(ticker, company or resolved_company or ticker)
+        if not (ticker.endswith((".KS", ".KQ")) or market in {"KRX", "US"}):
+            resolved_ticker, resolved_market, resolved_company = resolve_ticker(ticker_raw)
+            if not resolved_ticker:
+                return {"ok": False, "reason": f"'{ticker_raw}' 종목을 확인하지 못했습니다."}
+            ticker, market = resolved_ticker, resolved_market
+            company = company or resolved_company
+        market = "KRX" if market == "KRX" or ticker.endswith((".KS", ".KQ")) else "US"
+        return build_peer_industry_outlook(
+            ticker, market, company or ticker,
+            params.get("sector", "").strip(), params.get("industry", "").strip(),
+        )
 
     # ── market_briefing 통합 엔드포인트 ─────────────────────────────────────
     # k-ant-daily 로직을 이식한 3가지 분석 모듈
@@ -11840,6 +13575,14 @@ def route(path: str, params: Dict) -> Dict:
     if path == "/api/kr/longterm":
         return fetch_kr_longterm_reco()
 
+    if path == "/api/kr/opening-surge/performance":
+        return _kr_surge_performance_payload(update=True)
+
+    if path == "/api/kr/opening-surge":
+        if str(params.get("refresh") or "") == "1":
+            _CACHE.pop("fetch_kr_opening_surge|()|[]", None)
+        return fetch_kr_opening_surge()
+
     if path == "/api/us/longterm":
         return fetch_us_longterm_reco()
 
@@ -11911,7 +13654,7 @@ def route(path: str, params: Dict) -> Dict:
                 # 2. resolve_ticker() — KR_STOCK_MAP + KRX API 활용
                 try:
                     code = tkr.replace(".KS", "").replace(".KQ", "").strip()
-                    if code.isdigit() and len(code) == 6:
+                    if _is_krx_short_code(code):
                         _, _, cname = resolve_ticker(code)
                         if cname and cname != code:
                             return cname
@@ -12416,20 +14159,24 @@ def route(path: str, params: Dict) -> Dict:
             return {"error": f"교차 참조 실패: {e}"}
 
     if path == "/api/alert/quote":
-        # 알림 모니터용 — 등록된 Binance 심볼의 24시간 현재가·등락률 일괄 조회
-        symbols_raw = params.get("symbols", params.get("codes", ""))
-        symbols = []
-        for raw_symbol in symbols_raw.split(",")[:20]:
-            ticker, market, _ = resolve_ticker(raw_symbol)
-            if ticker and market == "CRYPTO" and ticker not in symbols:
-                symbols.append(ticker)
-        if not symbols:
+        # 알림 모니터용 — 등록된 KRX 종목들의 현재가 + 등락률 일괄 조회
+        # ?codes=005930,035720,...  (최대 20종목, 6자리 숫자 코드만)
+        codes_raw = params.get("codes", "")
+        codes = [c.strip() for c in codes_raw.split(",")
+                 if c.strip().isdigit() and len(c.strip()) == 6]
+        if not codes:
             return {"quotes": {}}
-        batch = fetch_tickers_batch(tuple(symbols))
-        quotes = {
-            symbol: {"price": row["price"], "change_pct": row["change_pct"]}
-            for symbol, row in batch.items()
-        }
+        quotes = {}
+        for code in codes[:20]:
+            data = fetch_naver(code)
+            if data and data.get("price"):
+                try:
+                    price = float(data["price"])
+                    prev  = float(data["prev_close"]) if data.get("prev_close") else price
+                    chg   = round((price - prev) / prev * 100, 2) if prev else 0.0
+                    quotes[code] = {"price": price, "change_pct": chg}
+                except (ValueError, TypeError):
+                    pass
         return {"quotes": quotes}
 
     # HTML 서빙 (모든 나머지 경로)
@@ -12444,7 +14191,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>암호화폐 AI 레버리지 예측 시스템 (Binance)</title>
+<title>주식 AI 예측 시스템 (KRX/US)</title>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -12480,9 +14227,16 @@ input::placeholder{color:#484f58}
 .stock-suggestions.open{display:block}
 .stock-suggestion{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;background:transparent;border:0;border-radius:7px;padding:9px 10px;color:#e6edf3;cursor:pointer;text-align:left}
 .stock-suggestion:hover,.stock-suggestion.active{background:#21262d}
+.stock-suggestion.blocked{border-left:3px solid #f85149;background:#2d1117}
 .stock-suggestion-main{display:flex;align-items:center;gap:8px;min-width:0}
 .stock-suggestion-flag{width:18px;height:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px}
+.stock-suggestion-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
 .stock-suggestion-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stock-suggestion-tags{display:flex;flex-wrap:wrap;gap:3px}
+.stock-suggestion-tag{font-size:9px;font-weight:700;line-height:1;padding:3px 5px;border-radius:4px;background:#21262d;color:#8b949e}
+.stock-suggestion-tag.manage{background:#d2992222;color:#d29922}
+.stock-suggestion-tag.halt,.stock-suggestion-tag.delist{background:#f8514922;color:#ff7b72}
+.stock-suggestion-tag.new{background:#1f6feb22;color:#58a6ff}
 .stock-suggestion-meta{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0}
 .stock-suggestion-code{font-size:12px;color:#8b949e;font-variant-numeric:tabular-nums}
 .stock-suggestion-exchange{font-size:9px;color:#484f58}
@@ -12498,6 +14252,9 @@ input::placeholder{color:#484f58}
 .center-state .icon{font-size:56px}
 .center-state h2{font-size:22px;font-weight:700}
 .center-state p{color:#8b949e;font-size:14px;line-height:1.6;max-width:380px}
+.security-status-banner{display:none;margin:0 0 14px;padding:11px 13px;border:1px solid #d2992266;border-radius:10px;background:#2d220d;color:#e3b341;font-size:12px;line-height:1.55}
+.security-status-banner.visible{display:block}
+.security-status-banner strong{color:#f0c85a}
 .spinner{width:40px;height:40px;border:4px solid #21262d;border-top-color:#1f6feb;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -12690,8 +14447,6 @@ input::placeholder{color:#484f58}
 .news-thumb{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#21262d}
 .news-thumb.is-error{display:none}
 .news-empty{font-size:13px;color:#484f58;padding:18px 2px}
-.two-col-grid.news-single-column{grid-template-columns:minmax(0,1fr)}
-.two-col-grid.news-single-column #news-col1{grid-column:1/-1;width:100%;min-width:0;box-sizing:border-box}
 @media(max-width:480px){
   .news-row{grid-template-columns:minmax(0,1fr) 64px;gap:10px;padding:12px 0}
   .news-thumb-shell{width:64px;height:54px;border-radius:7px}
@@ -12790,16 +14545,12 @@ input::placeholder{color:#484f58}
 .forecast-scenario-title{font-size:13px;margin-bottom:9px;color:#cdd9e5}
 .prediction-scenario-action{font-size:11px;line-height:1.55;color:#e6edf3;background:#0d1117;border-radius:7px;padding:7px 8px;margin-top:8px}
 .prediction-stack{display:flex;flex-direction:column;gap:14px}
-.prediction-decision{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:16px;background:linear-gradient(135deg,#161b22,#111820);border:1px solid #30363d;border-radius:12px;padding:18px}
+.prediction-decision{background:linear-gradient(135deg,#161b22,#111820);border:1px solid #30363d;border-radius:12px;padding:18px}
 .prediction-kicker{font-size:10px;color:#8b949e;letter-spacing:.06em;text-transform:uppercase;margin-bottom:7px}
 .prediction-badges{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:9px}
 .prediction-action{font-size:23px;font-weight:900;line-height:1.25;color:#e6edf3}
 .prediction-chip{font-size:10px;font-weight:800;border-radius:999px;padding:3px 8px;border:1px solid #30363d;background:#0d1117;white-space:nowrap}
 .prediction-summary{font-size:12px;color:#cdd9e5;line-height:1.65;word-break:keep-all;overflow-wrap:anywhere}
-.prediction-confidence{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:13px;display:flex;flex-direction:column;justify-content:center;min-width:0}
-.prediction-confidence-head{display:flex;justify-content:space-between;gap:8px;align-items:end}
-.prediction-confidence-value{font-size:25px;font-weight:900;line-height:1}
-.prediction-confidence-range{font-size:10px;color:#8b949e;margin-top:5px}
 .prediction-status-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
 .prediction-status-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:11px;min-width:0}
 .prediction-status-label{font-size:10px;color:#8b949e;margin-bottom:4px;display:flex;gap:4px;align-items:center}
@@ -12832,6 +14583,7 @@ input::placeholder{color:#484f58}
 .prediction-mini-list{font-size:10px;color:#8b949e;line-height:1.55}
 .prediction-scope{font-size:10px;color:#484f58;line-height:1.5;margin-top:9px}
 .prediction-context-inline{margin-top:12px;border-top:1px solid #30363d;padding-top:12px}
+.prediction-context-inline #ai-strategy-section{margin-top:9px}
 
 /* 2칼럼 그리드 공통 클래스 (인라인 스타일 대체) */
 .two-col-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -12881,7 +14633,6 @@ input::placeholder{color:#484f58}
   .ai-top-grid,.ai-bottom-grid{grid-template-columns:1fr}
   .flow-detail-grid{grid-template-columns:1fr}
   .two-col-grid{grid-template-columns:1fr}
-  .prediction-decision{grid-template-columns:1fr}
   .prediction-status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
   .prediction-scenario-grid{grid-template-columns:1fr}
   .prediction-context-grid{grid-template-columns:1fr}
@@ -13410,6 +15161,54 @@ input::placeholder{color:#484f58}
 .us-surge-pm{font-size:17px;font-weight:700;color:#3fb950}
 .us-surge-inds{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .us-surge-ind{font-size:10px;padding:2px 6px;background:#21262d;border:1px solid #30363d;border-radius:6px;color:#8b949e}
+/* ── KR 개장 급등 추천 ── */
+.kr-surge-card{border-top:2px solid #f85149;background:linear-gradient(145deg,#161b22 0%,#131820 100%)}
+.kr-surge-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.kr-surge-summary-item{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px 10px;min-width:0}
+.kr-surge-summary-label{font-size:10px;color:#6e7681;margin-bottom:3px}
+.kr-surge-summary-value{font-size:12px;color:#c9d1d9;line-height:1.45;overflow-wrap:anywhere}
+.kr-surge-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin:10px 0}
+.kr-surge-metric{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:8px;min-width:0}
+.kr-surge-metric-label{font-size:10px;color:#6e7681;margin-bottom:4px;white-space:nowrap}
+.kr-surge-metric-value{font-size:13px;color:#e6edf3;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.kr-surge-metric-value.primary{font-size:16px;color:#f85149}
+.kr-surge-range{font-size:11px;color:#8b949e;margin-top:2px}
+.kr-surge-position{margin:9px 0;padding:8px 10px;background:#0d1117;border-radius:8px;border:1px solid #21262d}
+.kr-surge-position-head{display:flex;justify-content:space-between;gap:8px;font-size:10px;color:#8b949e;margin-bottom:6px;flex-wrap:wrap}
+.kr-surge-position-track{height:6px;border-radius:6px;background:#21262d;overflow:hidden}
+.kr-surge-position-bar{height:100%;background:linear-gradient(90deg,#d29922,#f85149);border-radius:6px}
+.kr-surge-breakdown{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;margin:9px 0}
+.kr-surge-bd-row{display:grid;grid-template-columns:64px 1fr 28px;align-items:center;gap:6px;font-size:10px;color:#8b949e}
+.kr-surge-bd-track{height:5px;background:#21262d;border-radius:4px;overflow:hidden}
+.kr-surge-bd-bar{height:100%;background:#388bfd;border-radius:4px}
+.kr-surge-bd-bar.penalty{background:#f85149}
+.kr-surge-condition{font-size:11px;color:#c9d1d9;background:rgba(56,139,253,.07);border-left:2px solid #388bfd;border-radius:6px;padding:7px 9px;margin-top:8px;line-height:1.5}
+.kr-surge-disclaimer{font-size:11px;color:#d29922;background:rgba(187,128,9,.08);border:1px solid rgba(187,128,9,.25);border-radius:8px;padding:8px 10px;margin-bottom:10px;line-height:1.5}
+.kr-surge-statuses{display:flex;flex-wrap:wrap;gap:5px;margin:7px 0}
+.kr-surge-status{font-size:10px;padding:2px 7px;border-radius:10px;border:1px solid #30363d;background:#21262d;color:#8b949e}
+.kr-surge-status.ok{border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.09);color:#56d364}
+.kr-surge-status.warn{border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.09);color:#d29922}
+.kr-surge-flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;margin:8px 0}
+.kr-surge-flow-item{padding:6px 7px;background:#0d1117;border:1px solid #21262d;border-radius:7px;min-width:0}
+.kr-surge-flow-label{font-size:9px;color:#6e7681;margin-bottom:2px}
+.kr-surge-flow-value{font-size:10px;color:#c9d1d9;line-height:1.35;overflow-wrap:anywhere}
+.kr-surge-performance{margin-top:16px;border-top:1px solid #30363d;padding-top:13px}
+.kr-surge-perf-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:8px 0}
+.kr-surge-perf-card{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:9px}
+.kr-surge-perf-table-wrap{overflow-x:auto;border:1px solid #21262d;border-radius:8px}
+.kr-surge-perf-table{width:100%;border-collapse:collapse;min-width:680px;font-size:10px}
+.kr-surge-perf-table th,.kr-surge-perf-table td{padding:7px 8px;border-bottom:1px solid #21262d;text-align:right;white-space:nowrap}
+.kr-surge-perf-table th:first-child,.kr-surge-perf-table td:first-child{text-align:left}
+@media(max-width:900px){.kr-surge-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.kr-surge-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.kr-surge-flow{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){
+  .kr-surge-summary{grid-template-columns:1fr}
+  .kr-surge-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kr-surge-breakdown{grid-template-columns:1fr}
+  .kr-surge-flow{grid-template-columns:1fr 1fr}
+  .kr-surge-perf-grid{grid-template-columns:1fr}
+  .kr-surge-card{padding:11px}
+}
+@media(max-width:360px){.kr-surge-grid{grid-template-columns:1fr}}
 /* ── KR 장기 투자 전용 ── */
 .kr-lt-card{border-top:2px solid #388bfd}
 .kr-lt-status-badge{font-size:11px;padding:2px 8px;border-radius:12px;border:1px solid;font-weight:600;letter-spacing:.02em}
@@ -13425,17 +15224,6 @@ input::placeholder{color:#484f58}
 .kr-lt-fund-tag{font-size:10px;padding:2px 7px;background:#21262d;border:1px solid #30363d;border-radius:10px;color:#8b949e;font-variant-numeric:tabular-nums}
 .kr-lt-theme-badge{font-size:10px;padding:1px 7px;border-radius:10px;background:rgba(56,139,253,.15);color:#58a6ff;border:1px solid rgba(56,139,253,.3);font-weight:600}
 .us-reco-reason::before{display:none}
-/* ── 관심 코인 포트폴리오 ── */
-.portfolio-form{display:grid;grid-template-columns:1.2fr 1fr 1fr auto;gap:8px;align-items:end}
-.portfolio-form label{font-size:10px;color:#8b949e;display:flex;flex-direction:column;gap:5px}
-.portfolio-form input{margin:0;background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:9px 10px;color:#e6edf3;min-width:0}
-.portfolio-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}
-.portfolio-summary-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px}
-.portfolio-summary-label{font-size:10px;color:#8b949e;margin-bottom:5px}.portfolio-summary-value{font-size:18px;font-weight:800;color:#e6edf3}
-.portfolio-table-wrap{overflow-x:auto}.portfolio-table{width:100%;border-collapse:collapse;font-size:12px;min-width:760px}
-.portfolio-table th,.portfolio-table td{padding:11px 9px;border-bottom:1px solid #21262d;text-align:right}.portfolio-table th{color:#8b949e;font-weight:600;font-size:10px}.portfolio-table th:nth-child(-n+2),.portfolio-table td:nth-child(-n+2){text-align:left}
-.portfolio-live{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#3fb950;background:#3fb95018;border:1px solid #3fb95055;border-radius:10px;padding:2px 7px}
-@media(max-width:720px){.portfolio-form{grid-template-columns:1fr 1fr}.portfolio-form button{grid-column:1/-1}.portfolio-summary{grid-template-columns:1fr}.portfolio-table{min-width:680px}}
 </style>
 </head>
 <body>
@@ -13451,20 +15239,19 @@ input::placeholder{color:#484f58}
 <div id="sidebar">
   <div class="sb-header">
     <div class="sb-header-top">
-      <h1>🪙 CryptoOracle</h1>
+      <h1>📈 StockOracle</h1>
       <button class="sb-home-btn" onclick="showPage('analysis');setState('empty')" title="홈으로 이동" aria-label="홈으로 이동">🏠</button>
     </div>
-    <p>AI 암호화폐 레버리지 예측 · 기술적 분석</p>
+    <p>AI 기반 기술적 분석 · 투자자 수급</p>
   </div>
 
   <div class="sb-section">
     <span class="sb-label">메뉴</span>
     <div style="display:flex;flex-direction:column;gap:4px">
-      <button class="mkt-btn active" style="text-align:left;padding:10px 12px" id="nav-analysis" onclick="showPage('analysis')">🔍 코인 상세 분석</button>
-      <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-scan" onclick="showPage('screener')">🔬 코인 스크리너</button>
-      <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-portfolio" onclick="showPage('portfolio')">⭐ 관심 코인 포트폴리오</button>
-      <!-- ⚡ 개장 급등 추천 아코디언 (코인 모드 비활성 — 홈 대시보드의 24h 등락 상위로 대체) -->
-      <button class="mkt-btn" style="display:none;text-align:left;padding:10px 12px" id="nav-recommendations" onclick="toggleRecoMenu()">
+      <button class="mkt-btn active" style="text-align:left;padding:10px 12px" id="nav-analysis" onclick="showPage('analysis')">🔍 종목 상세 분석</button>
+      <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-scan" onclick="showPage('scan')">🔬 7단계 스캔 엔진</button>
+      <!-- ⚡ 개장 급등 추천 아코디언 -->
+      <button class="mkt-btn" style="text-align:left;padding:10px 12px" id="nav-recommendations" onclick="toggleRecoMenu()">
         <span class="nav-reco-parent">
           <span>⚡ 개장 급등 추천</span>
           <span class="nav-reco-arrow" id="nav-reco-arrow">▶</span>
@@ -13472,6 +15259,7 @@ input::placeholder{color:#484f58}
       </button>
       <div id="nav-reco-submenu" style="display:none;flex-direction:column;gap:2px;padding-left:10px">
         <button class="mkt-btn nav-subbtn" id="nav-kr-longterm" onclick="showPage('kr-longterm')">🇰🇷 국내 장기 투자 추천</button>
+        <button class="mkt-btn nav-subbtn" id="nav-kr-surge"     onclick="showPage('kr-surge')">🇰🇷 국내 개장 급등 추천</button>
         <button class="mkt-btn nav-subbtn" id="nav-us-longterm" onclick="showPage('us-longterm')">🇺🇸 미국 장기 투자 추천</button>
         <button class="mkt-btn nav-subbtn" id="nav-us-surge"    onclick="showPage('us-surge')">🇺🇸 미국 개장 급등 추천</button>
       </div>
@@ -13480,11 +15268,12 @@ input::placeholder{color:#484f58}
 
 
   <div class="sb-section" id="analysis-controls">
-    <span class="sb-label">코인 심볼 / 이름</span>
+    <span class="sb-label">종목명 / 코드</span>
     <div class="stock-search-wrap" id="stock-search-wrap">
-      <input type="text" id="ticker-input" value="BTCUSDT" placeholder="예: BTC, 비트코인, ETHUSDT, SOL"
-             role="combobox" aria-autocomplete="list" aria-controls="ticker-suggestions" aria-expanded="false">
-      <div class="stock-suggestions" id="ticker-suggestions" role="listbox"></div>
+      <input type="text" id="ticker-input" value="삼성전자" placeholder="예: 삼성전자, 005930, Apple, TSLA"
+             autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="ticker-suggestions"
+             aria-expanded="false" aria-label="국내외 종목명 또는 종목코드 검색">
+      <div id="ticker-suggestions" class="stock-suggestions" role="listbox" aria-label="종목 검색 결과"></div>
     </div>
     <span class="sb-label">분석 기간</span>
     <select id="period-select" style="margin-bottom:12px">
@@ -13519,8 +15308,8 @@ input::placeholder{color:#484f58}
           <div class="core-header">
             <div class="core-header-left">
               <span class="core-title">📊 시장 현황</span>
-              <button type="button" id="core-mood-badge-kr" class="mood-badge mood-neutral market-mood-btn" onclick="openMarketDrawer('CRYPTO')" aria-label="코인 시장 심리 상세 보기" title="클릭 — 코인 시장 공포·탐욕 상세">🪙 코인 —</button>
-              <button type="button" id="core-mood-badge-us" class="mood-badge mood-neutral market-mood-btn" style="display:none" aria-hidden="true">—</button>
+              <button type="button" id="core-mood-badge-kr" class="mood-badge mood-neutral market-mood-btn" onclick="openMarketDrawer('KR')" aria-label="한국 시장 위험 면역 상세 보기" title="클릭 — 한국 시장 위험 면역 시스템">🇰🇷 한국 —</button>
+              <button type="button" id="core-mood-badge-us" class="mood-badge mood-neutral market-mood-btn" onclick="openMarketDrawer('US')" aria-label="미국 시장 위험 면역 상세 보기" title="클릭 — 미국 시장 위험 면역 시스템">🇺🇸 미국 —</button>
               <span id="core-vix-badge" style="display:none;font-size:10px;padding:2px 7px;border-radius:10px;background:#2d0d0d;color:#f85149;border:1px solid #4d1515"></span>
             </div>
             <button class="header-alert-btn" onclick="openAlertsSheet()" aria-label="알림 관리">
@@ -13578,25 +15367,25 @@ input::placeholder{color:#484f58}
       <div class="page-header">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:4px">
           <h2 id="r-title"></h2>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <div style="display:flex;gap:8px;">
             <button id="result-tg-btn" class="alert-result-btn" style="background:rgba(36,129,204,0.15);border-color:rgba(36,129,204,0.5);color:#58a6ff;display:flex;align-items:center;gap:4px;" onclick="shareToTelegram()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221l-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.446 1.394c-.14.18-.357.295-.6.295-.002 0-.003 0-.005 0l.213-3.054 5.56-5.022c.24-.213-.054-.334-.373-.121l-6.869 4.326-2.96-.924c-.64-.203-.658-.64.135-.954l11.566-4.458c.538-.196 1.006.128.832.94z"/></svg>
               텔레그램 전송
             </button>
             <button id="result-alert-btn" class="alert-result-btn" onclick="openAlertModal(_currentAlertSymbol, _currentAlertPrice)">🔔 알림 설정</button>
-            <button id="result-portfolio-btn" class="alert-result-btn" onclick="toggleCurrentPortfolio()">☆ 관심 코인</button>
           </div>
         </div>
         <p id="r-subtitle"></p>
       </div>
+      <div id="security-status-banner" class="security-status-banner" role="status" aria-live="polite"></div>
       <div class="metrics-grid">
         <div class="metric-card metric-price-card"><div class="m-label">현재가 <span id="r-session-badge" style="display:none;font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;background:#1f6feb33;color:#58a6ff;margin-left:4px;vertical-align:middle"></span></div><div class="metric-price-row"><div style="display:flex;flex-direction:column;align-items:flex-start;flex-shrink:0"><div class="m-value" id="r-price" style="white-space:nowrap"></div><div class="m-sub" id="r-pct" style="margin-top:0"></div></div><div id="r-prob" style="display:none;flex-direction:column;gap:4px;align-items:flex-start;font-size:11px;font-weight:600;padding-top:4px"></div></div></div>
         <div class="metric-card metric-volume-card"><div class="m-label">거래량</div><div class="m-value" id="r-vol" style="font-size:18px"></div></div>
         <div class="metric-card metric-atr-card"><div class="m-label">ATR (변동성)</div><div class="m-value" id="r-atr" style="font-size:18px"></div><div id="r-atr-pct" style="display:none;font-size:11px;color:#8b949e;margin-top:4px"></div></div>
-        <!-- (코인 모드) 토스증권 AI 요약 카드 제거됨 -->
-        <div class="metric-card metric-oi-card" id="r-oi-card" style="display:none">
-          <div class="m-label">미결제약정 (OI)</div>
-          <div class="m-value" id="r-oi" style="font-size:18px">-</div>
+        <div class="metric-card metric-toss-card" id="r-toss-card">
+          <div class="m-label">토스증권 AI 요약</div>
+          <div class="toss-ai-summary" id="r-toss-summary" style="color:#484f58;font-size:11px">-</div>
+          <div class="toss-ai-time" id="r-toss-time"></div>
         </div>
       </div>
       <div id="r-naver-fund" style="display:none" class="card">
@@ -13615,7 +15404,7 @@ input::placeholder{color:#484f58}
         <button class="tab-btn" onclick="switchTab('report')" style="display:none">📝 단계별 리포트</button>
         <button class="tab-btn" onclick="switchTab('forecast')">🔮 예측</button>
         <button class="tab-btn" onclick="switchTab('news')">📰 뉴스</button>
-        <button class="tab-btn" id="tab-evening-btn" onclick="switchTab('evening')" style="display:none">🪙 유사 코인 전망</button>
+        <button class="tab-btn" id="tab-evening-btn" onclick="switchTab('evening')" style="display:none">🏭 동종업계 전망</button>
       </div>
 
       <!-- 차트 탭 -->
@@ -13649,7 +15438,7 @@ input::placeholder{color:#484f58}
         <div class="ai-diagnosis-layout">
           <!-- 종목 진단 (흐름 단계 → 5차원 진단 → 눌림목 분석 통합 출력) -->
           <div class="card ai-report-card">
-            <div class="card-title">🔬 코인 진단</div>
+            <div class="card-title">🔬 종목 진단</div>
             <div id="ai-diagnosis-chart"></div>
           </div>
         </div>
@@ -13665,28 +15454,36 @@ input::placeholder{color:#484f58}
 
       <!-- 예측 탭 -->
       <div id="tab-forecast" style="display:none">
-        <!-- ⚡ 레버리지 예측 엔진 통합 (방향성·진입·손절·1~3차 목표·파생 위험) -->
-        <div id="prediction-section"></div>
-        <!-- 방향별 진입 전략 카드 -->
         <div class="card">
-          <div class="card-title" id="buy-strategy-title">🎯 현재가 기준 진입 전략</div>
+          <div class="card-title">🔮 핵심 판단과 현재 상태</div>
+          <div id="prediction-overview-section"></div>
+          <div class="prediction-context-inline">
+            <div id="prediction-context-section"></div>
+            <div id="ai-strategy-section"></div>
+          </div>
+        </div>
+        <!-- 매수 전략 카드: 현재가 분석 → 가격 구간 → 분할 매수 흐름 통합 -->
+        <div class="card forecast-entry-group">
+          <div class="card-title">🎯 현재가 기준 매수 전략</div>
           <div id="buy-price-section"></div>
-          <div id="pullback-forecast-section"></div>
+          <div class="buy-card forecast-scenario-group">
+            <div class="buy-label forecast-scenario-title">🧭 조건부 예측 시나리오</div>
+            <div id="prediction-scenarios-section"></div>
+          </div>
         </div>
         <!-- 리스크 관리 카드: 시나리오 + ATR 기반 정밀 가격 통합 -->
         <div class="card">
-          <div class="card-title" id="risk-strategy-title">🛡️ 리스크 관리 (ATR 기반)</div>
+          <div class="card-title">🛡️ 리스크 관리 (ATR 기반)</div>
+          <div id="buy-risk-notes-section"></div>
           <div class="risk-grid" id="risk-grid"></div>
-          <div id="pullback-atr-section"></div>
         </div>
       </div>
-
       <!-- 뉴스 탭 -->
       <div id="tab-news" style="display:none">
-        <div class="two-col-grid" id="news-grid">
+        <div class="news-tab-stack">
           <div class="card" id="news-col1">
             <div class="card-title" id="news-col1-title">📰 주요 뉴스</div>
-            <div id="news-list"></div>
+            <div id="news-list" role="list" aria-live="polite"></div>
           </div>
           <div class="card" id="disclosure-col" style="display:none">
             <div class="card-title">📋 최근 공시</div>
@@ -13695,17 +15492,17 @@ input::placeholder{color:#484f58}
         </div>
       </div>
 
-      <!-- 유사 코인 그룹 상대 전망 탭 -->
+      <!-- 국내·해외 공통 동종업계 전망 탭 -->
       <div id="tab-evening" style="display:none">
         <div id="evening-loading" style="text-align:center;padding:10px;color:#8b949e;display:none;font-size:11px">
-          유사 코인 가격 흐름을 비교하는 중...
+          동종기업 가격 흐름을 비교하는 중...
         </div>
         <div id="evening-content" style="display:none">
           <div class="peer-stack">
             <div class="card">
               <div class="peer-heading">
                 <div>
-                  <div class="card-title" id="peer-title">🪙 유사 코인 상대 전망</div>
+                  <div class="card-title" id="peer-title">🏭 동종업계 상대 전망</div>
                   <div class="peer-subtitle" id="peer-subtitle">—</div>
                 </div>
                 <span id="peer-market-badge" class="peer-market-badge">—</span>
@@ -13727,18 +15524,18 @@ input::placeholder{color:#484f58}
             </div>
 
             <div class="card">
-              <div class="card-title">📊 그룹 모멘텀</div>
+              <div class="card-title">📊 업계 모멘텀</div>
               <div id="peer-metrics" class="peer-metrics"></div>
               <div id="peer-reasons" class="peer-reasons"></div>
             </div>
 
             <div class="card">
-              <div class="card-title">🪙 비교 코인</div>
+              <div class="card-title">🏢 동종기업 비교</div>
               <div id="peer-list" class="peer-list"></div>
             </div>
 
             <div class="card">
-              <div class="card-title">🎯 검색 코인의 그룹 대비 위치</div>
+              <div class="card-title">🎯 검색 종목의 업계 대비 위치</div>
               <div id="peer-selected-comparison" class="peer-selected">—</div>
             </div>
 
@@ -13746,12 +15543,12 @@ input::placeholder{color:#484f58}
           </div>
         </div>
         <div id="evening-error" style="display:none;margin:0 0 10px;padding:10px 12px;background:#2d2200;border:1px solid #4a3800;border-radius:8px;color:#d29922;font-size:11px;line-height:1.5">
-          유사 코인 데이터를 충분히 확보하지 못했습니다. 기본 코인 분석 결과는 계속 표시합니다.
+          동종기업 데이터를 충분히 확보하지 못했습니다. 기본 종목 분석 결과는 계속 표시합니다.
         </div>
         <div id="evening-guide" style="text-align:center;padding:32px;color:#8b949e;font-size:13px">
           <div style="font-size:32px;margin-bottom:12px">🏭</div>
-          <div style="font-weight:600;margin-bottom:8px">유사 코인 상대 전망</div>
-          <div style="line-height:1.6">코인을 분석하면 같은 테마 그룹의 최근 가격 흐름을 간단한 그래프로 비교합니다.<br>
+          <div style="font-weight:600;margin-bottom:8px">동종업계 상대 전망</div>
+          <div style="line-height:1.6">국내 또는 해외 종목을 분석하면 동종기업의 최근 가격 흐름을 간단한 그래프로 비교합니다.<br>
             <span style="font-size:11px;color:#484f58">확정 예측이나 투자 권유가 아닌 모멘텀 기반 상대 지표입니다.</span></div>
         </div>
       </div>
@@ -13763,19 +15560,31 @@ input::placeholder{color:#484f58}
   <div id="page-screener" style="display:none">
     <div class="screener-header">
       <div>
-        <h2 style="font-size:22px;font-weight:700;margin-bottom:4px">🔬 코인 스크리너</h2>
-        <p style="font-size:12px;color:#8b949e">Binance 주요 코인 24시간 거래량·등락률 — 클릭 시 상세 분석</p>
+        <h2 style="font-size:22px;font-weight:700;margin-bottom:4px">📋 주식 골라보기</h2>
+        <p style="font-size:12px;color:#8b949e" id="scrn-subtitle">토스증권 필터 조건 적용 결과</p>
+        <p style="font-size:11px;color:#484f58;margin-top:4px" id="scrn-filter-badge"></p>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <select id="scrn-sort-by" onchange="renderCryptoScreener()"
+        <select id="scrn-sort-by" onchange="loadScreener(this.value, document.getElementById('scrn-sort-order').value)"
           style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#e6edf3;font-size:12px">
-          <option value="volume">거래량 정렬</option>
-          <option value="change">등락률 정렬</option>
           <option value="price">현재가 정렬</option>
+          <option value="change">등락률 정렬</option>
+          <option value="volume">거래량 정렬</option>
+          <option value="per">PER 정렬</option>
+          <option value="roe">ROE 정렬</option>
         </select>
-        <button onclick="loadScreener()"
+        <select id="scrn-sort-order" onchange="loadScreener(document.getElementById('scrn-sort-by').value, this.value)"
+          style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 10px;color:#e6edf3;font-size:12px">
+          <option value="desc">내림차순 ↓</option>
+          <option value="asc">오름차순 ↑</option>
+        </select>
+        <button onclick="loadScreener(document.getElementById('scrn-sort-by').value, document.getElementById('scrn-sort-order').value)"
           style="background:#21262d;border:1px solid #30363d;border-radius:8px;padding:8px 14px;color:#8b949e;font-size:13px;cursor:pointer;white-space:nowrap;">🔄 새로고침</button>
       </div>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" id="scrn-tab-domestic" onclick="switchScrnTab('domestic')">🇰🇷 국내 (KRX)</button>
+      <button class="tab-btn" id="scrn-tab-overseas" onclick="switchScrnTab('overseas')">🇺🇸 해외 (US)</button>
     </div>
     <div id="scrn-loading" style="text-align:center;padding:40px;color:#8b949e">
       <div class="spinner" style="margin:0 auto 12px"></div>
@@ -13786,42 +15595,17 @@ input::placeholder{color:#484f58}
         <table class="screener-table">
           <thead><tr>
             <th>#</th>
-            <th>코인</th>
-            <th style="text-align:right">현재가</th>
-            <th style="text-align:right">24h 등락</th>
-            <th style="text-align:right">24h 거래량(USDT)</th>
-            <th style="text-align:center">분석</th>
+            <th>종목</th>
+            <th style="text-align:right;cursor:pointer" onclick="sortScreener('price')">현재가 ↕</th>
+            <th style="text-align:right;cursor:pointer" onclick="sortScreener('change')">등락률 ↕</th>
+            <th>카테고리</th>
+            <th style="text-align:right;cursor:pointer" onclick="sortScreener('volume')">거래량 ↕</th>
+            <th style="text-align:center;cursor:pointer" onclick="sortScreener('per')">PER ↕</th>
+            <th style="text-align:center">신호</th>
           </tr></thead>
           <tbody id="scrn-tbody"></tbody>
         </table>
       </div>
-    </div>
-  </div>
-
-  <!-- ── ⭐ 관심 코인 포트폴리오 ── -->
-  <div id="page-portfolio" style="display:none">
-    <div class="screener-header" style="margin-bottom:16px;align-items:flex-start">
-      <div>
-        <h2 style="font-size:22px;font-weight:700;margin-bottom:4px">⭐ 관심 코인 포트폴리오</h2>
-        <p style="font-size:12px;color:#8b949e">브라우저에 보유 수량·평균 단가를 저장하고 Binance 실시간 시세로 평가합니다.</p>
-      </div>
-      <span class="portfolio-live" id="portfolio-live-status">● LIVE 대기</span>
-    </div>
-    <div class="card">
-      <div class="portfolio-form">
-        <label>코인 심볼<input id="portfolio-symbol" type="text" placeholder="BTC 또는 BTCUSDT"></label>
-        <label>보유 수량<input id="portfolio-amount" type="number" min="0" step="any" placeholder="0.01"></label>
-        <label>평균 매수가 (USDT)<input id="portfolio-avg-price" type="number" min="0" step="any" placeholder="65000"></label>
-        <button onclick="savePortfolioCoin()" style="background:#1f6feb;border:none;border-radius:8px;padding:10px 16px;color:#fff;font-weight:700;cursor:pointer">추가·수정</button>
-      </div>
-      <div id="portfolio-form-msg" style="font-size:11px;color:#8b949e;margin-top:8px"></div>
-    </div>
-    <div class="portfolio-summary" id="portfolio-summary"></div>
-    <div class="card portfolio-table-wrap">
-      <table class="portfolio-table">
-        <thead><tr><th>#</th><th>코인</th><th>현재가</th><th>24h</th><th>보유 수량</th><th>평균 단가</th><th>평가액</th><th>손익</th><th>관리</th></tr></thead>
-        <tbody id="portfolio-tbody"></tbody>
-      </table>
     </div>
   </div>
 
@@ -13982,6 +15766,54 @@ input::placeholder{color:#484f58}
     </div>
   </div>
 
+  <!-- ── 🇰🇷 국내 개장 급등 추천 페이지 ── -->
+  <div id="page-kr-surge" style="display:none">
+    <div class="screener-header" style="margin-bottom:16px">
+      <div>
+        <h2 style="font-size:20px;font-weight:700;margin-bottom:3px">🇰🇷 국내 개장 급등 추천</h2>
+        <p style="font-size:12px;color:#8b949e">VI·시장경보 하드 제외 · 외인/기관·프로그램·업종 수급 · 30분/1시간/종가 검증</p>
+      </div>
+    </div>
+    <div class="home-section">
+      <div id="kr-surge-loading" style="text-align:center;padding:18px;color:#484f58;font-size:12px">
+        <div class="spinner" style="margin:0 auto 8px;width:22px;height:22px;border-width:3px"></div>
+        국내 개장 급등 후보의 실시간 시세와 기술 조건 분석 중...
+      </div>
+      <div id="kr-surge-content" style="display:none">
+        <div class="us-reco-header">
+          <span class="us-reco-title">🇰🇷 국내 개장 급등 추천
+            <span id="kr-surge-session-label" style="font-size:10px;color:#8b949e;font-weight:400;margin-left:6px"></span>
+          </span>
+          <button onclick="loadKrSurge(true)" class="home-section-refresh" title="국내 개장 급등 다시 분석">🔄 새로고침</button>
+        </div>
+        <div class="kr-surge-summary" aria-label="스캔 범위와 조건">
+          <div class="kr-surge-summary-item"><div class="kr-surge-summary-label">기준 시각</div><div class="kr-surge-summary-value" id="kr-surge-asof">-</div></div>
+          <div class="kr-surge-summary-item"><div class="kr-surge-summary-label">스캔 범위</div><div class="kr-surge-summary-value" id="kr-surge-scope">-</div></div>
+          <div class="kr-surge-summary-item"><div class="kr-surge-summary-label">1차 필터</div><div class="kr-surge-summary-value" id="kr-surge-criteria">-</div></div>
+          <div class="kr-surge-summary-item"><div class="kr-surge-summary-label">위험·수급 연동</div><div class="kr-surge-summary-value" id="kr-surge-coverage">-</div></div>
+        </div>
+        <div class="kr-surge-disclaimer" id="kr-surge-disclaimer">추천 확정 목록이 아니라 체결·유동성·기술 추세를 함께 통과한 조건부 모멘텀 스캔입니다.</div>
+        <div class="us-reco-cards" id="kr-surge-cards"></div>
+        <section class="kr-surge-performance" aria-labelledby="kr-surge-performance-title">
+          <div class="us-reco-header">
+            <span class="us-reco-title" id="kr-surge-performance-title">성과 자동 추적 <span id="kr-surge-performance-asof" style="font-size:10px;color:#6e7681;font-weight:400"></span></span>
+            <button onclick="loadKrSurgePerformance()" class="home-section-refresh" title="성과 다시 확인">↻ 성과 갱신</button>
+          </div>
+          <div id="kr-surge-performance-storage" style="font-size:10px;color:#8b949e;margin:5px 0"></div>
+          <div class="kr-surge-perf-grid" id="kr-surge-performance-summary"></div>
+          <div class="kr-surge-perf-table-wrap"><table class="kr-surge-perf-table">
+            <thead><tr><th>추천 종목·시점</th><th>추천가</th><th>30분</th><th>1시간</th><th>종가</th></tr></thead>
+            <tbody id="kr-surge-performance-body"><tr><td colspan="5" style="text-align:center;color:#484f58">추적 데이터를 불러오는 중...</td></tr></tbody>
+          </table></div>
+        </section>
+      </div>
+      <div id="kr-surge-error" style="display:none;text-align:center;padding:14px;color:#f85149;font-size:12px">
+        국내 급등 스캔 데이터를 불러오지 못했습니다.
+        <button onclick="loadKrSurge(true)" class="home-section-refresh" style="margin-left:6px">재시도</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── 🇺🇸 미국 개장 급등 추천 페이지 ── -->
   <div id="page-us-surge" style="display:none">
     <div class="screener-header" style="margin-bottom:16px">
@@ -14033,7 +15865,7 @@ input::placeholder{color:#484f58}
 
 <script>
 // ── 전역 상태 ──
-let currentMarket = 'CRYPTO';
+let currentMarket = 'KRX';
 let currentData = null;
 let currentTab = 'chart';
 let screenerData = [];
@@ -14048,11 +15880,13 @@ let chartCleanupHandlers = {};
 // ── 페이지 전환 ──
 var _recoMenuOpen = false;
 var _krLongtermLoaded = false;
+var _krSurgeLoaded     = false;
+var _krSurgePerformanceTimer = null;
 var _usLongtermLoaded = false;
 var _usSurgeLoaded   = false;
 
-var _recoSubPages = ['kr-longterm', 'us-longterm', 'us-surge'];
-var _allPages = ['analysis', 'screener', 'portfolio', 'kr-longterm', 'us-longterm', 'us-surge', 'scan', 'immune'];
+var _recoSubPages = ['kr-longterm', 'kr-surge', 'us-longterm', 'us-surge'];
+var _allPages = ['analysis', 'screener', 'kr-longterm', 'kr-surge', 'us-longterm', 'us-surge', 'scan', 'immune'];
 var _scanLoaded  = false;
 var _immuneLoaded = false;
 
@@ -14077,42 +15911,39 @@ function showPage(page) {
 
   // 상단 nav 버튼 active 상태
   document.getElementById('nav-analysis').classList.toggle('active', page === 'analysis');
-  document.getElementById('nav-scan').classList.toggle('active', page === 'screener');
-  document.getElementById('nav-portfolio').classList.toggle('active', page === 'portfolio');
+  document.getElementById('nav-scan').classList.toggle('active', page === 'scan');
 
   var isRecoPage = _recoSubPages.indexOf(page) !== -1;
   // 서브페이지를 선택하면 아코디언 부모도 active, 서브메뉴 열기
   if (isRecoPage && !_recoMenuOpen) toggleRecoMenu();
   document.getElementById('nav-recommendations').classList.toggle('active', isRecoPage || _recoMenuOpen);
-  ['kr-longterm', 'us-longterm', 'us-surge'].forEach(function(p) {
+  ['kr-longterm', 'kr-surge', 'us-longterm', 'us-surge'].forEach(function(p) {
     var btn = document.getElementById('nav-' + p);
     if (btn) btn.classList.toggle('active', p === page);
   });
 
   // 데이터 최초 로드 (각 서브페이지 첫 방문 시)
   if (page === 'screener'    && screenerData.length === 0) loadScreener();
-  if (page === 'portfolio') renderPortfolio();
   if (page === 'kr-longterm' && !_krLongtermLoaded) { _krLongtermLoaded = true; loadKrLongterm(); }
+  if (page === 'kr-surge'    && !_krSurgeLoaded)     { _krSurgeLoaded     = true; loadKrSurge(); }
   if (page === 'us-longterm' && !_usLongtermLoaded) { _usLongtermLoaded = true; loadUsLongterm(); }
   if (page === 'us-surge'    && !_usSurgeLoaded)    { _usSurgeLoaded    = true; loadUsSurge(); }
+  if (page === 'kr-surge') {
+    if (!_krSurgePerformanceTimer) {
+      _krSurgePerformanceTimer = setInterval(loadKrSurgePerformance, 60000);
+    }
+  } else if (_krSurgePerformanceTimer) {
+    clearInterval(_krSurgePerformanceTimer);
+    _krSurgePerformanceTimer = null;
+  }
 
   // HybridTurtle 통합 페이지 첫 방문 시 자동 로드
   if (page === 'scan')   { var scanEl = document.getElementById('nav-scan');   if(scanEl) scanEl.classList.add('active'); loadImmuneBanner(); }
   if (page === 'immune') { var imEl   = document.getElementById('nav-immune'); if(imEl)   imEl.classList.add('active');   loadImmuneFull(); }
-  ['nav-immune'].forEach(function(id) {
+  ['nav-scan','nav-immune'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.classList.toggle('active', id === 'nav-' + page);
   });
-
-  if (page === 'portfolio') {
-    _stopRealtimeStreams();
-    _startPortfolioStream();
-  } else {
-    _stopPortfolioStream();
-    if (page === 'analysis' && currentData && currentData.market === 'CRYPTO' && currentData.symbol) {
-      _startRealtimeStreams(currentData.symbol);
-    }
-  }
 
   closeSidebar();   // 모바일: 페이지 전환 시 사이드바 닫기
 }
@@ -14415,6 +16246,19 @@ function _hideStockSuggestions() {
   _stockSuggestionActive = -1;
 }
 
+function _stockSuggestionStatusTags(item) {
+  const tags = [];
+  if (item.delisting_scheduled) tags.push('<span class="stock-suggestion-tag delist">상장폐지 예정</span>');
+  if (item.trading_halt) {
+    const release = item.halt_release_label && item.halt_release_label !== '해제일 미정'
+      ? `해제 ${item.halt_release_label}` : '해제일 미정';
+    tags.push(`<span class="stock-suggestion-tag halt">거래정지 · ${_escapeStockSuggestion(release)}</span>`);
+  }
+  if (item.management) tags.push('<span class="stock-suggestion-tag manage">관리종목</span>');
+  if (item.newly_listed) tags.push('<span class="stock-suggestion-tag new">신규상장</span>');
+  return tags.length ? `<span class="stock-suggestion-tags">${tags.join('')}</span>` : '';
+}
+
 function _renderStockSuggestions(items, statusText = '') {
   const list = document.getElementById('ticker-suggestions');
   const input = document.getElementById('ticker-input');
@@ -14425,11 +16269,15 @@ function _renderStockSuggestions(items, statusText = '') {
     list.innerHTML = statusText ? `<div class="stock-suggestion-status">${_escapeStockSuggestion(statusText)}</div>` : '';
   } else {
     list.innerHTML = _stockSuggestionItems.map((item, index) => `
-      <button type="button" class="stock-suggestion" id="stock-suggestion-${index}"
-              role="option" aria-selected="false" data-suggestion-index="${index}">
+      <button type="button" class="stock-suggestion${item.analysis_blocked ? ' blocked' : ''}" id="stock-suggestion-${index}"
+              role="option" aria-selected="false" aria-disabled="${item.analysis_blocked ? 'true' : 'false'}"
+              data-suggestion-index="${index}">
         <span class="stock-suggestion-main">
-          <span class="stock-suggestion-flag" aria-hidden="true">🪙</span>
-          <span class="stock-suggestion-name">${_escapeStockSuggestion(item.name || item.ticker)}</span>
+          <span class="stock-suggestion-flag" aria-hidden="true">${item.market === 'KRX' ? '🇰🇷' : '🇺🇸'}</span>
+          <span class="stock-suggestion-copy">
+            <span class="stock-suggestion-name">${_escapeStockSuggestion(item.name || item.ticker)}</span>
+            ${_stockSuggestionStatusTags(item)}
+          </span>
         </span>
         <span class="stock-suggestion-meta">
           <span class="stock-suggestion-code">${_escapeStockSuggestion(item.code || item.ticker)}</span>
@@ -14469,6 +16317,13 @@ function _selectStockSuggestion(index) {
   currentMarket = item.market || currentMarket;
   _hideStockSuggestions();
   input.blur();
+  if (item.analysis_blocked) {
+    setState('error');
+    const reason = item.block_reason || '거래 제한 상태';
+    document.getElementById('error-msg').textContent =
+      `${item.name || item.ticker}은(는) ${reason} 종목이므로 분석을 차단했습니다.`;
+    return;
+  }
   analyze(item.ticker);
 }
 
@@ -14485,7 +16340,7 @@ async function _loadStockSuggestions(query) {
     const data = await response.json();
     const input = document.getElementById('ticker-input');
     if (requestId !== _stockSuggestionRequest || !input || input.value.trim() !== query) return;
-    _renderStockSuggestions(data.items || [], (data.items || []).length ? '' : '일치하는 코인이 없습니다.');
+    _renderStockSuggestions(data.items || [], (data.items || []).length ? '' : '일치하는 국내외 종목이 없습니다.');
   } catch (error) {
     if (error && error.name === 'AbortError') return;
     if (requestId === _stockSuggestionRequest) {
@@ -14590,26 +16445,12 @@ function _stopLoadingAnimation() {
   if (_loadingTimer) { clearInterval(_loadingTimer); _loadingTimer = null; }
 }
 
-// ── 코인 24시간 현재가 폴링 ───────────────────────────────────────────────
+// ── 미국 주식 실시간 가격 폴링 ──────────────────────────────────────────────
 let _pricePoller    = null;
 let _pollTicker     = null;
-let _livePriceSocket = null;
-let _liquidationSocket = null;
-let _liveReconnectTimer = null;
-let _liveStreamGeneration = 0;
-let _liquidationEvents = [];
 
 function _stopPricePolling() {
   if (_pricePoller) { clearInterval(_pricePoller); _pricePoller = null; }
-}
-
-function _stopRealtimeStreams() {
-  _liveStreamGeneration += 1;
-  if (_liveReconnectTimer) { clearTimeout(_liveReconnectTimer); _liveReconnectTimer = null; }
-  if (_livePriceSocket) { try { _livePriceSocket.close(); } catch (_) {} _livePriceSocket = null; }
-  if (_liquidationSocket) { try { _liquidationSocket.close(); } catch (_) {} _liquidationSocket = null; }
-  _liquidationEvents = [];
-  _stopPricePolling();
 }
 
 function _startPricePolling(symbol) {
@@ -14618,99 +16459,13 @@ function _startPricePolling(symbol) {
   _pricePoller = setInterval(async () => {
     if (!_pollTicker) return;
     try {
-      const r = await fetch(`/api/price?ticker=${encodeURIComponent(_pollTicker)}&market=CRYPTO&_ts=${Date.now()}`, {cache:'no-store'});
+      const r = await fetch(`/api/price?ticker=${encodeURIComponent(_pollTicker)}&market=US&_ts=${Date.now()}`, {cache:'no-store'});
       if (!r.ok) return;
       const d = await r.json();
       if (d.error || !d.price) return;
       _applyPriceUpdate(d);
     } catch(e) {}
   }, 5000);
-}
-
-function _formatLiveNotional(value) {
-  const n = Number(value || 0);
-  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
-  return '$' + n.toFixed(0);
-}
-
-function _renderLiveLiquidations() {
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  _liquidationEvents = _liquidationEvents.filter(item => item.time >= cutoff);
-  const longValue = _liquidationEvents.filter(item => item.side === 'LONG').reduce((sum, item) => sum + item.notional, 0);
-  const shortValue = _liquidationEvents.filter(item => item.side === 'SHORT').reduce((sum, item) => sum + item.notional, 0);
-  const total = longValue + shortValue;
-  const dominant = longValue > shortValue * 1.2 ? '롱 청산 우세 · 하방 압력'
-    : shortValue > longValue * 1.2 ? '숏 청산 우세 · 숏커버 압력' : '청산 방향 균형';
-  const tone = longValue > shortValue * 1.2 ? '#f85149' : shortValue > longValue * 1.2 ? '#3fb950' : '#8b949e';
-  document.querySelectorAll('[data-live-liquidation]').forEach(el => {
-    el.innerHTML = `⚡ 최근 15분 실시간 청산 <strong style="color:${tone}">${_formatLiveNotional(total)}</strong> · 롱 ${_formatLiveNotional(longValue)} · 숏 ${_formatLiveNotional(shortValue)} · <span style="color:${tone}">${dominant}</span>`;
-  });
-  if (currentData) currentData.live_liquidation = {total, long:longValue, short:shortValue, window_minutes:15};
-}
-
-function _startRealtimeStreams(symbol) {
-  _stopRealtimeStreams();
-  const sym = String(symbol || '').toUpperCase();
-  if (!sym) return;
-  const lower = sym.toLowerCase();
-  const generation = _liveStreamGeneration;
-  _pollTicker = sym;
-
-  try {
-    _livePriceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/${lower}@ticker`);
-    _livePriceSocket.onopen = () => {
-      if (generation !== _liveStreamGeneration) return;
-      _stopPricePolling();
-      const badge = document.getElementById('r-session-badge');
-      if (badge) {
-        badge.textContent = '● LIVE';
-        badge.style.background = '#3fb95022';
-        badge.style.color = '#3fb950';
-        badge.style.display = 'inline';
-      }
-    };
-    _livePriceSocket.onmessage = event => {
-      if (generation !== _liveStreamGeneration) return;
-      try {
-        const tick = JSON.parse(event.data);
-        _applyPriceUpdate({price:Number(tick.c), pct_change:Number(tick.P), session_name:'● LIVE'});
-        _updatePortfolioQuote(sym, Number(tick.c), Number(tick.P));
-      } catch (_) {}
-    };
-    _livePriceSocket.onerror = () => { if (!_pricePoller) _startPricePolling(sym); };
-    _livePriceSocket.onclose = () => {
-      if (generation !== _liveStreamGeneration) return;
-      if (!_pricePoller) _startPricePolling(sym);
-      _liveReconnectTimer = setTimeout(() => {
-        if (generation === _liveStreamGeneration && currentData && currentData.symbol === sym) _startRealtimeStreams(sym);
-      }, 3000);
-    };
-  } catch (_) {
-    _startPricePolling(sym);
-  }
-
-  try {
-    _liquidationSocket = new WebSocket(`wss://fstream.binance.com/ws/${lower}@forceOrder`);
-    _liquidationSocket.onmessage = event => {
-      if (generation !== _liveStreamGeneration) return;
-      try {
-        const payload = JSON.parse(event.data);
-        const order = payload.o || {};
-        const price = Number(order.ap || order.p || 0);
-        const quantity = Number(order.z || order.q || 0);
-        if (!(price > 0 && quantity > 0)) return;
-        _liquidationEvents.push({
-          time: Number(order.T || payload.E || Date.now()),
-          notional: price * quantity,
-          side: order.S === 'SELL' ? 'LONG' : 'SHORT',
-        });
-        _renderLiveLiquidations();
-      } catch (_) {}
-    };
-  } catch (_) {}
-  _renderLiveLiquidations();
 }
 
 function _applyPriceUpdate(d) {
@@ -14726,7 +16481,6 @@ function _applyPriceUpdate(d) {
     const sn = (d.session_name || '').trim();
     if (sn && !hiddenSessions.has(sn)) {
       const sessionColors = {
-        '● LIVE':       { bg: '#3fb95022', fg: '#3fb950' },
         '프리마켓':   { bg: '#1f6feb33', fg: '#58a6ff' },
         '오버나이트': { bg: '#6e40c933', fg: '#bc8cff' },
         '애프터마켓': { bg: '#388bfd22', fg: '#79c0ff' },
@@ -14743,7 +16497,7 @@ function _applyPriceUpdate(d) {
   }
 }
 async function analyze(tickerOverride = '') {
-  _stopRealtimeStreams();   // 새 검색 시 이전 실시간 스트림 중단
+  _stopPricePolling();   // 새 검색 시 이전 폴링 중단
   _hideStockSuggestions();
   closeSidebar();   // 모바일에서 분석 시작 시 사이드바 자동 닫기
   const inputValue = document.getElementById('ticker-input').value;
@@ -14760,7 +16514,7 @@ async function analyze(tickerOverride = '') {
   try {
     // 캐시 우회: 같은 종목을 다시 분석해도 항상 서버에서 최신 현재가를 받아온다.
     // cache:'no-store' = 브라우저 HTTP 캐시 우회 / _ts = CDN(s-maxage) 캐시 키 분리
-    const r = await fetch(`/api/coin?ticker=${encodeURIComponent(ticker)}&period=${period}&market=${currentMarket}&_ts=${Date.now()}`, {cache:'no-store'});
+    const r = await fetch(`/api/stock?ticker=${encodeURIComponent(ticker)}&period=${period}&market=${currentMarket}&_ts=${Date.now()}`, {cache:'no-store'});
     let text = await r.text();
     let d;
     try {
@@ -14773,7 +16527,7 @@ async function analyze(tickerOverride = '') {
     _selectedStockTicker = d.symbol || ticker;
     if (d.market) {
       currentMarket = d.market;
-      document.getElementById('ticker-input').placeholder = '예: BTC, 비트코인, ETHUSDT, SOL';
+      document.getElementById('ticker-input').placeholder = d.market === 'KRX' ? '예: 삼성전자, 005930' : '예: 애플, TSLA, NVDA';
     }
     // 입력창("종목명/코드")에 해석된 종목명 반영 — 스캔 클릭/코드 검색 시에도
     // 티커(041510.KQ)가 아닌 한글/영문 종목명(에스엠, Apple)이 표시되도록 통일.
@@ -14784,11 +16538,10 @@ async function analyze(tickerOverride = '') {
     }
     renderResult(d);
     renderSignalConfidence(d);
-    _updatePortfolioButton(d.symbol);
     setState('result');
-    // 코인: Binance WebSocket 실시간 시세·청산 스트림, 장애 시 5초 폴링 폴백
-    if (d.market === 'CRYPTO' && d.symbol) {
-      _startRealtimeStreams(d.symbol);
+    // 미국 주식: 5초마다 현재가 자동 갱신
+    if (d.market === 'US' && d.symbol) {
+      _startPricePolling(d.symbol);
     }
     // KRX 전용: 투자자 수급 자동 비동기 로드
     // 메인 API 응답에서 ok=false인 경우(타임아웃·API 지연 등) 전용 엔드포인트로 자동 재시도
@@ -14831,15 +16584,7 @@ function _fmtKrNum(v) { return Number(v).toLocaleString('ko-KR', {maximumFractio
 // US: 모든 미국 주식 가격은 소수점 4자리 고정 표시(저가주·프리마켓 가격 정밀도 보존).
 function _fmtUsNum(v) {
   const n = Number(v);
-  if (n === 0) return '0';
-  const abs_n = Math.abs(n);
-  let maxFD = 2;
-  if (abs_n < 0.0001) maxFD = 8;
-  else if (abs_n < 0.001) maxFD = 7;
-  else if (abs_n < 0.01) maxFD = 6;
-  else if (abs_n < 0.1) maxFD = 5;
-  else if (abs_n < 1) maxFD = 4;
-  return n.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:maxFD});
+  return n.toLocaleString('en-US', {minimumFractionDigits:4, maximumFractionDigits:4});
 }
 
 // 통화기호 포함 가격 (현재가·목표가·매수전략·ATR 리스크 등)
@@ -14861,12 +16606,6 @@ function fmtSymbol(sym, isKrx) {
 function fmt(v, isKrx) { return fmtPrice(v, isKrx); }
 
 // ── 🧭 신호 신뢰도 종합 카드 (confidence_engine 결과) ──────────────────────
-function _escPrediction(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-}
-
 function renderSignalConfidence(d) {
   const el = document.getElementById('signal-confidence-card');
   if (!el) return;
@@ -14931,6 +16670,17 @@ function renderSignalConfidence(d) {
       sentimentScore.toFixed(0) + ' (' + _escPrediction(sentimentSource) + ')</span>'
     : '';
 
+  const historyConfidence = sc.history_confidence || {};
+  const historyDays = Number(historyConfidence.available_trading_days);
+  const historyCap = Number(historyConfidence.confidence_cap);
+  const optimalDays = Number(historyConfidence.optimal_lookback_days);
+  const historyChip = Number.isFinite(historyDays) && Number.isFinite(historyCap)
+    ? '<span class="signal-confidence-chip" style="color:#d29922">데이터 ' + historyDays.toFixed(0) +
+      '일 · 상한 ' + historyCap.toFixed(0) + '%' +
+      (Number.isFinite(optimalDays) && optimalDays > 0 ? ' · 최적 ' + optimalDays.toFixed(0) + '일' : '') +
+      '</span>'
+    : '';
+
   const reasons = [];
   (sc.cap_reasons || []).forEach(reason => { if (reason && !reasons.includes(reason)) reasons.push(reason); });
   (ci.reason || []).forEach(reason => { if (reason && !reasons.includes(reason)) reasons.push(reason); });
@@ -14967,7 +16717,7 @@ function renderSignalConfidence(d) {
       '<div class="signal-confidence-score-panel">' +
         '<div class="signal-confidence-score-head">' +
           '<div class="signal-confidence-kicker">종합 신뢰도</div>' +
-          '<div class="signal-confidence-chips">' + regimeChip + sectorChip + earningsChip + sentimentChip + '</div>' +
+          '<div class="signal-confidence-chips">' + regimeChip + sectorChip + earningsChip + sentimentChip + historyChip + '</div>' +
         '</div>' +
         '<div class="signal-confidence-score-row">' +
           '<div class="signal-confidence-score" style="color:' + level.color + '">' + conf.toFixed(0) + '<span style="font-size:14px;color:#8b949e">%</span></div>' +
@@ -14984,7 +16734,7 @@ function renderSignalConfidence(d) {
         '<div class="signal-confidence-interpretation-title"><span style="color:' + signalMeta.color + '">' + signalMeta.label + ' 신호</span> · ' + level.label + ' 신뢰도</div>' +
         '<div class="signal-confidence-interpretation-text">' + _escPrediction(level.description) +
           ' 방향 종합점수는 ' + weightedText + '점이며 50점은 중립 기준입니다.</div>' +
-        '<div class="signal-confidence-definition">주의: ' + conf.toFixed(0) + '%는 코인 가격의 상승확률이나 적중확률이 아닙니다. 복합·기술·뉴스·시장 신호의 일치도와 데이터 불확실성을 종합한 값입니다.</div>' +
+        '<div class="signal-confidence-definition">주의: ' + conf.toFixed(0) + '%는 주가의 상승확률이나 적중확률이 아닙니다. AI·기술·뉴스·시장 신호의 일치도와 데이터 불확실성을 종합한 값입니다.</div>' +
       '</div>' +
     '</div>' +
     '<div class="signal-confidence-section"><div class="signal-confidence-section-title">신뢰도 제한·변동 요인</div>' +
@@ -14996,19 +16746,34 @@ function renderResult(d) {
   const up = d.pct_change >= 0;
   const clr = isKrx ? (up ? '#f85149' : '#388bfd') : (up ? '#3fb950' : '#f85149');
 
-  // 🔔 코인 가격 알림 버튼 연동
-  _currentAlertSymbol = d.symbol || null;
-  _currentAlertPrice  = d.last_close || null;
+  // 🔔 알림 버튼 연동 (KRX 전용)
+  _currentAlertSymbol = isKrx ? d.symbol : null;
+  _currentAlertPrice  = isKrx ? d.last_close : null;
   const alertBtn = document.getElementById('result-alert-btn');
   if (alertBtn) {
-    alertBtn.style.display = d.symbol ? 'flex' : 'none';
-    if (d.symbol) _alertResultBtnUpdate(d.symbol);
+    alertBtn.style.display = isKrx ? 'flex' : 'none';
+    if (isKrx) _alertResultBtnUpdate(d.symbol);
   }
 
   document.getElementById('r-title').innerHTML =
     `${d.company || fmtSymbol(d.symbol, isKrx)} <span class="ticker-badge">${fmtSymbol(d.symbol, isKrx)}</span>`;
   document.getElementById('r-subtitle').textContent =
-    `기준일: ${new Date().toLocaleDateString('ko-KR')} | 시장: 🪙 Binance (24시간)`;
+    `기준일: ${new Date().toLocaleDateString('ko-KR')} | 시장: ${isKrx ? '🇰🇷 KRX (한국)' : '🇺🇸 US (미국)'}`;
+  const securityBanner = document.getElementById('security-status-banner');
+  const securityStatus = d.security_status || {};
+  if (securityBanner) {
+    const labels = Array.isArray(securityStatus.status_labels) ? securityStatus.status_labels : [];
+    const warnings = Array.isArray(securityStatus.warnings) ? securityStatus.warnings : [];
+    if (isKrx && (labels.length || warnings.length)) {
+      securityBanner.innerHTML =
+        `<strong>${_escapeStockSuggestion(labels.join(' · ') || '종목 상태 안내')}</strong>` +
+        (warnings.length ? `<br>${_escapeStockSuggestion(warnings.join(' '))}` : '');
+      securityBanner.classList.add('visible');
+    } else {
+      securityBanner.classList.remove('visible');
+      securityBanner.textContent = '';
+    }
+  }
   document.getElementById('r-price').textContent = fmt(d.last_close, isKrx);
   document.getElementById('r-pct').innerHTML = `<span style="color:${clr}">${up?'▲':'▼'} ${Math.abs(d.pct_change).toFixed(2)}%</span>`;
 
@@ -15050,19 +16815,6 @@ function renderResult(d) {
   document.getElementById('r-vol').textContent = d.volume.toLocaleString();
   document.getElementById('r-atr').textContent = d.atr.toLocaleString();
 
-  // 미결제약정(OI) 카드 — 무기한 선물 데이터가 있을 때만 표시
-  const oiCard = document.getElementById('r-oi-card');
-  const oiEl = document.getElementById('r-oi');
-  if (oiCard && oiEl) {
-    if (d.open_interest != null && d.open_interest > 0) {
-      const oi = d.open_interest;
-      oiEl.textContent = oi >= 1e6 ? (oi/1e6).toFixed(2)+'M' : oi >= 1e3 ? (oi/1e3).toFixed(1)+'K' : oi.toLocaleString();
-      oiCard.style.display = '';
-    } else {
-      oiCard.style.display = 'none';
-    }
-  }
-
   // ATR% + 변동성 추세 → ATR 카드 서브텍스트
   const atrPctEl = document.getElementById('r-atr-pct');
   if (atrPctEl && d.buy_price && d.buy_price.atr_pct != null) {
@@ -15094,18 +16846,15 @@ function renderResult(d) {
   renderAI(d, isKrx);
   // 단계별 분석 리포트 (별도 탭)
   renderReport(d);
-  // ⚡ 레버리지 통합 예측 (방향성·진입·손절·목표·리스크·AI의견)
-  renderPrediction(d, isKrx);
   // 예측/리스크
   renderForecast(d, isKrx);
-  // 예측 탭: 핵심 구간·분할 매수·ATR·손익비
-  renderPullbackIntoForecast(d, isKrx);
   // 기술적 지표 시그널 & 피봇 포인트
   renderTechnicalSignals(d);
   renderPivotPoints(d, isKrx);
   // 뉴스
   renderNews(d, isKrx);
-  // (코인 모드) 토스증권 AI 요약 제거됨
+  // 토스증권 AI 요약 비동기 로드 (KRX + US 공통, 결과 카드 상단 4번째 메트릭 카드)
+  fetchTossAiSummary(d.symbol, d.market);
   // 탭 초기화
   switchTab('chart');
   // 차트는 탭 전환 후 렌더
@@ -15261,12 +17010,6 @@ function _getPullbackDimsHtml(d, isKrx) {
 // 하위 호환 래퍼 (renderAI에서 호출하지만 이제 renderDiagnosis 내부에서 처리됨)
 function renderPullbackIntoAI(d, isKrx) {
   // renderDiagnosis가 이미 _getPullbackDimsHtml()로 렌더링했으므로 no-op
-}
-
-// 예측 탭 하위 호환 래퍼. 핵심 구간과 분할 매수 설명은 renderForecast에 통합되어 있다.
-function renderPullbackIntoForecast(d, isKrx) {
-  const el = document.getElementById('pullback-forecast-section');
-  if (el) el.innerHTML = '';
 }
 
 // ── (하위 호환) 눌림목/손익비 분석 렌더 — 더 이상 사용하지 않음 ───────────────
@@ -16153,403 +17896,181 @@ function toggleDimAccordion(id) {
   if (arrow) arrow.style.transform = nowHidden ? 'rotate(180deg)' : 'rotate(0deg)';
 }
 
-// ── 리스크 관리 카드 하단: 눌림목 기반 ATR 정밀 가격 설정 ────────────────────
-// [DEPRECATED] "📌 눌림목 분석 기반 정밀 가격 설정" 섹션 렌더러.
-//   정밀 가격(손절선·1·2차 목표·트레일링 스탑)은 renderForecast의 리스크 시나리오
-//   카드(보수적/중립적/공격적)에 통합되어 더 이상 호출되지 않는다. (참고용 보존)
-function renderPullbackATR(d, isKrx) {
-  const el = document.getElementById('pullback-atr-section');
-  if (!el) return;
-  const pa = d.pullback_analysis;
-  if (!pa || !pa.stop_loss) { el.innerHTML = ''; return; }
-
-  const C = { red:'#f85149', orange:'#d29922', green:'#3fb950', blue:'#58a6ff', purple:'#bc8cff', gray:'#8b949e' };
-  const fmtP = v => fmtPrice(v, isKrx);
-
-  // R/R 색상
-  const rrC = pa.rr_main >= 2.3 ? C.green : pa.rr_main >= 1.5 ? C.orange : C.red;
-  // 목표가 출처 강조
-  const srcIsEnsemble = pa.target_source && pa.target_source.includes('앙상블');
-  const srcC = srcIsEnsemble ? C.blue : C.gray;
-
-  el.innerHTML = `
-    <div style="margin-top:18px;border-top:1px solid #21262d;padding-top:16px">
-      <div style="font-size:11px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
-        📌 눌림목 분석 기반 정밀 가격 설정
-      </div>
-      <div style="font-size:12px;color:#8b949e;line-height:1.6;margin-bottom:12px">
-        ATR(14) 변동성과 구조 분석을 결합해 산출한 손절·목표가입니다.
-        위 시나리오 카드와 함께 참고하여 실제 매매 기준으로 활용하세요.
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
-        <div style="background:#0d1117;border-radius:8px;padding:11px 12px;border:1px solid ${C.red}">
-          <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">손절선</div>
-          <div style="font-size:17px;font-weight:800;color:${C.red}">${fmtP(pa.stop_loss)}</div>
-          <div style="font-size:11px;color:${C.orange};margin-top:4px">${pa.stop_loss_pct}% 손실 — 이탈 시 미련 없이 정리</div>
-        </div>
-        <div style="background:#0d1117;border-radius:8px;padding:11px 12px;border:1px solid ${C.green}">
-          <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">1차 목표가</div>
-          <div style="font-size:17px;font-weight:800;color:${C.green}">${fmtP(pa.target_main)}</div>
-          <div style="font-size:11px;color:${rrC};margin-top:4px">R/R ${pa.rr_main}:1</div>
-          <div style="font-size:10px;color:${srcC};margin-top:2px">${pa.target_source || '기술적 분석'}</div>
-        </div>
-        <div style="background:#0d1117;border-radius:8px;padding:11px 12px;border:1px solid #30363d">
-          <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">2차 목표 (돌파 후)</div>
-          <div style="font-size:17px;font-weight:800;color:${C.blue}">${fmtP(pa.target_ext)}</div>
-          <div style="font-size:11px;color:#8b949e;margin-top:4px">1차 돌파 확인 후 홀딩 기준</div>
-        </div>
-        <div style="background:#0d1117;border-radius:8px;padding:11px 12px;border:1px solid #30363d">
-          <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">트레일링 스탑</div>
-          <div style="font-size:17px;font-weight:800;color:${C.purple}">${fmtP(pa.trail_stop)}</div>
-          <div style="font-size:11px;color:#8b949e;margin-top:4px">ATR × 1.5 — 수익 보전 기준</div>
-        </div>
-      </div>
-    </div>`;
+function _escPrediction(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
-// ── ⚡ 레버리지 통합 예측 렌더링 (🔮 예측 탭 · 7섹션) ──────────────────────
-function renderPrediction(d, isKrx) {
-  const el = document.getElementById('prediction-section');
-  if (!el) return;
-  const p = d.prediction;
-  if (!p) { el.innerHTML = ''; return; }
-  const li = d.leverage_info || {};
-  const up = p.prob_up, down = p.prob_down;
-  const dir = p.direction;
-  const dirColor = dir === 'LONG' ? '#3fb950' : dir === 'SHORT' ? '#f85149' : '#8b949e';
-  const dirLabel = dir === 'LONG' ? 'LONG · 롱(상승)' : dir === 'SHORT' ? 'SHORT · 숏(하락)' : 'NEUTRAL · 관망';
-  const ez = p.entry_zone || {};
-  const r  = p.risk || {};
-  const vr = r.volatility_risk || {};
-  const lq = r.liquidation_risk || {};
-  const tr = r.trend_strength || {};
-  const dm = d.derivatives || ((p.trade_plan || {}).derivatives) || {};
-  const entryColor = dir === 'SHORT' ? '#f85149' : '#3fb950';
-  const entryLabel = dir === 'SHORT' ? '추천 숏 진입 구간' : '추천 매수 진입 구간';
-  const targetsHtml = (p.targets || []).map(t => {
-    const c = (t.pct >= 0) ? '#3fb950' : '#f85149';
-    return `<div style="flex:1;min-width:120px;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px;text-align:center">
-      <div style="font-size:11px;color:#8b949e;margin-bottom:6px">${t.label}</div>
-      <div style="font-size:16px;font-weight:800;color:${c}">${fmtPrice(t.price, isKrx)}</div>
-      <div style="font-size:12px;color:${c};margin-top:2px">${t.pct >= 0 ? '+' : ''}${t.pct}%</div>
+function _predictionTone(tone) {
+  if (tone === 'positive') return '#3fb950';
+  if (tone === 'negative') return '#f85149';
+  return '#d29922';
+}
+
+function _predictionLiveFacts(d, isKrx) {
+  const facts = [];
+  const core = _marketCoreSnapshot || {};
+  if (isKrx) {
+    const indexKey = String(d.symbol || '').endsWith('.KQ') ? 'KOSDAQ' : 'KOSPI';
+    const idx = (core.indices || {})[indexKey];
+    if (idx) {
+      const change = idx.change_pct || idx.change_abs || '—';
+      facts.push({label:indexKey, value:change, detail:`홈 시장 현황의 최신 ${indexKey} 흐름 재사용`, tone:idx.direction === 'up' ? 'positive' : idx.direction === 'down' ? 'negative' : 'neutral'});
+    }
+    const fx = (core.fx || []).find(x => /미국|USD|달러/i.test(String(x.name || '')));
+    if (fx) facts.push({label:'원/달러', value:fx.value || '—', detail:`변동 ${fx.change || '—'} · 환율 급등 시 외국인 수급 부담 가능`, tone:'neutral'});
+  } else {
+    const overnight = core.overnight || [];
+    [['S&P 500',/S&P|GSPC/i],['NASDAQ',/나스닥|NASDAQ|IXIC/i]].forEach(([label, re]) => {
+      const item = overnight.find(x => re.test(`${x.name || ''} ${x.symbol || ''}`));
+      if (!item) return;
+      const pct = Number(item.change_pct);
+      const pctText = Number.isFinite(pct) ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : (item.change_pct || item.change_abs || '—');
+      facts.push({label, value:pctText, detail:'홈에서 이미 받은 미국 시장 흐름 재사용', tone:item.direction === 'up' ? 'positive' : item.direction === 'down' ? 'negative' : 'neutral'});
+    });
+  }
+
+  const sectors = (_sectorFlowSnapshot || {}).sectors || [];
+  const company = String(d.company || '').replace(/\s/g, '');
+  const sector = sectors.find(s => (s.stock_names || []).some(n => String(n).replace(/\s/g, '') === company));
+  if (sector) {
+    const pct = Number(sector.avg_change_pct);
+    facts.push({label:'업종 흐름', value:`${sector.name} ${Number.isFinite(pct) ? (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%' : '—'}`,
+      detail:'홈 업종별 흐름의 기존 응답 재사용', tone:sector.mood || 'neutral'});
+  }
+  return facts;
+}
+
+function renderPredictionSections(d, isKrx) {
+  const p = d.prediction_outlook || null;
+  const overviewEl = document.getElementById('prediction-overview-section');
+  const scenariosEl = document.getElementById('prediction-scenarios-section');
+  const contextEl = document.getElementById('prediction-context-section');
+  if (!overviewEl || !scenariosEl || !contextEl) return;
+  if (!p || !p.decision) {
+    const fallback = '<p style="color:#8b949e;font-size:12px">현재 앱에서 확보한 데이터가 부족해 상세 조건부 시나리오를 만들 수 없습니다.</p>';
+    overviewEl.innerHTML = fallback; scenariosEl.innerHTML = fallback; contextEl.innerHTML = fallback;
+    return;
+  }
+
+  const decision = p.decision;
+  const decisionColor = _predictionTone(decision.tone);
+  const statusHtml = (p.status || []).map(item => {
+    const color = _predictionTone(item.tone);
+    return `<div class="prediction-status-card">
+      <div class="prediction-status-label">${_escPrediction(item.label)} <span class="prediction-help" title="${_escPrediction(item.help || '')}">?</span></div>
+      <div class="prediction-status-value" style="color:${color}">${_escPrediction(item.value)}</div>
+      <div class="prediction-status-detail">${_escPrediction(item.detail)}</div>
     </div>`;
   }).join('');
-  const lev = p.recommended_leverage;
-  el.innerHTML = `
-  <div class="card" style="border:1px solid #1f6feb">
-    <div class="card-title">⚡ 레버리지 예측 엔진 — 종합 시그널</div>
-
-    <!-- 1. 예측 결과: 상승/하락 가능성 -->
-    <div style="margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
-        <span style="color:#3fb950;font-weight:700">▲ 상승 가능성 ${up}%</span>
-        <span style="color:#f85149;font-weight:700">하락 가능성 ${down}% ▼</span>
-      </div>
-      <div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:#21262d">
-        <div style="width:${up}%;background:#3fb950"></div>
-        <div style="width:${down}%;background:#f85149"></div>
+  overviewEl.innerHTML = `<div class="prediction-stack">
+    <div class="prediction-decision" style="border-color:${decisionColor}55">
+      <div>
+        <div class="prediction-kicker">현재 조건에서의 대응 판단</div>
+        <div class="prediction-badges">
+          <div class="prediction-action" style="color:${decisionColor}">${_escPrediction(decision.label)}</div>
+          <span class="prediction-chip" style="color:${decisionColor};border-color:${decisionColor}55">${_escPrediction(decision.direction)}</span>
+          <span class="prediction-chip" style="color:#8b949e">확정 예측 아님</span>
+        </div>
+        <div class="prediction-summary">${_escPrediction(decision.summary)}</div>
       </div>
     </div>
+    <div class="prediction-status-grid">${statusHtml}</div>
+    <div class="prediction-scope">${_escPrediction(p.data_scope || '')}</div>
+  </div>`;
 
-    <!-- 2. 추천 포지션 -->
-    <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:16px">
-      <div style="font-size:30px;font-weight:900;color:${dirColor}">${dirLabel}</div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:8px 16px;text-align:center">
-        <div style="font-size:11px;color:#8b949e">추천 레버리지</div>
-        <div style="font-size:22px;font-weight:800;color:#1f6feb">${lev}x</div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:8px 16px;text-align:center">
-        <div style="font-size:11px;color:#8b949e">위험 등급</div>
-        <div style="font-size:16px;font-weight:800;color:${li.risk_color||'#8b949e'}">${li.risk_grade||'-'}</div>
-      </div>
-    </div>
+  scenariosEl.innerHTML = `<div class="prediction-scenario-grid">${(p.scenarios || []).map(sc => {
+    const color = _predictionTone(sc.tone);
+    const range = sc.price_range || [];
+    const rangeText = range.length === 2 ? `${fmt(range[0], isKrx)} ~ ${fmt(range[1], isKrx)}` : '가격 범위 확인 필요';
+    const conditions = (sc.conditions || []).slice(0, 2).map(x => `<div class="prediction-condition"><span style="color:${color}">•</span><span>${_escPrediction(x)}</span></div>`).join('');
+    const priceChecks = (sc.checks || []).filter(x => /가격|지지|저항|상단|하단|주의|손실|손절|거래량/.test(String(x.label || ''))).slice(0, 2);
+    const checks = priceChecks.map(x => {
+      const value = x.value != null ? `${_escPrediction(x.note || '')} ${fmt(x.value, isKrx)}`.trim() : _escPrediction(x.text || x.note || '');
+      return `<div class="prediction-check"><span class="prediction-check-label">${_escPrediction(x.label)}</span><span class="prediction-check-value">${value}</span></div>`;
+    }).join('');
+    const response = sc.key === 'upside'
+      ? '대응: 저항 돌파와 거래량 증가가 함께 확인될 때만 분할 접근하고, 확인 전 추격은 보류합니다.'
+      : sc.key === 'downside'
+        ? '대응: 지지선 종가 이탈 시 매수 시나리오를 무효화하고 손절 기준을 우선합니다.'
+        : '대응: 지지·저항 사이에서는 신규 진입을 보류하고 지지 확인 후 소액 접근합니다.';
+    return `<div class="prediction-scenario ${_escPrediction(sc.tone || 'neutral')}">
+      <div class="prediction-scenario-head"><div class="prediction-scenario-title" style="color:${color}">${_escPrediction(sc.label)}</div><div class="prediction-prob" style="color:${color};border-color:${color}55">상대 비중 ${Number(sc.probability || 0).toFixed(0)}%</div></div>
+      <div class="prediction-price-range">${rangeText}</div>
+      <div class="prediction-condition-list">${conditions}</div>
+      <div class="prediction-checks">${checks}</div>
+      <div class="prediction-scenario-action" style="border-left:3px solid ${color}">${response}</div>
+    </div>`;
+  }).join('')}</div>`;
 
-    <!-- 3·4. 진입 구간 / 손절 -->
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
-      <div style="flex:1;min-width:200px;background:#161b22;border:1px solid ${entryColor}55;border-radius:10px;padding:14px">
-        <div style="font-size:11px;color:${entryColor};font-weight:600;margin-bottom:6px">${entryLabel}</div>
-        <div style="font-size:17px;font-weight:800;color:#e6edf3">${fmtPrice(ez.low, isKrx)} ~ ${fmtPrice(ez.high, isKrx)}</div>
-      </div>
-      <div style="flex:1;min-width:200px;background:#2d0d0d;border:1px solid #4d1515;border-radius:10px;padding:14px">
-        <div style="font-size:11px;color:#f85149;font-weight:600;margin-bottom:6px">🛑 손절 가격</div>
-        <div style="font-size:17px;font-weight:800;color:#f85149">${fmtPrice(p.stop_loss, isKrx)}</div>
-      </div>
-    </div>
+  const marketContext = p.market_context || {};
+  const factMap = new Map();
+  (marketContext.facts || []).forEach(f => factMap.set(f.label, f));
+  _predictionLiveFacts(d, isKrx).forEach(f => factMap.set(f.label, f));
+  const factsHtml = [...factMap.values()].map(f => {
+    const color = _predictionTone(f.tone);
+    return `<div class="prediction-fact"><div class="prediction-fact-head"><span class="prediction-fact-label">${_escPrediction(f.label)}</span><span class="prediction-fact-value" style="color:${color}">${_escPrediction(f.value)}</span></div><div class="prediction-fact-detail">${_escPrediction(f.detail)}</div></div>`;
+  }).join('') || '<div class="prediction-mini-list">시장 데이터가 부족해 종목 내부 신호를 우선합니다.</div>';
 
-    <!-- 5. 목표 가격 1·2·3차 -->
-    <div style="font-size:12px;color:#8b949e;margin-bottom:6px">🏁 목표 가격</div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">${targetsHtml}</div>
-
-    <!-- 6. 리스크 분석 -->
-    <div style="font-size:12px;color:#8b949e;margin-bottom:6px">🛡️ 리스크 분석</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:8px">
-      <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">예상 손익비(R/R)</div><div style="font-size:15px;font-weight:700;color:#1f6feb">1 : ${r.rr_ratio}</div></div>
-      <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">신뢰도 점수</div><div style="font-size:15px;font-weight:700;color:${r.confidence>=60?'#3fb950':r.confidence>=40?'#d29922':'#f85149'}">${r.confidence}%</div></div>
-      <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">변동성 위험도</div><div style="font-size:15px;font-weight:700;color:${vr.color}">${vr.level}</div></div>
-      <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">청산 위험도</div><div style="font-size:15px;font-weight:700;color:${lq.color||'#8b949e'}">${lq.level||'-'}</div></div>
-      <div style="background:#21262d;border-radius:8px;padding:10px;text-align:center"><div style="font-size:10px;color:#8b949e">추세 강도</div><div style="font-size:15px;font-weight:700;color:#e6edf3">${tr.grade||'-'}</div></div>
+  const pattern = p.pattern_context || {};
+  const patternColor = pattern.manipulation_detected ? '#d29922' : '#3fb950';
+  const patternItems = (pattern.items || []).map(x => `<div style="margin-bottom:5px"><b style="color:${patternColor}">${_escPrediction(x.pattern || '패턴')}</b><br>${_escPrediction(x.desc || '')}<br><span style="color:#cdd9e5">조건: ${_escPrediction(x.action || '')}</span></div>`).join('');
+  const aiHtml = (p.ai_evidence || []).slice(0,4).map(x => `<div>• ${_escPrediction(x)}</div>`).join('');
+  const gapsHtml = (marketContext.data_gaps || []).map(x => `<div>• ${_escPrediction(x)}</div>`).join('');
+  contextEl.innerHTML = `<div class="prediction-context-grid">
+    <div class="prediction-context-card"><div class="prediction-context-title">시장·업종·수급</div><div class="prediction-facts">${factsHtml}</div><div class="prediction-scope">${_escPrediction(marketContext.basis || '')}</div>${gapsHtml ? `<div class="prediction-mini-list" style="margin-top:7px">${gapsHtml}</div>` : ''}</div>
+    <div class="prediction-context-card"><div class="prediction-context-title">AI 진단 · 세력 흔들림 재활용</div>
+      <div class="prediction-pattern-alert" style="border-color:${patternColor};color:${patternColor}">${pattern.manipulation_detected ? `세력 흔들림 패턴 ${pattern.manipulation_count || 0}건 감지 — 지지 유지 여부를 조건으로 판단` : '뚜렷한 세력 흔들림 패턴 없음 — 가격·거래량 기본 조건 우선'}</div>
+      <div class="prediction-mini-list">${patternItems || ''}${pattern.wick_note ? `<div style="margin-bottom:6px">캔들: ${_escPrediction(pattern.wick_note)}</div>` : ''}${aiHtml}</div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:10px 0">
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:10px;color:#8b949e">펀딩비</div>
-        <div style="font-size:14px;font-weight:700;color:${Number(dm.funding_rate_pct||0)>0?'#d29922':Number(dm.funding_rate_pct||0)<0?'#58a6ff':'#8b949e'}">${dm.funding_rate_pct != null ? Number(dm.funding_rate_pct).toFixed(5)+'%' : '-'}</div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:10px;color:#8b949e">전체 계정 롱 / 숏</div>
-        <div style="font-size:14px;font-weight:700;color:#e6edf3">${dm.long_account_pct != null ? Number(dm.long_account_pct).toFixed(1)+'% / '+Number(dm.short_account_pct).toFixed(1)+'%' : '-'}</div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
-        <div style="font-size:10px;color:#8b949e">ADL·청산 압력</div>
-        <div style="font-size:14px;font-weight:700;color:${String(dm.adl_risk||'').toUpperCase()==='HIGH'?'#f85149':String(dm.adl_risk||'').toUpperCase()==='MEDIUM'?'#d29922':'#3fb950'}">${dm.adl_risk || '-'}</div>
-      </div>
-    </div>
-    <div id="live-liquidation-metrics" data-live-liquidation style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:11px;color:#8b949e">⚡ 실시간 청산 규모 수집 대기 중...</div>
-    ${lq.liquidation_price != null ? `<p style="font-size:12px;color:#8b949e;margin-bottom:8px">⚠️ 예상 청산가 ≈ <strong style="color:${lq.color}">${fmtPrice(lq.liquidation_price, isKrx)}</strong> (현재가 대비 ${lq.distance_pct}%, ${lq.atr_buffer} ATR) — ${lq.desc}</p>` : ''}
   </div>`;
 }
 
-function renderCryptoDirectionalForecast(d, isKrx) {
-  const prediction = d.prediction || {};
-  const plan = prediction.trade_plan || {};
-  const direction = plan.direction || prediction.direction || 'NEUTRAL';
-  const isLong = direction === 'LONG';
-  const isShort = direction === 'SHORT';
-  const tone = isLong ? '#3fb950' : isShort ? '#f85149' : '#d29922';
-  const directionLabel = isLong ? '롱(상승)' : isShort ? '숏(하락)' : '관망';
-  const strategyTitle = document.getElementById('buy-strategy-title');
-  const riskTitle = document.getElementById('risk-strategy-title');
-  const bpEl = document.getElementById('buy-price-section');
-  const rgEl = document.getElementById('risk-grid');
-  const atrEl = document.getElementById('pullback-atr-section');
-  const first = plan.first_entry || {};
-  const second = plan.second_entry || {};
-  const dm = d.derivatives || plan.derivatives || {};
-  const liq = ((prediction.risk || {}).liquidation_risk) || {};
-  const fmtZone = zone => zone.low != null && zone.high != null
-    ? `${fmtPrice(zone.low, isKrx)} ~ ${fmtPrice(zone.high, isKrx)}` : '산출 불가';
-  const firstLabel = plan.first_label || (isShort
-    ? '⚡ 1차 숏 진입 구간 (ATR 기반) · 소액 탐색'
-    : '⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색');
-  const secondLabel = plan.second_label || (isShort
-    ? '📍 2차 숏 진입 구간 · 주 진입'
-    : '📍 2차 매수 구간 · 주 진입');
-
-  if (strategyTitle) strategyTitle.textContent = `🎯 현재가 기준 ${directionLabel} 진입 전략`;
-  if (riskTitle) riskTitle.textContent = '🛡️ 리스크 관리 (ATR 기반)';
-  if (atrEl) atrEl.innerHTML = '';
-
-  if (bpEl) {
-    if (!isLong && !isShort) {
-      bpEl.innerHTML = `<div style="background:#241a0a;border:1px solid #d2992255;border-radius:10px;padding:16px;color:#d29922;font-size:13px;line-height:1.7">
-        상승·하락 가능성 차이가 실행 기준보다 작습니다. 방향 확정 전 신규 레버리지 진입을 보류하세요.
-      </div>`;
-    } else {
-      const sideNote = isLong
-        ? '하락 눌림에서 분할 진입하며, 손절가는 모든 진입 구간 아래에 배치됩니다.'
-        : '상승 반등에서 분할 숏 진입하며, 손절가는 모든 진입 구간 위에 배치됩니다.';
-      bpEl.innerHTML = `
-        <div style="background:${isLong?'#0d2d1a':'#2d1515'};border:1px solid ${tone}66;border-radius:10px;padding:13px 15px;margin-bottom:12px">
-          <div style="font-size:15px;font-weight:800;color:${tone};margin-bottom:4px">${directionLabel} 우위 · 방향 대칭 ATR 전략</div>
-          <div style="font-size:11px;color:#cdd9e5;line-height:1.6">${sideNote}</div>
-        </div>
-        <div class="buy-price-grid">
-          <div class="buy-card aggressive" style="padding:14px;border-color:${tone}66">
-            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(firstLabel)}</div>
-            <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(first)}</div>
-            <div style="font-size:11px;color:#8b949e">현재가 인접 구간 · 전체 계획 비중의 30% 이내 탐색</div>
-          </div>
-          <div class="buy-card recommended" style="padding:14px;border-color:${tone}66">
-            <div class="buy-label" style="font-size:13px;color:${tone}">${_escPrediction(secondLabel)}</div>
-            <div style="font-size:19px;font-weight:900;color:#e6edf3;margin:9px 0">${fmtZone(second)}</div>
-            <div style="font-size:11px;color:#8b949e">1차 진입 후 가격이 유리한 방향으로 이동할 때 주 비중 진입</div>
-          </div>
-        </div>`;
-    }
-  }
-
-  if (rgEl) {
-    const stopValue = plan.stop_loss != null ? fmtPrice(plan.stop_loss, isKrx) : '산출 불가';
-    const adjustment = Number(dm.probability_adjustment || 0);
-    const reasonHtml = (dm.reasons || []).slice(0, 4)
-      .map(reason => `<div>• ${_escPrediction(reason)}</div>`).join('') || '<div>• 파생 포지셔닝 과열 신호 없음</div>';
-    rgEl.innerHTML = `
-      <div style="grid-column:1/-1;background:#0d1117;border:1px solid ${tone};border-radius:10px;padding:15px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
-          <div>
-            <div style="font-size:11px;color:#8b949e;margin-bottom:5px">손절가 · ${plan.stop_distance_atr || 1.5} ATR</div>
-            <div style="font-size:22px;font-weight:900;color:#f85149">${stopValue}</div>
-            <div style="font-size:11px;color:#d29922;margin-top:5px">${_escPrediction(plan.invalidation_text || '')}</div>
-          </div>
-          <div style="font-size:11px;color:#8b949e;line-height:1.65;max-width:520px">${_escPrediction(plan.stop_action || '')}</div>
-        </div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
-        <div style="font-size:10px;color:#8b949e">예상 청산가</div>
-        <div style="font-size:16px;font-weight:800;color:${liq.color||'#e6edf3'}">${liq.liquidation_price != null ? fmtPrice(liq.liquidation_price,isKrx) : '-'}</div>
-        <div style="font-size:10px;color:#8b949e;margin-top:4px">위험도 ${liq.level||'-'} · ${liq.atr_buffer!=null?liq.atr_buffer+' ATR':'-'}</div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
-        <div style="font-size:10px;color:#8b949e">펀딩비 · 포지셔닝 보정</div>
-        <div style="font-size:16px;font-weight:800;color:${adjustment>0?'#3fb950':adjustment<0?'#f85149':'#e6edf3'}">${adjustment>=0?'+':''}${adjustment.toFixed(2)}%p</div>
-        <div style="font-size:10px;color:#8b949e;margin-top:4px">롱 ${dm.long_account_pct!=null?Number(dm.long_account_pct).toFixed(1)+'%':'-'} · 숏 ${dm.short_account_pct!=null?Number(dm.short_account_pct).toFixed(1)+'%':'-'}</div>
-      </div>
-      <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px">
-        <div style="font-size:10px;color:#8b949e">ADL 위험</div>
-        <div style="font-size:16px;font-weight:800;color:${String(dm.adl_risk||'').toUpperCase()==='HIGH'?'#f85149':'#3fb950'}">${dm.adl_risk||'-'}</div>
-        <div style="font-size:10px;color:#8b949e;margin-top:4px">Binance 심볼 단위 청산 압력 등급</div>
-      </div>
-      <div style="grid-column:1/-1;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px;font-size:11px;color:#8b949e;line-height:1.6">${reasonHtml}</div>
-      <div data-live-liquidation style="grid-column:1/-1;background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;font-size:11px;color:#8b949e">⚡ 실시간 청산 규모 수집 대기 중...</div>`;
-  }
-}
-
-function _buildCryptoDetailedForecastView(source) {
-  const prediction = source.prediction || {};
-  const plan = prediction.trade_plan || {};
-  const direction = plan.direction || prediction.direction || 'NEUTRAL';
-  const current = Number(source.last_close || ((source.buy_price || {}).current) || 0);
-  const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
-  const view = {
-    ...source,
-    buy_price: clone(source.buy_price),
-    risk_scenarios: clone(source.risk_scenarios),
-    pullback_analysis: clone(source.pullback_analysis) || {},
-    prediction_outlook: clone(source.prediction_outlook) || {},
-  };
-
-  // 공통 손절가는 상세 카드에서도 레버리지 방향별 trade_plan 값을 사용한다.
-  if (plan.stop_loss != null && current > 0) {
-    view.pullback_analysis.stop_loss = Number(plan.stop_loss);
-    view.pullback_analysis.stop_loss_pct = Number((-
-      Math.abs(Number(plan.stop_loss) - current) / current * 100
-    ).toFixed(2));
-  }
-  if (direction !== 'SHORT' || !current) return view;
-
-  const mirrorPrice = value => {
-    const number = Number(value);
-    return Number.isFinite(number) ? Number(Math.max(current * 0.000001, current * 2 - number).toFixed(8)) : value;
-  };
-  const mirrorRange = range => Array.isArray(range)
-    ? range.map(mirrorPrice).sort((a, b) => a - b) : range;
-  const shortNote = value => String(value || '')
-    .replaceAll('추가 하락 위험', '__SHORT_UPSIDE_RISK__')
-    .replaceAll('하락 위험', '__SHORT_UPSIDE_RISK__')
-    .replaceAll('기관 매집 참조', '저항 확인 참조')
-    .replaceAll('중기 저점 매집', '고점 분산 숏 진입')
-    .replaceAll('ATR 낙폭 소화 후 반등', 'ATR __SHORT_RISE_MOVE__ 소화 후 반락')
-    .replaceAll('하락 거래량', '__SHORT_RISING_VOLUME__')
-    .replaceAll('BB하단', '__SHORT_BB_UPPER__')
-    .replaceAll('재상승', '재하락')
-    .replaceAll('매수', '숏 진입')
-    .replaceAll('지지', '저항')
-    .replaceAll('눌림', '반등')
-    .replaceAll('상단', '하단')
-    .replaceAll('돌파', '이탈')
-    .replaceAll('상승', '하락')
-    .replaceAll('__SHORT_BB_UPPER__', 'BB상단')
-    .replaceAll('__SHORT_RISE_MOVE__', '상승폭')
-    .replaceAll('__SHORT_RISING_VOLUME__', '상승 거래량')
-    .replaceAll('__SHORT_UPSIDE_RISK__', '추가 상승 위험');
-
-  const bp = view.buy_price || {};
-  ['aggressive', 'recommended'].forEach(key => {
-    if (!bp[key]) return;
-    bp[key].range = mirrorRange(bp[key].range);
-    if (Array.isArray(bp[key].pct)) bp[key].pct = bp[key].pct.map(value => Math.abs(Number(value)));
-    ['basis', 'interpretation'].forEach(field => { if (bp[key][field]) bp[key][field] = shortNote(bp[key][field]); });
-  });
-  ['aggressive_bands', 'recommended_bands'].forEach(group => {
-    (bp[group] || []).forEach(band => {
-      band.range = mirrorRange(band.range);
-      if (Array.isArray(band.pct)) band.pct = band.pct.map(value => Math.abs(Number(value)));
-      band.entry_role = group === 'aggressive_bands' ? '소액 탐색 숏 진입' : '주 숏 진입';
-      band.atr_basis = shortNote(band.atr_basis);
-      band.tech_note = shortNote(band.tech_note);
-      band.risk_note = shortNote(band.risk_note);
-      band.basis = shortNote(band.basis);
-      band.hold_note = shortNote(band.hold_note);
-      band.confirm_note = '가격이 진입 밴드에서 저항받고 거래량이 증가하는 반락 봉이 확인될 때만 단계적으로 숏 진입';
-      (band.steps || []).forEach(step => {
-        step.price = mirrorPrice(step.price);
-        step.decline_pct = Math.abs(Number(step.decline_pct || 0));
-        step.basis = shortNote(step.basis);
-      });
-    });
-  });
-  if (bp.strategy_rec) {
-    bp.strategy_rec.action = '숏 방향 상세 분할 진입 계획';
-    bp.strategy_rec.rationale = [
-      '상승 반등 구간에서 1차 소액 탐색 후 저항 확인 시 주 비중 진입',
-      plan.invalidation_text || '손절가 이상 안착 시 숏 시나리오 무효',
-    ];
-  }
-  bp.arty_smma_fractal = null;
-
-  const scenarioCopy = {
-    conservative: ['단기 하락 목표 — 변동성이 높을 때 적합', '가까운 지지 구간까지의 단기 숏 목표'],
-    balanced: ['스윙 숏 기준 — 하락 추세가 형성될 때 적합', '중기 지지 이탈과 추세 지속 기준'],
-    aggressive: ['추세 추종 최대 수익 — 강한 하락 모멘텀 확인 시 적합', '강한 하락 추세 지속 시 확장 목표'],
-  };
-  const risk = view.risk_scenarios || {};
-  ['conservative', 'balanced', 'aggressive'].forEach(key => {
-    const scenario = risk[key];
-    if (!scenario) return;
-    scenario.target = mirrorRange(scenario.target);
-    scenario.stop = mirrorRange(scenario.stop);
-    scenario.tp_range = mirrorRange(scenario.tp_range);
-    scenario.desc = scenarioCopy[key][0];
-    scenario.target_basis = [scenarioCopy[key][1], 'ATR 거리·변동성·거래량을 반영한 숏 방향 대칭 계산'];
-    scenario.interpretation = `${scenarioCopy[key][1]} · 손절가는 현재가 위에 배치`;
-    scenario.return = Math.abs(Number(scenario.return || 0));
-    scenario.stop_pct = -Math.abs(Number(scenario.stop_pct || 0));
-    (scenario.tp_levels || []).forEach(level => {
-      level.price = mirrorPrice(level.price);
-      level.return_pct = Math.abs(Number(level.return_pct || 0));
-    });
-  });
-  if (view.pullback_analysis) {
-    ['target_main', 'target_ext', 'trail_stop'].forEach(field => {
-      if (view.pullback_analysis[field] != null) view.pullback_analysis[field] = mirrorPrice(view.pullback_analysis[field]);
-    });
-    view.pullback_analysis.target_source = '숏 방향 ATR 대칭 목표';
-    ['target_main_basis', 'target_ext_basis'].forEach(field => {
-      if (Array.isArray(view.pullback_analysis[field])) {
-        view.pullback_analysis[field] = view.pullback_analysis[field].map(shortNote);
-      }
-    });
-  }
-  const levels = view.prediction_outlook.levels || {};
-  const alignedStop = Number(view.pullback_analysis.stop_loss || plan.stop_loss || current);
-  levels.warning_zone = [Math.min(current + Number(source.atr || 0) * 0.5, alignedStop), alignedStop]
-    .sort((a, b) => a - b);
-  view.prediction_outlook.risk_triggers = [
-    plan.invalidation_text || '손절가 이상 종가 안착',
-    '거래량 증가를 동반한 저항 돌파',
-    '롱 우위로 예측 방향 전환',
-  ];
-  return view;
-}
-
 function renderForecast(d, isKrx) {
-  const isCrypto = d.market === 'CRYPTO';
-  const rawDirection = (((d.prediction || {}).trade_plan || {}).direction) || ((d.prediction || {}).direction) || 'NEUTRAL';
-  if (isCrypto && rawDirection === 'NEUTRAL') {
-    renderCryptoDirectionalForecast(d, isKrx);
-    return;
-  }
-  if (isCrypto) d = _buildCryptoDetailedForecastView(d);
-  const isShort = isCrypto && rawDirection === 'SHORT';
-  const entryNoun = isShort ? '숏 진입' : '매수';
   const risk = d.risk_scenarios;
   const bp   = d.buy_price;
-  const tp   = d.target_price;
-  const strategyTitle = document.getElementById('buy-strategy-title');
-  const riskTitle = document.getElementById('risk-strategy-title');
-  if (strategyTitle) strategyTitle.textContent = isCrypto
-    ? `🎯 현재가 기준 ${isShort ? '숏(하락)' : '롱(상승)'} 상세 진입 전략`
-    : '🎯 현재가 기준 진입 전략';
-  if (riskTitle) riskTitle.textContent = '🛡️ 리스크 관리 (ATR 기반)';
+  const ai   = d.ai_strategy;
+
+  renderPredictionSections(d, isKrx);
+  // ── AI 종합 진단 및 트레이딩 전략 섹션 ──
+  const aiEl = document.getElementById('ai-strategy-section');
+  if (aiEl) {
+    aiEl.style.display = ai ? 'block' : 'none';
+  }
+  if (aiEl && ai) {
+    const hiddenAiStrategyPatterns = [
+      /^\[시장 상태\]/,
+      /^⚠️\s*\[경고\]\s*부채비율/,
+      /^\[투자자 수급\]/,
+    ];
+    const visibleAiStrategyLines = (ai.result || '')
+      .split(' | ')
+      .map(line => line.trim())
+      .filter(line => line && !hiddenAiStrategyPatterns.some(pattern => pattern.test(line)));
+
+    const reusedEvidence = ((d.prediction_outlook || {}).ai_evidence || []).slice(0, 4);
+    const reusedSet = new Set(reusedEvidence.map(line => String(line).replace(/\s+/g, ' ').trim()));
+    const conciseLines = visibleAiStrategyLines
+      .filter(line => !reusedSet.has(String(line).replace(/\s+/g, ' ').trim()))
+      .slice(0, 6);
+    const detailBody = conciseLines.length
+      ? conciseLines.map(line => {
+          if (line.startsWith('[')) return `<div style="margin-top:10px;font-weight:bold;color:#388bfd;font-size:13px">${_escPrediction(line)}</div>`;
+          return `<div style="margin-top:5px;margin-left:8px">${_escPrediction(line)}</div>`;
+        }).join('')
+      : '<div style="color:#8b949e">추가 해석은 위의 시장·AI 판단 근거에 통합되어 있습니다.</div>';
+
+    aiEl.innerHTML = `
+      <div style="background:rgba(31,111,235,.05);border-radius:10px;padding:13px;border:1px solid #1f6feb55">
+        <div style="font-size:11px;color:#58a6ff;font-weight:700;margin-bottom:8px">AI 진단 탭의 추가 근거</div>
+        <div style="color:#cdd9e5;font-size:12px;line-height:1.6">
+          ${detailBody}
+        </div>
+        <div style="font-size:10px;color:#8b949e;margin-top:9px">단독 매매 신호가 아니라 가격·거래량·지지선 조건과 함께 확인하는 참고 정보입니다.</div>
+      </div>
+    `;
+  }
   // ── 매수 전략 섹션 ──
   const bpEl = document.getElementById('buy-price-section');
   const buyRiskNotesEl = document.getElementById('buy-risk-notes-section');
@@ -16864,10 +18385,12 @@ function renderForecast(d, isKrx) {
             ? `${s.days_min}~${s.days_max}일`
             : (s.period_label || '기간 산정 불가');
           const decline = Number(s.decline_pct);
-          const declineText = Number.isFinite(decline)
-            ? `${isShort ? '+' + Math.abs(decline).toFixed(1) : decline.toFixed(1)}%` : '-';
-          const stepTitle = `${s.basis || 'ATR·기술 지표'} · 단계 배분 ${s.allocation_pct || 0}%`;
-          return `<div class="buy-stage-row" role="row" title="${stepTitle}" aria-label="${s.label}, ${fmt(s.price, isKrx)}, 현재가 대비 ${isShort ? '상승' : '하락'} ${declineText}, 도달 확률 ${probabilityText}, 예상 ${periodText}, 단계 배분 ${s.allocation_pct || 0}%">
+          const declineText = Number.isFinite(decline) ? `${decline.toFixed(1)}%` : '-';
+          const periodBasis = s.period_note
+            ? ` · 예상 기간: ${s.period_note}`
+            : '';
+          const stepTitle = `${s.basis || 'ATR·기술 지표'}${periodBasis} · 단계 배분 ${s.allocation_pct || 0}%`;
+          return `<div class="buy-stage-row" role="row" title="${stepTitle}" aria-label="${s.label}, ${fmt(s.price, isKrx)}, 현재가 대비 ${declineText}, 도달 확률 ${probabilityText}, 예상 ${periodText}, 단계 배분 ${s.allocation_pct || 0}%">
             <span class="buy-stage-name" role="cell" style="color:${bc}">${s.label}</span>
             <span class="buy-stage-price" role="cell" style="color:${bc}">${fmt(s.price, isKrx)}</span>
             <span class="buy-stage-drop" role="cell">${declineText}</span>
@@ -16875,11 +18398,11 @@ function renderForecast(d, isKrx) {
             <span class="buy-stage-days ${s.days_min == null ? 'buy-stage-unavailable' : ''}" role="cell">${periodText}</span>
           </div>`;
         }).join('');
-        const stageTable = `<div class="buy-stage-table" role="table" aria-label="밴드 ${b.band} 5단계 ${entryNoun} 가격">
+        const stageTable = `<div class="buy-stage-table" role="table" aria-label="밴드 ${b.band} 5단계 매수 가격">
           <div class="buy-stage-row buy-stage-header" role="row">
             <span role="columnheader">단계</span>
-            <span role="columnheader">${entryNoun} 가격</span>
-            <span role="columnheader">${isShort ? '상승률' : '하락률'}</span>
+            <span role="columnheader">매수 가격</span>
+            <span role="columnheader">하락률</span>
             <span role="columnheader">도달 확률</span>
             <span role="columnheader">예상 기간</span>
           </div>
@@ -16911,16 +18434,16 @@ function renderForecast(d, isKrx) {
       const recBandsHtml = (bp.recommended_bands && bp.recommended_bands.length)
         ? `<div class="buy-card recommended" style="padding:12px 14px">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:4px">
-              <div class="buy-label" style="margin-bottom:0;font-size:13px">📍 2차 ${entryNoun} 구간 · 주 진입</div>
-              <div style="font-size:10px;color:#484f58">※ ${isShort ? '저항선·이평선·VWAP 앵커 기반' : '지지선·이평선·VWAP 앵커 기반'}, 주 비중</div>
+              <div class="buy-label" style="margin-bottom:0;font-size:13px">📍 2차 매수 구간 · 주 진입</div>
+              <div style="font-size:10px;color:#484f58">※ 지지선·이평선·VWAP 앵커 기반, 주 비중</div>
             </div>
             <div class="buy-bands-row">${bp.recommended_bands.map((b, i) => renderBandCard(b, i, true)).join('')}</div>
           </div>` : '';
 
       const isWaitMode = ['wait', 'wait_support', 'wait_breakdown'].includes(sr.action_key);
-      const aggTitle = `⚡ 1차 ${entryNoun} 구간 (ATR 기반) · 소액 탐색`;
+      const aggTitle = '⚡ 1차 매수 구간 (ATR 기반) · 소액 탐색';
       const aggNote = isWaitMode
-        ? `${entryNoun} 보류 상태 · ${isShort ? '반락' : '반등'} 확인 전 실행 구간 아님`
+        ? '매수 보류 상태 · 반등 확인 전 실행 구간 아님'
         : '백테스트 + 이벤트 위험 반영';
 
       const aggBandsHtml = (bp.aggressive_bands && bp.aggressive_bands.length)
@@ -16932,7 +18455,7 @@ function renderForecast(d, isKrx) {
             <div class="buy-bands-row">${bp.aggressive_bands.map((b, i) => renderBandCard(b, i, false)).join('')}</div>
           </div>` : '';
 
-      bpEl.innerHTML = (isCrypto ? '' : stratBanner + artyHtml) + `<div class="buy-price-grid">${aggBandsHtml}${recBandsHtml}</div>`;
+      bpEl.innerHTML = stratBanner + artyHtml + `<div class="buy-price-grid">${aggBandsHtml}${recBandsHtml}</div>`;
       if (buyRiskNotesEl) {
         buyRiskNotesEl.innerHTML = bandDistanceHtml + eventRiskHtml + downsideRiskHtml;
       }
@@ -16961,14 +18484,14 @@ function renderForecast(d, isKrx) {
     const outlook = d.prediction_outlook || {};
     const warningZone = (outlook.levels || {}).warning_zone || [];
     const warningZoneHtml = warningZone.length === 2
-      ? `<div style="margin-top:8px"><div style="font-size:10px;color:#8b949e">주의 구간</div><div style="font-size:12px;font-weight:700;color:#d29922">${fmt(warningZone[0], isKrx)} ~ ${fmt(warningZone[1], isKrx)}</div><div style="font-size:10px;color:#8b949e;margin-top:2px">${isShort ? '저항 재돌파 전 숏 비중 축소' : '지지 회복 전 신규 진입 비중 축소'}</div></div>` : '';
+      ? `<div style="margin-top:8px"><div style="font-size:10px;color:#8b949e">주의 구간</div><div style="font-size:12px;font-weight:700;color:#d29922">${fmt(warningZone[0], isKrx)} ~ ${fmt(warningZone[1], isKrx)}</div><div style="font-size:10px;color:#8b949e;margin-top:2px">지지 회복 전 신규 진입 비중 축소</div></div>` : '';
     const riskTriggerHtml = (outlook.risk_triggers || []).slice(0, 5)
       .map(x => `<div style="display:flex;gap:5px;align-items:flex-start;margin-bottom:2px"><span style="color:#f85149">•</span><span>${x}</span></div>`).join('');
     const commonStopHtml = (_stopVal == null) ? '' : `
       <div style="grid-column:1 / -1;background:#0d1117;border-radius:8px;padding:11px 14px;border:1px solid #f85149">
         <div style="font-size:10px;color:#8b949e;margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">손절가</div>
         <div style="font-size:17px;font-weight:800;color:#f85149">${fmt(_stopVal, isKrx)}</div>
-        <div style="font-size:11px;color:#d29922;margin-top:4px">${_stopPct != null ? _stopPct + '% 범위 · ' : ''}${isShort ? '손절가 이상 종가 안착과 거래량 증가 시 숏 포지션 정리' : '종가 이탈과 거래량 증가가 함께 나타나면 손실 제한 우선'}</div>
+        <div style="font-size:11px;color:#d29922;margin-top:4px">${_stopPct != null ? _stopPct + '% 범위 · ' : ''}종가 이탈과 거래량 증가가 함께 나타나면 손실 제한 우선</div>
         <div style="font-size:10px;color:#8b949e;margin-top:5px">${risk.vol_state || ''} · ${risk.vol_trend || ''} 변동성이 클수록 정상 가격 진폭도 커져 ATR 손절 폭이 넓어지며, 저변동성에서는 기준이 좁아질 수 있습니다.</div>
         ${warningZoneHtml}
         ${riskTriggerHtml ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #30363d"><div style="font-size:10px;color:#f85149;font-weight:700;margin-bottom:4px">리스크 확대 조건</div><div style="font-size:10px;color:#8b949e;line-height:1.5">${riskTriggerHtml}</div></div>` : ''}
@@ -17006,7 +18529,7 @@ function renderForecast(d, isKrx) {
             const sub = [pa.rr_main != null ? `R/R ${pa.rr_main}:1` : '', pa.target_source || ''].filter(Boolean).join(' · ');
             items.push(targetItem(pa.target_main, '1차 정밀 목표가', '#3fb950', sub, pa.target_main_basis, pa.target_main_confidence_pct));
           } else if (sc.label === '공격적' && pa.target_ext != null) {
-            items.push(targetItem(pa.target_ext, `2차 목표 (${isShort ? '이탈' : '돌파'} 후)`, '#58a6ff', `1차 ${isShort ? '이탈' : '돌파'} 확인 후 홀딩 기준`, pa.target_ext_basis, pa.target_ext_confidence_pct));
+            items.push(targetItem(pa.target_ext, '2차 목표 (돌파 후)', '#58a6ff', '1차 돌파 확인 후 홀딩 기준', pa.target_ext_basis, pa.target_ext_confidence_pct));
           }
           if (!items.length) return '';
           const rows = items.map(it => {
@@ -17029,7 +18552,7 @@ function renderForecast(d, isKrx) {
               </div>${it.sub ? `<div style="font-size:10px;color:#8b949e;margin-top:1px">${it.sub}</div>` : ''}${basisHtml}${confHtml}<div style="margin-bottom:4px"></div>`;
           }).join('');
           return `<div style="margin-top:8px;padding-top:8px;${DIVIDER}">
-            <div style="font-size:10px;color:#8b949e;margin-bottom:5px">📌 ${isShort ? '반등 숏' : '눌림목'} 정밀가</div>
+            <div style="font-size:10px;color:#8b949e;margin-bottom:5px">📌 눌림목 정밀가</div>
             ${rows}
           </div>`;
         })();
@@ -17049,7 +18572,7 @@ function renderForecast(d, isKrx) {
           </div>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:2px">
             ${sc.target_confidence_pct != null ? `<span style="font-size:10px;color:#8b949e">목표가 신뢰도 <b style="color:${sc.target_confidence_pct >= 60 ? '#3fb950' : sc.target_confidence_pct >= 35 ? '#d29922' : '#f97316'}">${sc.target_confidence_pct}%</b></span>` : ''}
-            ${sc.breakout_probability_pct != null ? `<span style="font-size:10px;color:#8b949e">${isShort ? '지지 이탈확률' : '저항 돌파확률'} <b style="color:#58a6ff">${sc.breakout_probability_pct}%</b></span>` : ''}
+            ${sc.breakout_probability_pct != null ? `<span style="font-size:10px;color:#8b949e">저항 돌파확률 <b style="color:#58a6ff">${sc.breakout_probability_pct}%</b></span>` : ''}
           </div>` : ''}
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;${DIVIDER}">
             <div>
@@ -17305,16 +18828,17 @@ function _normalizeNewsItems(d, isKrx) {
   const finnhubNews = (((d.us_enriched || {}).news) || []);
   const rssNews = (d.news || []);
   const candidates = isKrx
-    ? [...naverNews, ...rssNews]
+    ? [...naverNews, ...rssNews.filter(n => _newsHasHangul(n.title_ko || n.title))]
     : [
-        ...finnhubNews,
-        ...rssNews,
+        ...finnhubNews.filter(n => _newsHasHangul(n.title_ko || n.title)),
+        ...rssNews.filter(n => _newsHasHangul(n.title_ko || n.title)),
       ];
   const seen = new Set();
   return candidates.filter(n => {
     const displayTitle = String(n.title_ko || n.title || '').replace(/\s+/g, ' ').trim();
     const key = displayTitle.toLowerCase().replace(/[^0-9a-z가-힣]/g, '');
     if (!displayTitle || !key || seen.has(key)) return false;
+    if (!isKrx && !_newsHasHangul(displayTitle)) return false;
     seen.add(key);
     return true;
   }).slice(0, 10);
@@ -17355,10 +18879,8 @@ function renderNews(d, isKrx) {
   const newsList = document.getElementById('news-list');
   const discEl = document.getElementById('disclosure-col');
   const col1Title = document.getElementById('news-col1-title');
-  const newsGrid = document.getElementById('news-grid');
 
   const newsArr = _normalizeNewsItems(d, isKrx);
-  if (newsGrid) newsGrid.classList.toggle('news-single-column', !isKrx);
   if (isKrx) {
     col1Title.textContent = '📰 주요 뉴스';
     discEl.style.display = 'block';
@@ -17375,7 +18897,7 @@ function renderNews(d, isKrx) {
   }
   newsList.innerHTML = newsArr.length > 0
     ? newsArr.map(n => _renderNewsItem(n)).join('')
-    : '<p class="news-empty">관련 뉴스를 찾지 못했습니다.</p>';
+    : `<p class="news-empty">${isKrx ? '관련 뉴스를 찾지 못했습니다.' : '한국어로 제공 가능한 관련 뉴스를 찾지 못했습니다.'}</p>`;
   _bindNewsImageFallbacks(newsList);
 }
 
@@ -17712,260 +19234,37 @@ function switchTab(tab) {
   }
 }
 
-// ── ⭐ 관심 코인 포트폴리오 ─────────────────────────────────────────────
-const PORTFOLIO_STORAGE_KEY = 'cv_portfolio_v1';
-let _portfolioRows = [];
-let _portfolioQuotes = {};
-let _portfolioSocket = null;
-let _portfolioRenderTimer = null;
-let _portfolioGeneration = 0;
-
-function _loadPortfolioRows() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(PORTFOLIO_STORAGE_KEY) || '[]');
-    _portfolioRows = Array.isArray(parsed) ? parsed.filter(row => row && row.symbol) : [];
-  } catch (_) { _portfolioRows = []; }
-  return _portfolioRows;
-}
-
-function _savePortfolioRows() {
-  localStorage.setItem(PORTFOLIO_STORAGE_KEY, JSON.stringify(_portfolioRows));
-}
-
-function _normalizePortfolioSymbol(value) {
-  let symbol = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (symbol && !symbol.endsWith('USDT')) symbol += 'USDT';
-  return symbol;
-}
-
-function _updatePortfolioButton(symbol) {
-  const btn = document.getElementById('result-portfolio-btn');
-  if (!btn) return;
-  const sym = _normalizePortfolioSymbol(symbol || (currentData || {}).symbol);
-  const exists = _loadPortfolioRows().some(row => row.symbol === sym);
-  btn.style.display = 'flex';
-  btn.textContent = exists ? '★ 관심 코인 저장됨' : '☆ 관심 코인';
-  btn.style.color = exists ? '#d29922' : '';
-  btn.style.borderColor = exists ? '#d2992255' : '';
-}
-
-function toggleCurrentPortfolio() {
-  if (!currentData || !currentData.symbol) return;
-  const symbol = _normalizePortfolioSymbol(currentData.symbol);
-  _loadPortfolioRows();
-  const index = _portfolioRows.findIndex(row => row.symbol === symbol);
-  if (index >= 0) {
-    _portfolioRows.splice(index, 1);
-  } else {
-    _portfolioRows.push({
-      symbol,
-      name: currentData.company || symbol.replace(/USDT$/, ''),
-      amount: 0,
-      avgPrice: Number(currentData.last_close || 0),
-    });
-  }
-  _savePortfolioRows();
-  _updatePortfolioButton(symbol);
-}
-
-function savePortfolioCoin() {
-  const symbol = _normalizePortfolioSymbol((document.getElementById('portfolio-symbol') || {}).value);
-  const amount = Number((document.getElementById('portfolio-amount') || {}).value || 0);
-  const avgPrice = Number((document.getElementById('portfolio-avg-price') || {}).value || 0);
-  const msg = document.getElementById('portfolio-form-msg');
-  if (!symbol || !/^[A-Z0-9]{2,16}USDT$/.test(symbol)) {
-    if (msg) { msg.style.color = '#f85149'; msg.textContent = '유효한 코인 심볼을 입력하세요.'; }
-    return;
-  }
-  if (amount < 0 || avgPrice < 0) {
-    if (msg) { msg.style.color = '#f85149'; msg.textContent = '수량과 평균 단가는 0 이상이어야 합니다.'; }
-    return;
-  }
-  _loadPortfolioRows();
-  const existing = _portfolioRows.find(row => row.symbol === symbol);
-  const row = {symbol, name:symbol.replace(/USDT$/, ''), amount, avgPrice};
-  if (existing) Object.assign(existing, row); else _portfolioRows.push(row);
-  _portfolioRows = _portfolioRows.slice(0, 30);
-  _savePortfolioRows();
-  if (msg) { msg.style.color = '#3fb950'; msg.textContent = symbol + ' 저장 완료'; }
-  renderPortfolio();
-}
-
-function removePortfolioCoin(symbol) {
-  _loadPortfolioRows();
-  _portfolioRows = _portfolioRows.filter(row => row.symbol !== symbol);
-  delete _portfolioQuotes[symbol];
-  _savePortfolioRows();
-  renderPortfolio();
-  _updatePortfolioButton(symbol);
-}
-
-function analyzePortfolioCoin(symbol) {
-  showPage('analysis');
-  const input = document.getElementById('ticker-input');
-  if (input) input.value = symbol;
-  analyze(symbol);
-}
-
-function _portfolioMoney(value) {
-  return '$' + Number(value || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-}
-
-function _updatePortfolioQuote(symbol, price, changePct) {
-  const sym = _normalizePortfolioSymbol(symbol);
-  if (!sym || !(Number(price) > 0)) return;
-  const previous = _portfolioQuotes[sym] || {};
-  const parsedChange = Number(changePct);
-  _portfolioQuotes[sym] = {
-    price:Number(price),
-    change_pct:Number.isFinite(parsedChange) ? parsedChange : Number(previous.change_pct || 0),
-  };
-  const page = document.getElementById('page-portfolio');
-  if (page && page.style.display !== 'none') {
-    if (_portfolioRenderTimer) clearTimeout(_portfolioRenderTimer);
-    _portfolioRenderTimer = setTimeout(_renderPortfolioRows, 250);
-  }
-}
-
-function _renderPortfolioRows() {
-  const tbody = document.getElementById('portfolio-tbody');
-  const summary = document.getElementById('portfolio-summary');
-  if (!tbody || !summary) return;
-  let marketValue = 0, costValue = 0;
-  if (!_portfolioRows.length) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:36px;color:#8b949e">관심 코인을 추가하면 실시간 평가액을 확인할 수 있습니다.</td></tr>';
-  } else {
-    tbody.innerHTML = _portfolioRows.map((row, index) => {
-      const quote = _portfolioQuotes[row.symbol] || {};
-      const price = Number(quote.price || 0);
-      const amount = Number(row.amount || 0);
-      const avg = Number(row.avgPrice || 0);
-      const value = price * amount;
-      const cost = avg * amount;
-      const pnl = value - cost;
-      const pnlPct = cost > 0 ? pnl / cost * 100 : 0;
-      marketValue += value; costValue += cost;
-      const tone = pnl >= 0 ? '#3fb950' : '#f85149';
-      const changeTone = Number(quote.change_pct || 0) >= 0 ? '#3fb950' : '#f85149';
-      return `<tr>
-        <td>${index + 1}</td>
-        <td><button onclick="analyzePortfolioCoin('${row.symbol}')" style="background:none;border:none;color:#58a6ff;font-weight:800;cursor:pointer;padding:0">${_escPrediction(row.name || row.symbol)}</button><div style="font-size:10px;color:#484f58">${row.symbol}</div></td>
-        <td>${price ? fmtPrice(price,false) : '로딩...'}</td>
-        <td style="color:${changeTone}">${quote.change_pct != null ? (Number(quote.change_pct)>=0?'+':'')+Number(quote.change_pct).toFixed(2)+'%' : '-'}</td>
-        <td>${amount.toLocaleString('en-US',{maximumFractionDigits:8})}</td>
-        <td>${avg ? fmtPrice(avg,false) : '-'}</td>
-        <td>${_portfolioMoney(value)}</td>
-        <td style="color:${tone}">${cost > 0 ? _portfolioMoney(pnl)+' ('+(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%)' : '-'}</td>
-        <td><button onclick="removePortfolioCoin('${row.symbol}')" style="background:#2d1515;border:1px solid #f8514955;color:#f85149;border-radius:6px;padding:4px 8px;cursor:pointer">삭제</button></td>
-      </tr>`;
-    }).join('');
-  }
-  const totalPnl = marketValue - costValue;
-  const totalPct = costValue > 0 ? totalPnl / costValue * 100 : 0;
-  const pnlTone = totalPnl >= 0 ? '#3fb950' : '#f85149';
-  summary.innerHTML = `
-    <div class="portfolio-summary-card"><div class="portfolio-summary-label">총 평가액</div><div class="portfolio-summary-value">${_portfolioMoney(marketValue)}</div></div>
-    <div class="portfolio-summary-card"><div class="portfolio-summary-label">총 매수 원가</div><div class="portfolio-summary-value">${_portfolioMoney(costValue)}</div></div>
-    <div class="portfolio-summary-card"><div class="portfolio-summary-label">평가 손익</div><div class="portfolio-summary-value" style="color:${pnlTone}">${_portfolioMoney(totalPnl)} ${costValue>0?'('+(totalPct>=0?'+':'')+totalPct.toFixed(2)+'%)':''}</div></div>`;
-}
-
-async function _loadPortfolioQuotes() {
-  if (!_portfolioRows.length) { _renderPortfolioRows(); return; }
-  try {
-    const symbols = _portfolioRows.map(row => row.symbol).join(',');
-    const response = await fetch('/api/alert/quote?symbols=' + encodeURIComponent(symbols), {cache:'no-store'});
-    const body = await response.json();
-    Object.entries(body.quotes || {}).forEach(([symbol, quote]) => _updatePortfolioQuote(symbol, quote.price, quote.pct_change));
-  } catch (_) {}
-  _renderPortfolioRows();
-}
-
-function _stopPortfolioStream() {
-  _portfolioGeneration += 1;
-  if (_portfolioSocket) { try { _portfolioSocket.close(); } catch (_) {} _portfolioSocket = null; }
-  const status = document.getElementById('portfolio-live-status');
-  if (status) status.textContent = '● LIVE 대기';
-}
-
-function _startPortfolioStream() {
-  _stopPortfolioStream();
-  if (!_portfolioRows.length) return;
-  const generation = _portfolioGeneration;
-  const streams = _portfolioRows.map(row => row.symbol.toLowerCase() + '@ticker').join('/');
-  try {
-    _portfolioSocket = new WebSocket('wss://stream.binance.com:9443/stream?streams=' + streams);
-    _portfolioSocket.onopen = () => {
-      const status = document.getElementById('portfolio-live-status');
-      if (status) status.textContent = '● LIVE 연결됨';
-    };
-    _portfolioSocket.onmessage = event => {
-      try {
-        const wrapper = JSON.parse(event.data);
-        const tick = wrapper.data || wrapper;
-        _updatePortfolioQuote(tick.s, Number(tick.c), Number(tick.P));
-      } catch (_) {}
-    };
-    _portfolioSocket.onclose = () => {
-      const page = document.getElementById('page-portfolio');
-      if (generation === _portfolioGeneration && page && page.style.display !== 'none') setTimeout(_startPortfolioStream, 3000);
-    };
-  } catch (_) {}
-}
-
-function renderPortfolio() {
-  _loadPortfolioRows();
-  _renderPortfolioRows();
-  _loadPortfolioQuotes();
-  _startPortfolioStream();
-}
-
 // ── 스크리너 ──
-// ── 🔬 코인 스크리너 (Binance 24h 거래량/등락) ──────────────────────────────
-var _cryptoScreenerRows = [];
-async function loadScreener() {
-  const load = document.getElementById('scrn-loading');
-  const res  = document.getElementById('scrn-result');
-  if (load) load.style.display = 'block';
-  if (res)  res.style.display = 'none';
+async function loadScreener(sortBy, sortOrder) {
+  document.getElementById('scrn-loading').style.display = 'block';
+  document.getElementById('scrn-result').style.display = 'none';
+  const sb = sortBy    || scrnSort.key || 'price';
+  const so = sortOrder || scrnSort.dir || 'desc';
+  scrnSort = { key: sb, dir: so };
   try {
-    const r = await fetch('/api/crypto/overview');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const d = await r.json();
-    if (d.error) throw new Error(d.error);
-    _cryptoScreenerRows = d.by_volume || [];
-    screenerData = _cryptoScreenerRows;   // showPage 재로드 가드용
-    renderCryptoScreener();
-    if (load) load.style.display = 'none';
-    if (res)  res.style.display = 'block';
+    const url = `/api/screener?sort_by=${sb}&sort_order=${so}`;
+    const r = await fetch(url);
+    const text = await r.text();
+    let d;
+    try {
+      d = JSON.parse(text);
+    } catch(e) {
+      throw new Error(`API 응답 오류 (상태: ${r.status})`);
+    }
+    screenerData = d.data || [];
+    screenerInfo = {
+      usd_krw: d.usd_krw || 0,
+      total_overseas: d.total_overseas || 0,
+      total_domestic: d.total_domestic || 0,
+      us_filter_conditions: d.us_filter_conditions || {},
+      kr_filter_conditions: d.kr_filter_conditions || {}
+    };
+    renderScreener();
+    document.getElementById('scrn-loading').style.display = 'none';
+    document.getElementById('scrn-result').style.display = 'block';
   } catch(e) {
-    if (load) load.innerHTML = '<p style="color:#f85149">데이터 로딩 실패: ' + e.message + '</p>';
+    document.getElementById('scrn-loading').innerHTML = '<p style="color:#f85149">데이터 로딩 실패: ' + e.message + '</p>';
   }
-}
-
-function renderCryptoScreener() {
-  const sortBy = (document.getElementById('scrn-sort-by') || {}).value || 'volume';
-  const rows = [..._cryptoScreenerRows].sort((a, b) =>
-    sortBy === 'change' ? b.change_pct - a.change_pct
-    : sortBy === 'price' ? b.price - a.price
-    : b.volume - a.volume);
-  const tb = document.getElementById('scrn-tbody');
-  if (!tb) return;
-  tb.innerHTML = rows.map((c, i) => {
-    const up = c.change_pct >= 0;
-    const clr = up ? '#3fb950' : '#f85149';
-    const priceTxt = c.price >= 1 ? '$' + c.price.toLocaleString(undefined, {maximumFractionDigits: 2})
-                                  : '$' + Number(c.price).toPrecision(4);
-    const v = c.volume;
-    const volTxt = v >= 1e9 ? (v/1e9).toFixed(2) + 'B' : v >= 1e6 ? (v/1e6).toFixed(1) + 'M' : (v/1e3).toFixed(0) + 'K';
-    return `<tr>
-      <td>${i + 1}</td>
-      <td class="ticker-name">${c.base} <span style="color:#484f58;font-size:11px">${c.symbol}</span></td>
-      <td style="text-align:right">${priceTxt}</td>
-      <td style="text-align:right;color:${clr}">${up ? '+' : ''}${c.change_pct.toFixed(2)}%</td>
-      <td style="text-align:right">$${volTxt}</td>
-      <td style="text-align:center"><button onclick="quickSearch('${c.symbol}')" style="background:#1f6feb;border:none;color:#fff;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">분석</button></td>
-    </tr>`;
-  }).join('');
 }
 
 function switchScrnTab(tab) {
@@ -18001,7 +19300,7 @@ function renderScreener() {
   const totalCnt = isKrx ? (screenerInfo.total_domestic || filtered.length) : (screenerInfo.total_overseas || 0);
   document.getElementById('scrn-subtitle').textContent =
     `토스증권 필터 조건 적용 | USD/KRW: ${(screenerInfo.usd_krw||0).toLocaleString()} | ${marketLabel} ${totalCnt}종목`;
-
+  
   // 필터 조건 뱃지 업데이트 (DOM 요소가 없으면 생성, 있으면 텍스트만 교체)
   let badgeEl = document.getElementById('scrn-filter-badge');
   if (!badgeEl) {
@@ -18011,7 +19310,7 @@ function renderScreener() {
     badgeEl.style.cssText = 'margin-top: 8px; font-size: 11px; color: #8b949e; background: #21262d; padding: 8px 12px; border-radius: 8px; line-height: 1.5; word-break: keep-all; border: 1px solid #30363d;';
     subtitleEl.parentNode.insertBefore(badgeEl, subtitleEl.nextSibling);
   }
-
+  
   // 기존 내용 지우고 새로 설정 (중복 방지)
   badgeEl.innerHTML = '';
   badgeEl.textContent = filterStr || '적용된 필터 조건이 없습니다.';
@@ -18086,15 +19385,16 @@ async function loadMarketCore() {
   document.getElementById('core-loading').style.display = 'block';
   document.getElementById('core-content').style.display = 'none';
   document.getElementById('core-error').style.display = 'none';
-  const mn = document.getElementById('market-news'); if (mn) mn.style.display = 'none';
+  document.getElementById('market-news').style.display = 'none';
   try {
-    const r = await fetch('/api/crypto/overview');
+    const r = await fetch('/api/market/summary');
     if (!r.ok) throw new Error('서버 오류 ' + r.status);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     renderMarketCore(d);
     document.getElementById('core-loading').style.display = 'none';
     document.getElementById('core-content').style.display = 'block';
+    document.getElementById('market-news').style.display = '';   // 뉴스 섹션 노출
   } catch(e) {
     document.getElementById('core-loading').style.display = 'none';
     document.getElementById('core-error').style.display = 'block';
@@ -18103,38 +19403,87 @@ async function loadMarketCore() {
 }
 
 function renderMarketCore(d) {
-  // 공포·탐욕 지수 → 무드 배지 (한국 배지 자리 재활용, 미국/VIX 숨김)
-  const fng = d.fng;
+  _marketCoreSnapshot = d;
+  // 시장 무드 배지 — 한국/미국 개별 표시
+  const moodMap = {
+    positive: ['mood-positive', '우호적'],
+    neutral:  ['mood-neutral',  '혼조'],
+    negative: ['mood-negative', '부담적'],
+  };
+  // 한국 배지 (kr_market_mood 우선, 없으면 기존 market_mood 폴백)
+  const krMood = d.kr_market_mood || d.market_mood || 'neutral';
+  const [krCls, krTxt] = moodMap[krMood] || moodMap.neutral;
   const krBadge = document.getElementById('core-mood-badge-kr');
   if (krBadge) {
-    if (fng) {
-      const v = fng.value;
-      const cls = v <= 25 ? 'mood-negative' : v >= 60 ? 'mood-positive' : 'mood-neutral';
-      const emoji = v <= 25 ? '😱' : v <= 45 ? '😨' : v <= 55 ? '😐' : v <= 75 ? '🙂' : '🤑';
-      krBadge.className = 'mood-badge ' + cls;
-      krBadge.textContent = `${emoji} 공포·탐욕 ${v}`;
-      krBadge.removeAttribute('onclick');
-      krBadge.style.cursor = 'default';
-    } else {
-      krBadge.style.display = 'none';
-    }
+    krBadge.className = 'mood-badge market-mood-btn ' + krCls;
+    krBadge.textContent = '🇰🇷 한국 ' + krTxt;
   }
-  const usBadge = document.getElementById('core-mood-badge-us'); if (usBadge) usBadge.style.display = 'none';
-  const vixBadge = document.getElementById('core-vix-badge'); if (vixBadge) vixBadge.style.display = 'none';
-  const ct = document.querySelector('#market-core .core-title'); if (ct) ct.textContent = '📊 코인 시장 현황';
+  // 미국 배지 (us_market_mood)
+  const usMood = d.us_market_mood || 'neutral';
+  const [usCls, usTxt] = moodMap[usMood] || moodMap.neutral;
+  const usBadge = document.getElementById('core-mood-badge-us');
+  if (usBadge) {
+    usBadge.className = 'mood-badge market-mood-btn ' + usCls;
+    usBadge.textContent = '🇺🇸 미국 ' + usTxt;
+  }
 
-  // 주요 코인 카드 (BTC/ETH/SOL/BNB/XRP)
-  const coins = d.coins || [];
-  document.getElementById('core-indices').innerHTML = coins.map(c => {
-    const up = c.change_pct >= 0;
-    const clr = up ? '#3fb950' : '#f85149';
-    const arrow = up ? '▲' : '▼';
-    const priceTxt = c.price >= 1 ? '$' + c.price.toLocaleString(undefined, {maximumFractionDigits: 2})
-                                  : '$' + Number(c.price).toPrecision(4);
-    return `<div class="core-index-card" style="cursor:pointer" onclick="quickSearch('${c.symbol}')">
-      <div class="ci-name">${c.base}</div>
-      <div class="ci-val">${priceTxt}</div>
-      <div class="ci-chg" style="color:${clr}">${arrow} ${Math.abs(c.change_pct).toFixed(2)}%</div>
+  // VIX 신호
+  const vixBadge = document.getElementById('core-vix-badge');
+  const vixMap = {
+    extreme_fear: '😱 극단 공포 VIX≥30',
+    fear:         '😨 공포 VIX≥20',
+    complacency:  '😴 과열 VIX≤13',
+    normal:       null,
+  };
+  const vixTxt = vixMap[d.vix_signal];
+  if (vixTxt) { vixBadge.textContent = vixTxt; vixBadge.style.display = ''; }
+  else        { vixBadge.style.display = 'none'; }
+
+  // 국내 지수 3종 (KOSPI / KOSDAQ / KOSPI200)
+  const indices   = d.indices || {};
+  const idxOrder  = ['KOSPI', 'KOSDAQ', 'KOSPI200'];
+  const idxLabels = { KOSPI: '코스피', KOSDAQ: '코스닥', KOSPI200: 'KOSPI 200' };
+  document.getElementById('core-indices').innerHTML = idxOrder.map(k => {
+    const idx = indices[k] || {};
+    if (idx.available === false || !idx.value) {
+      const reason = _escPrediction(idx.unavailable_reason || '원본 데이터 미수신');
+      return `<div class="core-index-card" title="${reason}">
+        <div class="ci-name">${idxLabels[k] || k}</div>
+        <div class="ci-val" style="color:#8b949e;font-size:13px">데이터 미수신</div>
+        <div class="ci-chg" style="color:#484f58">—</div>
+      </div>`;
+    }
+    const up  = idx.direction === 'up';
+    const clr = up ? '#f85149' : idx.direction === 'down' ? '#388bfd' : '#8b949e';
+    const arrow = up ? '▲' : idx.direction === 'down' ? '▼' : '—';
+    const changes = [idx.change_abs, idx.change_pct ? `(${idx.change_pct})` : ''].filter(Boolean).join(' ');
+    const basis = [idx.source, idx.market_status, idx.as_of ? new Date(idx.as_of).toLocaleString('ko-KR') : '']
+      .filter(Boolean).join(' · ');
+    const prev = idx.prev_close != null ? `전일 종가 ${Number(idx.prev_close).toLocaleString('ko-KR', {minimumFractionDigits:2, maximumFractionDigits:2})}` : '';
+    return `<div class="core-index-card" title="${_escPrediction([basis, prev].filter(Boolean).join(' · '))}">
+      <div class="ci-name">${idxLabels[k] || k}</div>
+      <div class="ci-val">${_escPrediction(idx.value)}</div>
+      <div class="ci-chg" style="color:${clr}">${arrow} ${_escPrediction(changes)}</div>
+    </div>`;
+  }).join('');
+
+  // 주요 뉴스 (최대 6건) — #market-news 섹션 안의 #core-news에 렌더
+  const news   = (d.top_news || []).slice(0, 6);
+  const newsEl = document.getElementById('core-news');
+  if (!news.length) {
+    newsEl.innerHTML = '<p style="font-size:13px;color:#484f58;padding:8px 0">뉴스를 불러올 수 없습니다.</p>';
+    return;
+  }
+  const impCls = { positive: 'cn-positive', negative: 'cn-negative', neutral: 'cn-neutral' };
+  const impTxt = { positive: '호재', negative: '악재', neutral: '중립' };
+  newsEl.innerHTML = news.map(n => {
+    const imp = n.impact || 'neutral';
+    return `<div class="core-news-item">
+      <span class="cn-impact ${impCls[imp] || 'cn-neutral'}">${impTxt[imp] || '중립'}</span>
+      <div style="min-width:0">
+        <a class="cn-title" href="${n.link || '#'}" target="_blank" rel="noopener">${n.title || ''}</a>
+        <div class="cn-meta">${n.source || ''}${n.date ? ' · ' + n.date : ''}</div>
+      </div>
     </div>`;
   }).join('');
   if (currentData && currentData.prediction_outlook) {
@@ -18155,7 +19504,7 @@ async function loadSectorFlow() {
   elCont.style.display = 'none';
   elErr.style.display  = 'none';
   try {
-    const r = await fetch('/api/crypto/overview');
+    const r = await fetch('/api/market/sector-summary');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
@@ -18165,8 +19514,64 @@ async function loadSectorFlow() {
   } catch(e) {
     elLoad.style.display = 'none';
     elErr.style.display  = 'block';
-    console.warn('[movers] 로드 실패:', e.message);
+    console.warn('[sector-flow] 로드 실패:', e.message);
   }
+}
+
+// 페이지 수명 동안 hover·touch 선조회와 실제 클릭이 같은 Promise를 공유한다.
+// 동일 업종의 중복 API 호출을 없애고 이미 준비된 결과는 즉시 재사용한다.
+const _sectorTopStockRequests = new Map();
+
+function _sectorTopRequestInfo(el) {
+  const sector = decodeURIComponent(el.dataset.sector || '');
+  const upcode = el.dataset.upcode || '';
+  return {sector, upcode, key:sector + '|' + upcode};
+}
+
+function _fetchSectorTopStocks(el) {
+  const info = _sectorTopRequestInfo(el);
+  if (_sectorTopStockRequests.has(info.key)) return _sectorTopStockRequests.get(info.key);
+  const request = (async () => {
+    const query = new URLSearchParams({sector:info.sector, upcode:info.upcode});
+    const response = await fetch('/api/market/sector-top-stocks?' + query.toString());
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+    return data;
+  })();
+  _sectorTopStockRequests.set(info.key, request);
+  request.catch(() => _sectorTopStockRequests.delete(info.key));
+  return request;
+}
+
+function prefetchSectorTopStocks(el) {
+  if (!el || el.dataset.loaded === '1') return;
+  _fetchSectorTopStocks(el).catch(() => null);
+}
+
+function _warmLeadingSectorCards(cardsEl) {
+  const warm = () => Array.from(cardsEl.querySelectorAll('.sector-card')).slice(0, 2)
+    .forEach(prefetchSectorTopStocks);
+  if ('requestIdleCallback' in window) requestIdleCallback(warm, {timeout:1200});
+  else setTimeout(warm, 600);
+}
+
+function _sectorStockRowsHtml(stocks) {
+  return (stocks || []).slice(0, 2).map(stock => {
+    const name = String(stock.name || stock.code || '');
+    const encodedName = encodeURIComponent(name).replace(/'/g, '%27');
+    const pct = Number(stock.change_pct);
+    const hasPct = stock.change_pct != null && Number.isFinite(pct);
+    const pctText = hasPct ? `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%` : '—';
+    const pctClass = hasPct && pct > 0 ? 'sector-stock-up'
+                   : hasPct && pct < 0 ? 'sector-stock-down'
+                   : 'sector-stock-flat';
+    return `<button type="button" class="sector-stock-tag"
+      onclick="event.stopPropagation();quickSearch(decodeURIComponent('${encodedName}'))"
+      title="${_escPrediction(name)} 분석">
+      <span>${_escPrediction(name)}</span><b class="${pctClass}">${pctText}</b>
+    </button>`;
+  }).join('');
 }
 
 // ── 섹터 카드 단일 렌더 헬퍼 ──────────────────────────────────────────────
@@ -18208,40 +19613,69 @@ function _buildSectorCardHtml(s) {
 function renderSectorFlow(d) {
   const cardsEl = document.getElementById('sector-cards');
   if (!cardsEl) return;
-  // 섹션 타이틀을 "24시간 등락 상위"로 변경
-  const titleEl = document.querySelector('#sector-flow .sector-flow-title');
-  if (titleEl) titleEl.textContent = '🚀 24시간 등락 상위';
 
-  const mk = (c) => {
-    const up = c.change_pct >= 0;
-    const clr = up ? '#3fb950' : '#f85149';
-    const arrow = up ? '▲' : '▼';
-    return `<div class="sector-card" style="cursor:pointer" onclick="quickSearch('${c.symbol}')" title="${c.base} 분석">
-      <div class="sector-card-head">
-        <span class="sector-card-emoji">${up ? '🚀' : '🔻'}</span>
-        <div><div class="sector-card-name">${c.base}</div></div>
-      </div>
-      <div class="sector-card-pct" style="color:${clr}">${arrow} ${Math.abs(c.change_pct).toFixed(2)}%</div>
-    </div>`;
-  };
+  _sectorFlowSnapshot = d;
 
-  const gainers = d.gainers || [];
-  const losers  = d.losers  || [];
-  const list = [...gainers, ...losers];
-  if (!list.length) {
-    cardsEl.innerHTML = '<p style="color:#484f58;font-size:13px">데이터 없음</p>';
+  const sectors = d.sectors || [];
+  if (!sectors.length) {
+    cardsEl.innerHTML = '<p style="color:#484f58;font-size:13px">섹터 데이터 없음</p>';
     return;
   }
-  cardsEl.innerHTML = list.map(mk).join('');
-}
 
-// ── 섹터 카드 토글 (펼치기 / 접기) ───────────────────────────────────────
-function toggleSectorCard(el) {
+  // 등락률(%) 내림차순 정렬 — 동률 시 업종명 가나다순
+  // (강세/혼조/약세 상태값은 카드 내 표시용이며 정렬 기준으로 사용하지 않음)
+  const sorted = [...sectors].sort((a, b) => {
+    const pa = (a.avg_change_pct != null) ? a.avg_change_pct : -Infinity;
+    const pb = (b.avg_change_pct != null) ? b.avg_change_pct : -Infinity;
+    if (pa !== pb) return pb - pa;
+    return (a.name || '').localeCompare(b.name || '', 'ko');
+  });
+
+  cardsEl.innerHTML = sorted.map(_buildSectorCardHtml).join('');
+  // 최초 렌더를 막지 않고 선두 2개 업종만 유휴 시간에 병렬 선조회한다.
+  _warmLeadingSectorCards(cardsEl);
+  if (currentData && currentData.prediction_outlook) {
+    renderPredictionSections(currentData, currentData.market === 'KRX');
+    refreshPeerIndustryTabFromCache();
+  }
+}
+// ── 섹터 카드 토글: 펼칠 때만 해당 업종의 등락률 상위 2종목 조회 ─────────
+async function toggleSectorCard(el) {
   const isOpen = el.classList.toggle('expanded');
-  // 화살표 방향 갱신 (▾ ↔ ▴)
   const cntEl = el.querySelector('.sector-card-cnt');
   if (cntEl) {
     cntEl.textContent = cntEl.textContent.replace(/[▾▴]/, isOpen ? '▴' : '▾');
+  }
+  if (!isOpen || el.dataset.loaded === '1' || el.dataset.loading === '1') return;
+
+  const listEl = el.querySelector('.sector-stock-list');
+  el.dataset.loading = '1';
+  if (listEl) listEl.innerHTML = '<span class="sector-stock-status">상위 종목 요청 준비 중…</span>';
+  const loadingStages = [
+    [350, '업종 구성종목 수신 중…'],
+    [1200, '등락률 비교 및 상위 2종목 선정 중…'],
+    [2500, '외부 시장 데이터 응답 대기 중…'],
+  ];
+  const loadingTimers = loadingStages.map(([delay, message]) => setTimeout(() => {
+    if (el.dataset.loading === '1' && listEl) {
+      listEl.innerHTML = '<span class="sector-stock-status">' + message + '</span>';
+    }
+  }, delay));
+  try {
+    const data = await _fetchSectorTopStocks(el);
+    const stocks = (data.stocks || []).slice(0, 2);
+    if (!stocks.length) throw new Error('표시할 종목이 없습니다.');
+    if (listEl) listEl.innerHTML = _sectorStockRowsHtml(stocks);
+    el.dataset.loaded = '1';
+    const perf = data.performance || {};
+    const speed = perf.cache_hit ? '캐시 응답' : perf.total_ms != null ? `서버 처리 ${perf.total_ms}ms` : '';
+    el.title = `${data.source || '코스피 업종등락'} 기준${speed ? ' · ' + speed : ''}`;
+  } catch (error) {
+    if (listEl) listEl.innerHTML = '<span class="sector-stock-status sector-stock-error">조회 실패 · 카드를 닫았다 다시 열어주세요.</span>';
+    console.warn('[sector-flow] 상위 종목 조회 실패:', error.message);
+  } finally {
+    loadingTimers.forEach(clearTimeout);
+    el.dataset.loading = '0';
   }
 }
 
@@ -18250,7 +19684,7 @@ function toggleSectorCard(el) {
 // ═══════════════════════════════════════════════════════════════
 function extractKrxCode(symbol) {
   if (!symbol) return null;
-  const m = String(symbol).match(/^(\d{6})\.(KS|KQ)$/);
+  const m = String(symbol).toUpperCase().match(/^([0-9A-Z]{6})\.(KS|KQ)$/);
   return m ? m[1] : null;
 }
 
@@ -18513,12 +19947,12 @@ function renderPeerIndustryOutlook(payload) {
   if (!payload || !payload.ok) return;
   const up = _peerClampPct(payload.up_probability);
   const down = _peerClampPct(payload.down_probability);
-  const group = payload.group_name || payload.industry || payload.sector || '관련 코인';
-  const marketLabel = '🪙 Binance';
+  const group = payload.group_name || payload.industry || payload.sector || '관련 종목';
+  const marketLabel = payload.market === 'KRX' ? '🇰🇷 한국' : '🇺🇸 해외';
   const labelColor = up >= 57 ? '#3fb950' : up <= 43 ? '#f85149' : '#d29922';
 
-  _peerSetText('peer-title', '🪙 ' + group + ' 상대 전망');
-  _peerSetText('peer-subtitle', (payload.company || payload.symbol) + ' 기준 · ' + payload.peer_count + '개 유사 코인 비교 · ' + payload.label);
+  _peerSetText('peer-title', '🏭 ' + group + ' 동종업계 전망');
+  _peerSetText('peer-subtitle', (payload.company || payload.symbol) + ' 기준 · ' + payload.peer_count + '개 동종기업 비교 · ' + payload.label);
   _peerSetText('peer-market-badge', marketLabel);
   _peerSetText('peer-up-prob', up.toFixed(1) + '%');
   _peerSetText('peer-down-prob', down.toFixed(1) + '%');
@@ -18558,7 +19992,7 @@ function renderPeerIndustryOutlook(payload) {
       const peerUp = _peerClampPct(peer.up_probability);
       const peerDown = _peerClampPct(peer.down_probability);
       const trendColor = peer.trend === '상승' ? '#3fb950' : peer.trend === '하락' ? '#f85149' : '#d29922';
-      const displayName = String(peer.name || '').trim() || '코인명 확인 불가';
+      const displayName = String(peer.name || '').trim() || '종목명 확인 불가';
       const encodedTicker = encodeURIComponent(String(peer.ticker || '')).replace(/'/g, '%27');
       const encodedMarket = encodeURIComponent(String(payload.market || '')).replace(/'/g, '%27');
       return '<div class="peer-row">' +
@@ -18567,7 +20001,7 @@ function renderPeerIndustryOutlook(payload) {
         '<div class="peer-return" style="color:' + (Number(peer.return_5d) >= 0 ? '#3fb950' : '#f85149') + '">5일<br>' + _peerSignedPct(peer.return_5d) + '</div>' +
         '<div class="peer-return" style="color:' + (Number(peer.return_20d) >= 0 ? '#3fb950' : '#f85149') + '">20일<br>' + _peerSignedPct(peer.return_20d) + '</div>' +
       '</div>';
-    }).join('') : '<div class="peer-scope">표시 가능한 유사 코인이 없습니다.</div>';
+    }).join('') : '<div class="peer-scope">표시 가능한 동종기업이 없습니다.</div>';
   }
 
   const selectedEl = document.getElementById('peer-selected-comparison');
@@ -18576,32 +20010,32 @@ function renderPeerIndustryOutlook(payload) {
     const relative = Number(payload.relative_to_industry);
     if (selected) {
       const relation = !Number.isFinite(relative) || Math.abs(relative) < 0.1
-        ? '그룹 평균과 유사'
-        : relative > 0 ? '그룹 평균보다 ' + relative.toFixed(1) + '%p 강함' : '그룹 평균보다 ' + Math.abs(relative).toFixed(1) + '%p 약함';
+        ? '업계 평균과 유사'
+        : relative > 0 ? '업계 평균보다 ' + relative.toFixed(1) + '%p 강함' : '업계 평균보다 ' + Math.abs(relative).toFixed(1) + '%p 약함';
       const relationColor = Number.isFinite(relative) && relative > 0 ? '#3fb950' : Number.isFinite(relative) && relative < 0 ? '#f85149' : '#d29922';
       selectedEl.innerHTML = '<strong>' + _escPrediction(payload.company || payload.symbol) + '</strong>의 상승 상대 가능성은 <strong style="color:#3fb950">' +
         _peerClampPct(selected.up_probability).toFixed(1) + '%</strong>이며, <span style="color:' + relationColor + '">' + _escPrediction(relation) +
         '</span>입니다.<br><span style="color:#8b949e">검색 종목 흐름: 5일 ' + _peerSignedPct(selected.return_5d) + ' · 20일 ' +
         _peerSignedPct(selected.return_20d) + ' · RSI ' + Number(selected.rsi || 0).toFixed(1) + '</span>';
     } else {
-      selectedEl.textContent = '검색 코인의 충분한 일봉 데이터가 없어 유사 코인 평균만 표시합니다.';
+      selectedEl.textContent = '검색 종목 자체의 충분한 일봉 데이터가 없어 동종기업 평균만 표시합니다.';
     }
   }
 
   const generated = payload.generated_at ? new Date(payload.generated_at).toLocaleString('ko-KR') : '';
   _peerSetText('peer-data-scope',
-    (payload.basis || '유사 코인 가격 모멘텀 기반 상대 추정') + ' · 비교 ' + payload.peer_count + '개' +
+    (payload.basis || '동종기업 가격 모멘텀 기반 상대 추정') + ' · 비교 ' + payload.peer_count + '개' +
     (generated ? ' · 산출 ' + generated : '') +
-    ' · 확정적인 가격 예측이나 투자 권유가 아니며 테마 분류 및 데이터 제공 범위에 따라 비교군이 달라질 수 있습니다.'
+    ' · 확정적인 주가 예측이나 투자 권유가 아니며 업종 분류 및 데이터 제공 범위에 따라 비교군이 달라질 수 있습니다.'
   );
 }
 // 🔔 알림 시스템 — localStorage 기반 (stock-dashboard 이식)
 // ══════════════════════════════════════════════════════
 
 const AlertsStore = {
-  _KA: 'cv_alerts',
-  _KN: 'cv_notifications',
-  _KF: 'cv_alert_fired',
+  _KA: 'so_alerts',
+  _KN: 'so_notifications',
+  _KF: 'so_alert_fired',
 
   // ── 설정 CRUD ──
   getAll() { try { return JSON.parse(localStorage.getItem(this._KA) || '[]'); } catch { return []; } },
@@ -18666,8 +20100,8 @@ function openAlertModal(symbol, price) {
   _currentAlertPrice  = price;
   const ex = AlertsStore.get(symbol);
   document.getElementById('am-symbol').textContent    = symbol + ' 알림 설정';
-  document.getElementById('am-cur-price').textContent = price ? '현재가 $' + _fmtUsNum(price) : '';
-  document.getElementById('am-target').value          = ex && ex.targetPrice != null ? ex.targetPrice : '';
+  document.getElementById('am-cur-price').textContent = price ? '현재가 ' + Math.round(price).toLocaleString() + '원' : '';
+  document.getElementById('am-target').value          = ex && ex.targetPrice != null ? Math.round(ex.targetPrice) : '';
   const surgeChk  = document.getElementById('am-surge-chk');
   const plungeChk = document.getElementById('am-plunge-chk');
   surgeChk.checked  = !!(ex && ex.surgeEnabled);
@@ -18808,14 +20242,14 @@ function _renderSheetBody() {
       return a.targetPrice != null || a.surgeEnabled || a.plungeEnabled;
     });
     if (!configs.length) {
-      body.innerHTML = '<div class="alert-sheet-empty">설정된 알림이 없습니다.<br><span style="font-size:11px">코인 분석 후 🔔 버튼으로 추가하세요.</span></div>';
+      body.innerHTML = '<div class="alert-sheet-empty">설정된 알림이 없습니다.<br><span style="font-size:11px">종목 분석 후 🔔 버튼으로 추가하세요.</span></div>';
       return;
     }
     body.innerHTML = configs.map(function(a) {
       var tags = [];
       if (a.targetPrice != null) {
         var dir = a.targetDirection === 'above' ? '↑' : a.targetDirection === 'below' ? '↓' : '';
-        tags.push('<span class="alert-cfg-tag alert-cfg-tag-target">목표가 $' + _fmtUsNum(a.targetPrice) + ' ' + dir + '</span>');
+        tags.push('<span class="alert-cfg-tag alert-cfg-tag-target">목표가 ' + Math.round(a.targetPrice).toLocaleString() + '원 ' + dir + '</span>');
       }
       if (a.surgeEnabled)  tags.push('<span class="alert-cfg-tag alert-cfg-tag-surge">급등 +' + a.surgeThreshold + '%</span>');
       if (a.plungeEnabled) tags.push('<span class="alert-cfg-tag alert-cfg-tag-plunge">급락 -' + a.plungeThreshold + '%</span>');
@@ -18829,7 +20263,7 @@ function _renderSheetBody() {
 }
 
 function _alertNotifLabel(n) {
-  var price = '$' + _fmtUsNum(n.price);
+  var price = Math.round(n.price).toLocaleString() + '원';
   if (n.type === 'target_above') return '목표가 도달 ↑  ' + price;
   if (n.type === 'target_below') return '목표가 도달 ↓  ' + price;
   if (n.type === 'surge')        return '급등 +' + (n.changePercent || 0).toFixed(2) + '%  (' + price + ')';
@@ -18886,10 +20320,10 @@ var AlertMonitor = {
   _check: async function() {
     var alerts = AlertsStore.getAll();
     if (!alerts.length) return;
-    var symbols = alerts.map(function(a) { return a.symbol; }).filter(function(s) { return /^[A-Z0-9]{3,20}$/.test(s); });
-    if (!symbols.length) return;
+    var codes = alerts.map(function(a) { return a.symbol; }).filter(function(s) { return /^\d{6}$/.test(s); });
+    if (!codes.length) return;
     try {
-      var r    = await fetch('/api/alert/quote?symbols=' + symbols.join(','));
+      var r    = await fetch('/api/alert/quote?codes=' + codes.join(','));
       var data = await r.json();
       var qs   = data.quotes || {};
       alerts.forEach(function(alert) {
@@ -19199,6 +20633,191 @@ function renderUsLongtermCards(items) {
   }).join('');
 }
 
+// ── KR 개장 급등 추천 ─────────────────────────────────────────────
+async function loadKrSurge(force) {
+  var ldg = document.getElementById('kr-surge-loading');
+  var cnt = document.getElementById('kr-surge-content');
+  var err = document.getElementById('kr-surge-error');
+  if (ldg) ldg.style.display = 'block';
+  if (cnt) cnt.style.display = 'none';
+  if (err) err.style.display = 'none';
+  try {
+    var r = await fetch('/api/kr/opening-surge' + (force ? '?refresh=1' : ''));
+    var d = await r.json();
+    if (!r.ok || (d.error && !(d.items && d.items.length))) throw new Error(d.error || 'HTTP ' + r.status);
+    if (ldg) ldg.style.display = 'none';
+    var sessionEl = document.getElementById('kr-surge-session-label');
+    if (sessionEl) sessionEl.textContent = d.session_label || '';
+    var asofEl = document.getElementById('kr-surge-asof');
+    if (asofEl) {
+      var asof = d.as_of ? new Date(d.as_of) : null;
+      asofEl.textContent = asof && !isNaN(asof.getTime()) ? asof.toLocaleString('ko-KR') : '시각 정보 없음';
+    }
+    var scope = d.scope || {};
+    var scopeEl = document.getElementById('kr-surge-scope');
+    if (scopeEl) scopeEl.textContent = '유니버스 ' + (scope.universe_count || 0) + ' · 시세 ' + (scope.quote_count || 0) + ' · 1차 통과 ' + (scope.preliminary_count || 0) + ' · 정밀분석 ' + (scope.analyzed_count || 0);
+    var criteria = d.criteria || {};
+    var criteriaEl = document.getElementById('kr-surge-criteria');
+    if (criteriaEl) criteriaEl.textContent = '+' + (criteria.min_change_pct || 2) + '% 이상 · 거래대금 ' + Math.round((criteria.min_turnover_krw || 0) / 100000000) + '억원 이상 · 시총 ' + Math.round((criteria.min_market_cap_krw || 0) / 100000000) + '억원 이상';
+    var riskFilter = d.risk_filter || {};
+    var coverage = riskFilter.coverage || {};
+    var excluded = riskFilter.excluded_counts || {};
+    var excludedTotal = Object.keys(excluded).reduce(function(sum, key) { return sum + Number(excluded[key] || 0); }, 0);
+    var coverageEl = document.getElementById('kr-surge-coverage');
+    if (coverageEl) coverageEl.textContent = 'VI 실시간 · 시장경보 ' + (coverage.management && coverage.caution && coverage.warning && coverage.risk ? '연동' : '일부 미연동') + ' · 단기과열 ' + (coverage.short_overheat ? '연동' : '미연동') + ' · 하드 제외 ' + excludedTotal + '건';
+    var disclaimerEl = document.getElementById('kr-surge-disclaimer');
+    if (disclaimerEl && d.disclaimer) disclaimerEl.textContent = d.disclaimer + (!coverage.short_overheat ? ' 현재 단기과열 지정 목록은 완전 연동되지 않아 별도 공급자 코드 설정이 필요합니다.' : '');
+    renderKrSurgeCards(d.items || [], d.note);
+    if (cnt) cnt.style.display = 'block';
+    loadKrSurgePerformance();
+  } catch(e) {
+    if (ldg) ldg.style.display = 'none';
+    if (err) err.style.display = 'block';
+  }
+}
+
+function renderKrSurgeCards(items, note) {
+  var el = document.getElementById('kr-surge-cards');
+  if (!el) return;
+  var esc = function(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  var won = function(v) { return Number(v || 0).toLocaleString('ko-KR') + '원'; };
+  var pct = function(v) { var n = Number(v || 0); return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; };
+  var eok = function(v) { return (Number(v || 0) / 100000000).toLocaleString('ko-KR', {maximumFractionDigits:0}) + '억원'; };
+  if (!items.length) {
+    el.innerHTML = '<div class="us-reco-empty">' + esc(note || '현재 스캔 조건을 모두 충족한 국내 종목이 없습니다. 장중 거래대금과 변동률 갱신 후 다시 확인하세요.') + '</div>';
+    return;
+  }
+  var confColors = {
+    '조건부 강력': {bg:'rgba(248,81,73,.12)', border:'rgba(248,81,73,.45)', color:'#ff7b72'},
+    '조건부 추천': {bg:'rgba(210,153,34,.12)', border:'rgba(210,153,34,.4)', color:'#d29922'},
+    '주목': {bg:'rgba(56,139,253,.12)', border:'rgba(56,139,253,.4)', color:'#58a6ff'},
+    '관찰': {bg:'rgba(110,118,129,.12)', border:'rgba(110,118,129,.4)', color:'#8b949e'}
+  };
+  var maxima = {'모멘텀':20,'거래대금':15,'상대거래량':10,'장중지지':10,'기술추세':15,'안정성':10,'외인·기관':12,'프로그램·업종':8,'과열감점':20};
+  el.innerHTML = items.map(function(it, idx) {
+    var conf = it.confidence_label || '관찰';
+    var cc = confColors[conf] || confColors['관찰'];
+    var change = Number(it.change_pct || 0);
+    var reasons = (it.reasons || []).map(function(reason) { return '<div class="us-reco-reason">▸ ' + esc(reason) + '</div>'; }).join('');
+    var warnings = (it.warning || []).map(function(warning) { return '<div class="kr-lt-risk">⚠ ' + esc(warning) + '</div>'; }).join('');
+    var breakdown = Object.keys(it.score_breakdown || {}).map(function(label) {
+      var value = Number(it.score_breakdown[label] || 0);
+      var width = Math.min(100, Math.abs(value) / (maxima[label] || 15) * 100);
+      return '<div class="kr-surge-bd-row"><span>' + esc(label) + '</span><div class="kr-surge-bd-track"><div class="kr-surge-bd-bar' + (value < 0 ? ' penalty' : '') + '" style="width:' + width + '%"></div></div><span>' + (value > 0 ? '+' : '') + value + '</span></div>';
+    }).join('');
+    var inds = [];
+    if (it.rsi != null) inds.push('RSI ' + Number(it.rsi).toFixed(1));
+    if (it.adx != null) inds.push('ADX ' + Number(it.adx).toFixed(1));
+    if (it.rvol != null) inds.push('RVOL ' + Number(it.rvol).toFixed(2) + '배');
+    if (it.rs20 != null) inds.push('지수 대비 RS20 ' + (Number(it.rs20) >= 0 ? '+' : '') + Number(it.rs20).toFixed(1) + '%');
+    var indicatorHtml = inds.length ? '<div class="kr-lt-fund">' + inds.map(function(v) { return '<span class="kr-lt-fund-tag">' + esc(v) + '</span>'; }).join('') + '</div>' : '';
+    var position = Math.max(0, Math.min(100, Number(it.intraday_position || 0)));
+    var vi = it.vi || {};
+    var statuses = '<div class="kr-surge-statuses">' +
+      '<span class="kr-surge-status ' + (vi.status === 'normal' ? 'ok' : 'warn') + '">' + esc(vi.label || 'VI 상태 미확인') + '</span>' +
+      '<span class="kr-surge-status ok">관리·시장경보 통과</span>' +
+      '<span class="kr-surge-status ok">거래 가능</span></div>';
+    var supply = it.supply || {};
+    var marketFlow = it.market_flow || {};
+    var flowText = function(flow, investor) {
+      if (!flow) return '랭킹 범위 밖/미관측';
+      var amount = Number(flow.net_amount || 0);
+      var state = flow.intraday ? '장중 추정' : '직전 확정';
+      return state + (flow.bizdate ? '(' + flow.bizdate + ')' : '') + ' · ' + (amount >= 0 ? '순매수 ' : '순매도 ') + eok(Math.abs(amount)) + (flow.rank ? ' · ' + flow.rank + '위' : '');
+    };
+    var program = marketFlow.program || {};
+    var sector = marketFlow.sector || {};
+    var flowHtml = '<div class="kr-surge-flow">' +
+      '<div class="kr-surge-flow-item"><div class="kr-surge-flow-label">외국인 수급</div><div class="kr-surge-flow-value">' + esc(flowText(supply.foreigner, '외국인')) + '</div></div>' +
+      '<div class="kr-surge-flow-item"><div class="kr-surge-flow-label">기관 수급</div><div class="kr-surge-flow-value">' + esc(flowText(supply.institution, '기관')) + '</div></div>' +
+      '<div class="kr-surge-flow-item"><div class="kr-surge-flow-label">시장 프로그램</div><div class="kr-surge-flow-value">' + (program.available ? esc((Number(program.net_amount || 0) >= 0 ? '순매수 ' : '순매도 ') + eok(Math.abs(Number(program.net_amount || 0))) + (program.time ? ' · ' + String(program.time).slice(0,2) + ':' + String(program.time).slice(2,4) : '')) : '미관측') + '</div></div>' +
+      '<div class="kr-surge-flow-item"><div class="kr-surge-flow-label">업종 수급 대용치</div><div class="kr-surge-flow-value">' + (sector.available ? esc((sector.name || '업종') + ' ' + pct(sector.change_pct) + (sector.rise_count != null ? ' · 상승/하락 ' + sector.rise_count + '/' + sector.fall_count : '')) : '미관측') + '</div></div>' +
+      '</div>';
+    return '<article class="us-reco-card kr-surge-card">' +
+      '<div class="us-reco-card-header" style="gap:7px;flex-wrap:wrap">' +
+        '<span style="font-size:13px;font-weight:700;color:#8b949e">#' + (idx + 1) + '</span>' +
+        '<span class="us-reco-ticker" style="font-family:inherit">' + esc(it.name || it.code) + '</span>' +
+        '<span style="font-family:monospace;font-size:11px;color:#6e7681">' + esc(it.code) + '</span>' +
+        '<span class="kr-lt-theme-badge">' + esc(it.market) + '</span>' +
+        '<span class="kr-lt-status-badge" style="background:' + cc.bg + ';border-color:' + cc.border + ';color:' + cc.color + '">' + esc(conf) + '</span>' +
+        '<span class="us-reco-score" style="margin-left:auto">종합 ' + Number(it.score || 0) + '점</span>' +
+      '</div>' +
+      statuses + flowHtml +
+      '<div class="kr-surge-grid">' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">현재가 · 전일비</div><div class="kr-surge-metric-value primary">' + won(it.price) + '</div><div class="kr-surge-range" style="color:#f85149">' + pct(change) + '</div></div>' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">확인 진입 구간</div><div class="kr-surge-metric-value">' + won(it.entry_low) + '</div><div class="kr-surge-range">~ ' + won(it.entry_high) + '</div></div>' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">ATR 목표가</div><div class="kr-surge-metric-value" style="color:#3fb950">' + won(it.target_price) + '</div><div class="kr-surge-range">' + pct(it.target_return) + '</div></div>' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">무효화·손절</div><div class="kr-surge-metric-value" style="color:#58a6ff">' + won(it.stop_loss) + '</div><div class="kr-surge-range">' + pct(it.stop_return) + '</div></div>' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">손익비</div><div class="kr-surge-metric-value">' + Number(it.risk_reward || 0).toFixed(2) + ':1</div><div class="kr-surge-range">상한 ' + won(it.upper_limit) + '</div></div>' +
+        '<div class="kr-surge-metric"><div class="kr-surge-metric-label">누적 거래대금</div><div class="kr-surge-metric-value">' + eok(it.turnover) + '</div><div class="kr-surge-range">' + (it.rvol == null ? 'RVOL 산정 불가' : 'RVOL ' + Number(it.rvol).toFixed(2) + '배') + '</div></div>' +
+      '</div>' +
+      '<div class="kr-surge-position"><div class="kr-surge-position-head"><span>저가 ' + won(it.low) + ' · 시가 ' + won(it.open) + ' · 고가 ' + won(it.high) + '</span><span>일중 위치 ' + position.toFixed(1) + '% · 고가 이격 -' + Number(it.off_high_pct || 0).toFixed(2) + '%</span></div><div class="kr-surge-position-track"><div class="kr-surge-position-bar" style="width:' + position + '%"></div></div></div>' +
+      '<div style="font-size:11px;color:#8b949e;font-weight:600;margin:9px 0 5px">점수 구성</div><div class="kr-surge-breakdown">' + breakdown + '</div>' +
+      (reasons ? '<div style="font-size:11px;color:#8b949e;font-weight:600;margin:9px 0 4px">선정 근거</div><div class="us-reco-reasons">' + reasons + '</div>' : '') +
+      (warnings ? '<div style="font-size:11px;color:#d29922;font-weight:600;margin:9px 0 4px">진입 보류·주의 조건</div><div class="kr-lt-risks">' + warnings + '</div>' : '') +
+      indicatorHtml +
+      '<div class="kr-surge-condition"><strong>체결 조건</strong> · ' + esc(it.entry_condition || '') + '<br><span style="color:#8b949e">' + esc(it.holding_period || '') + (it.quote_time ? ' · 시세 ' + esc(it.quote_time) : '') + '</span></div>' +
+    '</article>';
+  }).join('');
+}
+
+async function loadKrSurgePerformance() {
+  var body = document.getElementById('kr-surge-performance-body');
+  if (!body) return;
+  var page = document.getElementById('page-kr-surge');
+  if (!page || page.style.display === 'none') return;
+  try {
+    var response = await fetch('/api/kr/opening-surge/performance');
+    var data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || 'HTTP ' + response.status);
+    renderKrSurgePerformance(data);
+  } catch (error) {
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#f85149">성과 추적 데이터를 불러오지 못했습니다.</td></tr>';
+  }
+}
+
+function renderKrSurgePerformance(data) {
+  var esc = function(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  var won = function(v) { return Number(v || 0).toLocaleString('ko-KR') + '원'; };
+  var summaryEl = document.getElementById('kr-surge-performance-summary');
+  var body = document.getElementById('kr-surge-performance-body');
+  var storageEl = document.getElementById('kr-surge-performance-storage');
+  var asofEl = document.getElementById('kr-surge-performance-asof');
+  if (asofEl && data.as_of) asofEl.textContent = '· ' + new Date(data.as_of).toLocaleString('ko-KR');
+  var storage = data.storage || {};
+  if (storageEl) storageEl.textContent = '저장: ' + (storage.label || '미확인') + ' · ' + (storage.durability || '') + ' · 예정시각 이후 최초 서버 관측값 기준';
+  var summaries = data.summary || {};
+  if (summaryEl) summaryEl.innerHTML = ['m30','m60','close'].map(function(key) {
+    var item = summaries[key] || {};
+    var avg = item.average_return_pct == null ? '산출 전' : ((item.average_return_pct >= 0 ? '+' : '') + Number(item.average_return_pct).toFixed(2) + '%');
+    var win = item.win_rate_pct == null ? '승률 산출 전' : '양(+) 수익 비율 ' + Number(item.win_rate_pct).toFixed(1) + '%';
+    return '<div class="kr-surge-perf-card"><div class="kr-surge-summary-label">' + esc(item.label || key) + ' 성과 · ' + Number(item.completed || 0) + '건</div><div class="kr-surge-metric-value" style="color:' + (Number(item.average_return_pct || 0) >= 0 ? '#3fb950' : '#f85149') + '">' + esc(avg) + '</div><div class="kr-surge-range">' + esc(win) + '</div></div>';
+  }).join('');
+  var checkpointHtml = function(cp) {
+    cp = cp || {};
+    if (cp.status === 'completed') {
+      var ret = Number(cp.return_pct || 0);
+      var delay = Number(cp.delay_seconds || 0);
+      return '<span style="color:' + (ret >= 0 ? '#3fb950' : '#f85149') + ';font-weight:600">' + won(cp.price) + ' · ' + (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%</span>' + (delay > 90 ? '<br><span style="color:#d29922">관측 지연 ' + Math.round(delay / 60) + '분</span>' : '');
+    }
+    if (cp.status === 'unavailable') return '<span style="color:#6e7681">' + esc(cp.reason || '관측 불가') + '</span>';
+    var due = cp.due_at ? new Date(cp.due_at) : null;
+    return '<span style="color:#8b949e">대기' + (due && !isNaN(due.getTime()) ? ' · ' + due.toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'}) : '') + '</span>';
+  };
+  var events = data.events || [];
+  if (!body) return;
+  if (!events.length) {
+    body.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#484f58">정규장 추천 이벤트가 아직 없습니다.</td></tr>';
+    return;
+  }
+  body.innerHTML = events.slice(0, 30).map(function(event) {
+    var at = event.recommended_at ? new Date(event.recommended_at) : null;
+    var label = esc(event.name || event.code) + '<br><span style="color:#6e7681">' + (at && !isNaN(at.getTime()) ? at.toLocaleString('ko-KR') : esc(event.recommended_at || '')) + ' · #' + Number(event.rank || 0) + '</span>';
+    var cp = event.checkpoints || {};
+    return '<tr><td>' + label + '</td><td>' + won(event.entry_price) + '</td><td>' + checkpointHtml(cp.m30) + '</td><td>' + checkpointHtml(cp.m60) + '</td><td>' + checkpointHtml(cp.close) + '</td></tr>';
+  }).join('');
+}
+
 // ── US 개장 급등 추천 ─────────────────────────────────────────────
 async function loadUsSurge(force) {
   var ldg = document.getElementById('us-surge-loading');
@@ -19430,10 +21049,9 @@ function fetchTossAiSummary(ticker, market) {
     });
 }
 
-// ── 초기화 (코인 모드) ──
-// 페이지 로드 시 코인 시장 현황(주요 코인 + 공포·탐욕)과 24시간 등락 상위를 자동 로드.
-loadMarketCore();   // 📊 코인 시장 현황
-loadSectorFlow();   // 🚀 24시간 등락 상위
+// ── 초기화 ──
+loadMarketCore();   // ⭐ 페이지 로드 시 오늘의 핵심 자동 로드
+loadSectorFlow();   // 🏭 업종별 흐름 자동 로드
 initAlerts();       // 🔔 알림 시스템 초기화
 
 // ── Pull-to-Refresh (모바일) ──
@@ -19459,7 +21077,7 @@ initAlerts();       // 🔔 알림 시스템 초기화
 
   // ── 현재 활성 페이지 ──
   function getActivePage() {
-    var pages = ['screener', 'kr-longterm', 'us-longterm', 'us-surge'];
+    var pages = ['screener', 'kr-longterm', 'kr-surge', 'us-longterm', 'us-surge'];
     for (var i = 0; i < pages.length; i++) {
       var el = document.getElementById('page-' + pages[i]);
       if (el && el.style.display !== 'none') return pages[i];
@@ -19490,6 +21108,8 @@ initAlerts();       // 🔔 알림 시스템 초기화
       p = loadScreener();
     } else if (page === 'kr-longterm') {
       p = loadKrLongterm(true);
+    } else if (page === 'kr-surge') {
+      p = loadKrSurge(true);
     } else if (page === 'us-longterm') {
       p = loadUsLongterm(true);
     } else if (page === 'us-surge') {
@@ -19581,10 +21201,10 @@ initAlerts();       // 🔔 알림 시스템 초기화
     <!-- 목표가 -->
     <div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <label class="alert-field-label" style="margin-bottom:0">목표가 (USDT)</label>
+        <label class="alert-field-label" style="margin-bottom:0">목표가 (원)</label>
         <span class="alert-preview-dir" id="am-target-preview" style="display:none"></span>
       </div>
-      <input type="number" min="0" step="any" id="am-target" class="alert-price-input" placeholder="예: 65000 또는 0.125" oninput="_updateAlertPreview()">
+      <input type="number" min="0" id="am-target" class="alert-price-input" placeholder="예: 95000" oninput="_updateAlertPreview()">
     </div>
     <!-- 급등 -->
     <div>
@@ -19593,7 +21213,7 @@ initAlerts();       // 🔔 알림 시스템 초기화
         <span style="font-size:13px;font-weight:600;color:#3fb950">📈 급등 알림</span>
       </label>
       <div class="alert-pct-row" id="am-surge-row" style="display:none">
-        <span style="font-size:12px;color:#8b949e">24시간 대비</span>
+        <span style="font-size:12px;color:#8b949e">전일대비</span>
         <input type="number" min="0.1" step="0.5" id="am-surge-pct" class="alert-pct-input" value="5">
         <span style="font-size:12px;color:#8b949e">% 이상 상승</span>
       </div>
@@ -20228,11 +21848,11 @@ def replace_nan_with_none(obj):
         return replace_nan_with_none(obj.tolist())
     if isinstance(obj, pd.DataFrame):
         return replace_nan_with_none(obj.to_dict(orient='list'))
-
+        
     # Handle numpy arrays (convert to list first)
     if isinstance(obj, np.ndarray):
         return replace_nan_with_none(obj.tolist())
-
+        
     if isinstance(obj, list):
         return [replace_nan_with_none(i) for i in obj]
     elif isinstance(obj, dict):
@@ -20257,11 +21877,11 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
         body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
     else:
         body = data if isinstance(data, bytes) else data.encode("utf-8")
-
+    
     handler_self.send_response(status)
     handler_self.send_header("Content-Type", content_type + "; charset=utf-8")
     handler_self.send_header("Content-Length", str(len(body)))
-
+    
     # CORS Policy
     handler_self.send_header("Access-Control-Allow-Origin", "*")
     # POST는 동일 출처 전용(/api/telegram/send) → CORS로 교차 출처에 개방하지 않는다.
@@ -20272,7 +21892,7 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
     # Cache Policy (Vercel/CDN Integration)
     # Default: No Cache for errors
     cache_control = "no-store, no-cache, must-revalidate, proxy-revalidate"
-
+    
     if status == 200:
         if path == "/api/screener":
             # 1시간 캐시 + 1일 stale (스크리너는 실시간성 불필요)
@@ -20318,7 +21938,7 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
                 _smx, _swr = 300, 600
             cache_control = f"public, s-maxage={_smx}, stale-while-revalidate={_swr}"
 
-        elif path in ("/api/coin", "/api/stock", "/api/price", "/api/alert/quote"):
+        elif path in ("/api/stock", "/api/price", "/api/alert/quote"):
             # 실시간 현재가 포함 응답 — 캐시 금지.
             # s-maxage(CDN)·stale-while-revalidate(브라우저 SWR)가 걸리면
             # '분석 시작'을 다시 눌러도 이전 응답이 그대로 재사용돼
@@ -20339,20 +21959,113 @@ def _send(handler_self, data: Any, status: int = 200, content_type: str = "appli
     handler_self.send_header("X-Content-Type-Options", "nosniff")
     handler_self.send_header("X-Frame-Options", "DENY")
     handler_self.send_header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-    handler_self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://finance.naver.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com wss://stream.binance.com:9443 wss://stream.binance.com:443 wss://fstream.binance.com;")
+    handler_self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://finance.naver.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com;")
     handler_self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
 
     handler_self.end_headers()
     handler_self.wfile.write(body)
 
 
-# ── (코인 모드) 주식 랭킹 캐시 예열 비활성화 ────────────────────────────────
-# 기존 토스증권 미국 주식 랭킹 예열은 암호화폐 플랫폼에서 불필요하므로 제거.
+# ── 첫 실제 요청 시 랭킹 캐시 지연 예열 (백그라운드) ───────────────────────
+# import 시에는 외부 호출이나 스레드를 만들지 않는다.
+def _prewarm_toss_ranking():
+    try:
+        result = _fetch_toss_us_ranking_productcodes()
+        print(f"[Toss Prewarm] 랭킹 캐시 예열 완료: {len(result)}개")
+    except Exception as e:
+        print(f"[Toss Prewarm] 예열 실패 (무시): {e}")
+
+_prewarm_lock = threading.Lock()
+_prewarm_started = False
+
+
+def _start_toss_prewarm_once() -> bool:
+    global _prewarm_started
+    if str(os.getenv("ENABLE_TOSS_PREWARM", "1")).lower() in {"0", "false", "no"}:
+        return False
+    with _prewarm_lock:
+        if _prewarm_started:
+            return False
+        _prewarm_started = True
+        thread = threading.Thread(
+            target=_prewarm_toss_ranking,
+            name="toss_prewarm",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+
+# ── 텔레그램 Bot API 전송 ────────────────────────────────────────────────
+# 설정: 환경변수 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (기존 env 설정 방식 유지).
+# 프론트의 텔레그램 버튼이 /api/telegram/send 로 현재 분석 메시지를 POST하면,
+# 서버가 봇 토큰으로 sendMessage를 호출해 즉시 전송한다(평문, 재분석 없음).
+def send_telegram_message(text: str) -> Dict[str, Any]:
+    token   = (os.getenv("TELEGRAM_BOT_TOKEN", "8951186273:AAFTtSxV-hvcz8ezsdEjnieywAyqoTSMfSg") or "").strip()
+    # 전송 대상: "K애널리스트 주식" 채널 (@KjusikBot이 관리자로 게시).
+    # 채널/그룹 chat_id는 음수(채널은 -100… 형식)가 정상값.
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID",   "-1003625567216") or "").strip()
+    if not token or not chat_id:
+        return {"ok": False, "error": "서버에 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 환경변수가 설정되지 않았습니다."}
+    if not text or not text.strip():
+        return {"ok": False, "error": "전송할 분석 결과가 없습니다."}
+    # 텔레그램 단일 메시지 한도(4096자) 방어적 절단
+    if len(text) > 4096:
+        text = text[:4093] + "..."
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            timeout=10,
+        )
+        try:
+            jd = resp.json()
+        except Exception:
+            jd = {}
+        if resp.status_code == 200 and jd.get("ok"):
+            print(f"[Telegram] 전송 성공 ({len(text)}자)")
+            return {"ok": True}
+        # API 원문 에러(chat_id 등 내부 정보 포함 가능)는 서버 로그에만 남긴다
+        print(f"[Telegram] 전송 실패: HTTP {resp.status_code} / {jd.get('description')}")
+        return {"ok": False, "error": "텔레그램 전송에 실패했습니다. 잠시 후 다시 시도해주세요."}
+    except Exception as e:
+        print(f"[Telegram] 네트워크 오류: {e}")
+        return {"ok": False, "error": "텔레그램 전송 중 네트워크 오류가 발생했습니다."}
+
+
+# ── /api/telegram/send 남용 방지 ─────────────────────────────────────────
+# 무인증 엔드포인트이므로 (1) 동일 출처(Origin/Referer) 검증 + (2) IP별
+# 레이트리밋으로 외부 사이트/스크립트의 채널 스팸 게시를 차단한다.
+_TG_RATE_LOCK = threading.Lock()
+_TG_RATE_HITS: Dict[str, list] = {}
+_TG_RATE_MAX, _TG_RATE_WINDOW = 5, 60   # IP당 60초에 5회
+
+def _tg_rate_limited(ip: str) -> bool:
+    now = time.time()
+    with _TG_RATE_LOCK:
+        hits = [t for t in _TG_RATE_HITS.get(ip, []) if now - t < _TG_RATE_WINDOW]
+        if len(hits) >= _TG_RATE_MAX:
+            _TG_RATE_HITS[ip] = hits
+            return True
+        hits.append(now)
+        _TG_RATE_HITS[ip] = hits
+        return False
+
+def _tg_same_origin(handler_self) -> bool:
+    host = (handler_self.headers.get("Host") or "").strip().lower()
+    src  = (handler_self.headers.get("Origin")
+            or handler_self.headers.get("Referer") or "").strip().lower()
+    if not host or not src:
+        return False
+    try:
+        return urlparse(src).netloc == host
+    except Exception:
+        return False
 
 
 class handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        print(f"[Coinview] {fmt % args}")
+        print(f"[StockOracle] {fmt % args}")
 
     def do_OPTIONS(self):
         _send(self, {})
@@ -20393,11 +22106,14 @@ class handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             path = parsed.path.rstrip("/") or "/"
+            if path in ("/", "/index.html", "/api/stock"):
+                _start_toss_prewarm_once()
+
             # Input Validation
-            if path in ("/api/coin", "/api/stock"):
+            if path == "/api/stock":
                 ticker = params.get("ticker", "")
                 period = params.get("period", "1y")
-
+                
                 if len(ticker) > 20 or (ticker and not re.match(r"^[a-zA-Z0-9가-힣.\-\s]+$", ticker)):
                      _send(self, {"error": "Invalid ticker format"}, 400)
                      return
