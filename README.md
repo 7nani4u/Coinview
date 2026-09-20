@@ -52,6 +52,15 @@ API 키 없이 핵심 기능을 사용할 수 있습니다. 예측 학습 로그
 
 `/api/stock`은 기존 배포 URL 호환을 위해 `/api/coin`의 별칭으로만 남아 있습니다.
 
+데이터 소스는 Binance 현물을 우선하고, 선물에만 상장된 심볼(예: `NAORISUSDT`)은
+Binance 선물(USDT-M) klines·24시간 티커로 자동 폴백합니다. 상장 여부는
+`exchangeInfo`(현물·선물) 기준으로 판별하며, 자동완성도 실제 상장 목록과 병합됩니다.
+`/api/coin`·`/api/price` 응답에는 `venue`(`spot`/`futures`/`both`/`unknown`)과
+`data_source`가 포함되고, 조회 실패 시 내부 원시 메시지 대신 `reason`·`hint`를 반환합니다.
+`prediction_outlook.meta`에는 현재가·예측 기준 시점·대상 기간(horizon)·관측 봉 수·
+지표 가용성·분석 방법 고지·기준선(hold) 정보가 포함됩니다. 표시 확률·목표가는
+규칙 기반 ATR·점수·모멘텀 종합 참고 범위이며 방향을 보장하지 않습니다.
+
 ## 로컬 실행
 
 ```powershell

@@ -285,3 +285,168 @@ def test_html_exposes_coin_ui_and_new_interactions():
     assert "wss://fstream.binance.com" in html
     assert "@forceOrder" in html
     assert "data-live-liquidation" in html
+
+
+def _reset_symbol_caches():
+    app._CACHE.clear()
+    app._KLINES_VENUE.clear()
+    app._SPOT_SYMBOLS_CACHE["symbols"] = None
+    app._SPOT_SYMBOLS_CACHE["ts"] = 0.0
+    app._FUTURES_SYMBOLS_CACHE["symbols"] = None
+    app._FUTURES_SYMBOLS_CACHE["ts"] = 0.0
+
+
+def _fake_klines_rows(n=5):
+    return [
+        [1_700_000_000_000 + i * 86_400_000, "1.0", "1.1", "0.9", "1.05",
+         "1000", 0, "0", 0, "0", "0", "0"]
+        for i in range(n)
+    ]
+
+
+def test_fetch_klines_falls_back_to_futures_for_futures_only_symbol(monkeypatch):
+    _reset_symbol_caches()
+
+    def fake_binance(path, params=None, fapi=False, timeout=8):
+        if path == "/api/v3/klines":
+            return None  # 현물 미상장
+        if path == "/fapi/v1/klines":
+            assert params["symbol"] == "NAORISUSDT"
+            return _fake_klines_rows()
+        return None
+
+    monkeypatch.setattr(app, "_binance_get", fake_binance)
+    rows = app.fetch_klines("NAORISUSDT", "1d", 10)
+    assert rows and len(rows) == 5
+    assert app.get_klines_venue("NAORISUSDT") == "futures"
+
+
+def test_fetch_klines_prefers_spot_when_listed(monkeypatch):
+    _reset_symbol_caches()
+
+    def fake_binance(path, params=None, fapi=False, timeout=8):
+        if path == "/api/v3/klines":
+            return _fake_klines_rows(3)
+        raise AssertionError("선물 폴백이 호출되면 안 됨")
+
+    monkeypatch.setattr(app, "_binance_get", fake_binance)
+    rows = app.fetch_klines("BTCUSDT", "1d", 10)
+    assert rows and len(rows) == 3
+    assert app.get_klines_venue("BTCUSDT") == "spot"
+
+
+def test_fetch_ticker_24h_falls_back_to_futures(monkeypatch):
+    _reset_symbol_caches()
+
+    def fake_binance(path, params=None, fapi=False, timeout=8):
+        if not fapi:
+            return None
+        return {"lastPrice": "0.0344", "priceChangePercent": "-1.6",
+                "highPrice": "0.04", "lowPrice": "0.034",
+                "quoteVolume": "2186769.0", "count": 100}
+
+    monkeypatch.setattr(app, "_binance_get", fake_binance)
+    quote = app.fetch_ticker_24h("NAORISUSDT")
+    assert quote["price"] == pytest.approx(0.0344)
+    assert quote["venue"] == "futures"
+
+
+def test_classify_symbol_venue(monkeypatch):
+    monkeypatch.setattr(app, "fetch_spot_symbols", lambda: {"BTCUSDT", "ETHUSDT"})
+    monkeypatch.setattr(app, "fetch_futures_symbols",
+                        lambda: {"BTCUSDT", "ETHUSDT", "NAORISUSDT"})
+    assert app.classify_symbol_venue("BTCUSDT") == "both"
+    assert app.classify_symbol_venue("NAORISUSDT") == "futures"
+    assert app.classify_symbol_venue("ETH") == "none"  # 베이스만으로는 미상장 취급
+    assert app.classify_symbol_venue("FAKECOINUSDT") == "none"
+
+
+def test_coin_route_failure_contract_hides_internals(monkeypatch):
+    _reset_symbol_caches()
+    monkeypatch.setattr(app, "fetch_coin_data",
+                        lambda *args, **kwargs: (None, None, "데이터 없음: FAKEUSDT"))
+    monkeypatch.setattr(app, "classify_symbol_venue", lambda sym: "none")
+    result = app.route("/api/coin", {"ticker": "FAKE", "period": "1mo"})
+    assert "error" in result
+    assert result["reason"] == "unknown_symbol"
+    assert result["hint"]
+    assert "데이터 없음" not in result["error"]
+    assert "데이터 조회 실패" not in result["error"]
+
+
+def test_coin_route_success_includes_venue_and_outlook_meta(monkeypatch):
+    _reset_symbol_caches()
+    market_data = _synthetic_market_data()
+    monkeypatch.setattr(app, "fetch_coin_data", lambda *args, **kwargs: (market_data, [], "BTCUSDT"))
+    monkeypatch.setattr(app, "fetch_open_interest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "fetch_crypto_derivatives", lambda *args, **kwargs: {"available": False})
+    monkeypatch.setattr(app, "check_market_regime", lambda *args, **kwargs: "NEUTRAL")
+    monkeypatch.setattr(app, "classify_symbol_venue", lambda sym: "both")
+    result = app.route("/api/coin", {"ticker": "BTC", "period": "1mo"})
+    assert "error" not in result
+    assert result["venue"] == "both"
+    assert result["data_source"] == "Binance 현물"
+    meta = result["prediction_outlook"]["meta"]
+    assert meta["current_price"] > 0
+    assert meta["horizon_label"] == "1개월"
+    assert meta["horizon_days"] == 22
+    assert meta["history_bars"] == len(market_data["Close"])
+    assert set(meta["indicators"]) == {"rsi", "macd", "atr", "volume"}
+    assert meta["baseline"]["type"] == "hold"
+    assert "ML" in meta["method"]
+
+
+def test_suggestions_include_futures_only_coin(monkeypatch):
+    monkeypatch.setattr(app, "fetch_spot_symbols", lambda: {"BTCUSDT", "ETHUSDT"})
+    monkeypatch.setattr(app, "fetch_futures_symbols",
+                        lambda: {"BTCUSDT", "ETHUSDT", "NAORISUSDT"})
+    items = app.search_coin_suggestions("naor", 12)
+    assert items and items[0]["ticker"] == "NAORISUSDT"
+    assert items[0]["venue"] == "선물"
+    # 기존 주요 코인 우선순위는 유지된다
+    eth = app.search_coin_suggestions("eth", 5)
+    assert eth and eth[0]["ticker"] == "ETHUSDT"
+
+
+def test_suggestions_fall_back_to_curated_list_when_exchange_unavailable(monkeypatch):
+    monkeypatch.setattr(app, "fetch_spot_symbols", lambda: set())
+    monkeypatch.setattr(app, "fetch_futures_symbols", lambda: set())
+    items = app.search_coin_suggestions("이더", 5)
+    assert items and items[0]["ticker"] == "ETHUSDT"
+
+
+def test_build_prediction_uses_ema20_series():
+    dd = {
+        "RSI": [55.0], "EMA20": [100.0], "EMA50": [99.0],
+        "MACD": [1.0], "ADX": [30.0],
+    }
+    leverage = {"recommended_leverage": 3, "risk_grade": "Medium", "factors": {}}
+    result = app.build_prediction(100.0, 4.0, 4.0, 70.0, leverage, dd, 65.0, 35.0)
+    # EMA20(100) > EMA50(99) 구간이 추세 강도에 반영되어야 한다 (EMA12 오타 수정 검증)
+    assert result["risk"]["trend_strength"]["value"] == 31.0
+
+
+def test_price_endpoint_reports_venue_and_failure_reason(monkeypatch):
+    monkeypatch.setattr(
+        app, "fetch_ticker_24h",
+        lambda symbol: {"price": 0.0344, "change_pct": -1.6, "high_24h": 0.04,
+                        "low_24h": 0.034, "venue": "futures"},
+    )
+    ok = app.route("/api/price", {"ticker": "NAORISUSDT"})
+    assert ok["venue"] == "futures"
+
+    monkeypatch.setattr(app, "fetch_ticker_24h", lambda symbol: None)
+    monkeypatch.setattr(app, "classify_symbol_venue", lambda sym: "none")
+    fail = app.route("/api/price", {"ticker": "FAKEUSDT"})
+    assert fail["reason"] == "unknown_symbol"
+    assert "price unavailable" not in str(fail)
+
+
+def test_forecast_tab_header_and_empty_state_in_html():
+    html = app.HTML
+    assert "예측 기준 시점" in html
+    assert "예측 대상 기간" in html
+    assert "데이터 출처" in html
+    assert "예측 데이터를 생성하지 못했습니다" in html
+    assert "function _fmtPredictionRefTime" in html
+    assert "@miniTicker" in html

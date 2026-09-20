@@ -540,25 +540,61 @@ COIN_DISPLAY_NAMES = {
 }
 
 
+def _dynamic_coin_bases() -> Dict[str, str]:
+    """exchangeInfo 기반 전체 베이스 목록 → {base: venue_label}.
+
+    하드코딩된 ~40개 코인에만 의존하면 선물 전용·신규 코인(예: NAORIS)이
+    검색에서 누락되므로, 실제 상장 목록을 동적으로 병합한다.
+    목록 조회 실패 시 빈 dict를 반환해 기존 하드코딩 목록으로 폴백한다.
+    """
+    out: Dict[str, str] = {}
+    try:
+        for sym in fetch_spot_symbols():
+            base = _base_of_symbol(sym)
+            if base and sym == f"{base}USDT":
+                out.setdefault(base, "현물")
+        for sym in fetch_futures_symbols():
+            base = _base_of_symbol(sym)
+            if base and sym == f"{base}USDT":
+                if base in out:
+                    out[base] = "현물·선물"
+                else:
+                    out[base] = "선물"
+    except Exception:
+        pass
+    return out
+
+
 def search_coin_suggestions(q: str, limit: int = 12) -> List[Dict]:
-    """한글명·별칭·심볼을 대상으로 Binance USDT 코인 자동완성 항목을 반환한다."""
+    """한글명·별칭·심볼을 대상으로 코인 자동완성 항목을 반환한다.
+
+    하드코딩된 주요 코인 + Binance 현물/선물 실제 상장 목록을 병합하므로
+    선물 전용·신규 코인도 검색에서 누락되지 않는다. 상장 목록 조회 실패 시
+    기존 하드코딩 목록만으로 동작한다 (fail-soft).
+    """
     query = str(q or "").strip().lower()
     if not query:
         return []
+    norm = query.replace("/", "").replace("-", "").replace("_", "").replace(" ", "")
+    dynamic = _dynamic_coin_bases()
     bases = set(COIN_DISPLAY_NAMES)
     bases.update(COIN_ALIASES.values())
+    bases.update(dynamic)
     ranked = []
     for base in bases:
         name = COIN_DISPLAY_NAMES.get(base, base)
         aliases = [alias for alias, value in COIN_ALIASES.items() if value == base]
         fields = [base.lower(), f"{base.lower()}usdt", name.lower(), *aliases]
-        if not any(query in field for field in fields):
+        if norm and not any(norm in field.replace("/", "").replace("-", "").replace("_", "").replace(" ", "") for field in fields):
             continue
-        exact = 0 if query in (base.lower(), f"{base.lower()}usdt", name.lower()) else 1
-        prefix = 0 if any(field.startswith(query) for field in fields) else 1
-        ranked.append(((exact, prefix, len(name), base), {
+        exact = 0 if norm in (base.lower(), f"{base.lower()}usdt", name.lower()) else 1
+        prefix = 0 if any(field.startswith(norm) for field in fields) else 1
+        venue = dynamic.get(base, "현물" if base in COIN_DISPLAY_NAMES or base in set(COIN_ALIASES.values()) else "현물")
+        # 하드코딩된 주요 코인을 동적 목록보다 우선 노출 (기존 UX 유지)
+        curated = 0 if base in COIN_DISPLAY_NAMES else 1
+        ranked.append(((exact, prefix, curated, len(name), base), {
             "ticker": f"{base}USDT", "code": base, "name": name,
-            "market": "CRYPTO", "exchange": "Binance USDT",
+            "market": "CRYPTO", "exchange": "Binance USDT", "venue": venue,
         }))
     return [item for _, item in sorted(ranked, key=lambda row: row[0])[:max(1, min(20, limit))]]
 
@@ -752,19 +788,154 @@ _BINANCE_BASES = [
 _BINANCE_FAPI = "https://fapi.binance.com"
 _REQ_HEADERS = {"User-Agent": "CryptoOracle/3.0 (+vercel)"}
 
+# ── 현물/선물 베뉴(venue) 판별 계층 ──────────────────────────────────────────
+# 선물 전용 상장 코인(예: NAORISUSDT)이 현물 API에만 조회되어 "데이터 없음"이
+# 되는 문제를 일반화해서 해결한다. 특정 심볼 하드코딩 없이 exchangeInfo를
+# 기준으로 실제 상장 여부를 판별하고, 데이터 조회는 현물→선물 순서로 폴백한다.
+_KLINES_VENUE: Dict[str, str] = {}
+_SPOT_SYMBOLS_CACHE: Dict[str, Any] = {"symbols": None, "ts": 0.0}
+_FUTURES_SYMBOLS_CACHE: Dict[str, Any] = {"symbols": None, "ts": 0.0}
+_SYMBOL_LIST_TTL = 21600  # 6시간
+
+
+def _load_symbol_set(cache: Dict[str, Any], path: str, fapi: bool) -> set:
+    """exchangeInfo 기반 TRADING 심볼 집합 (실패 시 빈 집합이 아닌 None 의미의 캐시 유지).
+
+    네트워크 실패 시에는 이전 캐시를 계속 사용하고, 캐시조차 없으면
+    빈 집합이 아닌 None을 반환해 '모름'과 '없음'을 구분한다."""
+    now = time.time()
+    cached = cache.get("symbols")
+    if cached is not None and now - float(cache.get("ts") or 0.0) < _SYMBOL_LIST_TTL:
+        return cached
+    try:
+        data = _binance_get(path, None, fapi=fapi, timeout=10)
+        symbols = (data or {}).get("symbols") or []
+        out = set()
+        for entry in symbols:
+            try:
+                if fapi:
+                    # 선물: 청산·결제 중단 심볼 제외 (USDT-M 무기한 위주)
+                    if entry.get("status") != "TRADING":
+                        continue
+                    if entry.get("contractType") not in (None, "PERPETUAL"):
+                        continue
+                else:
+                    if entry.get("status") != "TRADING":
+                        continue
+                sym = str(entry.get("symbol") or "").upper()
+                if sym:
+                    out.add(sym)
+            except Exception:
+                continue
+        if out:
+            cache["symbols"] = out
+            cache["ts"] = now
+            return out
+    except Exception:
+        pass
+    # 갱신 실패: 이전 캐시가 있으면 재사용, 없으면 빈 집합(모름)으로 폴백
+    if cached is not None:
+        return cached
+    return set()
+
+
+def fetch_spot_symbols() -> set:
+    """Binance 현물 TRADING 심볼 집합 (6시간 캐시, 실패 시 이전 캐시/빈 집합)."""
+    return _load_symbol_set(_SPOT_SYMBOLS_CACHE, "/api/v3/exchangeInfo", fapi=False)
+
+
+def fetch_futures_symbols() -> set:
+    """Binance USDT-M 선물 TRADING 심볼 집합 (6시간 캐시, 실패 시 이전 캐시/빈 집합)."""
+    return _load_symbol_set(_FUTURES_SYMBOLS_CACHE, "/fapi/v1/exchangeInfo", fapi=True)
+
+
+def classify_symbol_venue(symbol: str) -> str:
+    """심볼 상장 베뉴 판별: spot / futures / both / unknown.
+
+    exchangeInfo 조회 자체가 실패하면 "unknown"을 반환해 호출부가
+    차단이 아닌 폴백 조회로 진행하도록 한다 (fail-open).
+    """
+    sym = str(symbol or "").upper()
+    if not sym:
+        return "unknown"
+    spot = fetch_spot_symbols()
+    fut = fetch_futures_symbols()
+    # 양쪽 목록이 모두 비어 있으면 네트워크 실패로 간주 → unknown
+    if not spot and not fut:
+        return get_klines_venue(sym) or "unknown"
+    on_spot = sym in spot
+    on_fut = sym in fut
+    if on_spot and on_fut:
+        return "both"
+    if on_spot:
+        return "spot"
+    if on_fut:
+        return "futures"
+    # 목록에는 없지만 최근 klines 성공 기록이 있으면 그 베뉴를 신뢰
+    return get_klines_venue(sym) or "none"
+
+
+def _base_of_symbol(symbol: str) -> str:
+    base = str(symbol or "").upper()
+    for quote_asset in _QUOTE_ASSETS:
+        if base.endswith(quote_asset) and len(base) > len(quote_asset):
+            return base[:-len(quote_asset)]
+    return base
+
+
+def describe_symbol_failure(symbol: str) -> Dict:
+    """데이터 조회 실패 원인을 베뉴 기준으로 분류해 사용자용 문구로 변환한다.
+
+    내부 원시 메시지("데이터 없음: XXX" 등)를 그대로 노출하지 않고
+    reason 코드 + 조치 힌트를 함께 반환한다.
+    """
+    sym = str(symbol or "").upper()
+    venue = classify_symbol_venue(sym)
+    base = _base_of_symbol(sym)
+    if venue == "none":
+        return {
+            "reason": "unknown_symbol",
+            "venue": venue,
+            "error": f"'{base}' 코인은 Binance 현물·선물 상장 목록에서 확인되지 않습니다.",
+            "hint": "심볼 철자를 확인하거나 자동완성 목록에서 선택해 주세요. 신규·상장폐지 코인은 조회가 제한될 수 있습니다.",
+        }
+    if venue == "unknown":
+        return {
+            "reason": "transient",
+            "venue": venue,
+            "error": f"'{sym}' 데이터를 일시적으로 불러오지 못했습니다.",
+            "hint": "네트워크 상태나 거래소 응답 지연일 수 있습니다. 잠시 후 다시 시도해 주세요.",
+        }
+    return {
+        "reason": "transient",
+        "venue": venue,
+        "error": f"'{sym}' 데이터를 일시적으로 불러오지 못했습니다.",
+        "hint": "거래소 응답이 비어 있습니다. 잠시 후 다시 시도해 주세요.",
+    }
+
+
 def _binance_get(path: str, params: dict = None, fapi: bool = False, timeout: int = 8):
-    """Binance 공개 REST 호출 (다중 베이스 폴백)."""
+    """Binance 공개 REST 호출 (다중 베이스 폴백 + 일시적 네트워크 오류 1회 재시도)."""
     bases = [_BINANCE_FAPI] if fapi else _BINANCE_BASES
     last_err = None
     for base in bases:
-        try:
-            r = requests.get(base + path, params=params, headers=_REQ_HEADERS, timeout=timeout)
-            if r.status_code == 200:
-                return r.json()
-            last_err = f"HTTP {r.status_code}"
-        except Exception as e:
-            last_err = str(e)
-            continue
+        for attempt in range(2):
+            try:
+                r = requests.get(base + path, params=params, headers=_REQ_HEADERS, timeout=timeout)
+                if r.status_code == 200:
+                    return r.json()
+                # 4xx(잘못된 심볼 등)는 재시도해도 결과가 같으므로 즉시 다음 베이스로 이동
+                last_err = f"HTTP {r.status_code}"
+                break
+            except Exception as e:
+                last_err = str(e)
+                if attempt == 0:
+                    try:
+                        time.sleep(0.4)
+                    except Exception:
+                        pass
+                    continue
+                break
     return None
 
 def _period_to_kline(period: str):
@@ -779,9 +950,30 @@ def _period_to_kline(period: str):
 
 @ttl_cache(60)
 def fetch_klines(symbol: str, interval: str, limit: int):
-    """Binance 현물 klines (실패 시 None)."""
-    return _binance_get("/api/v3/klines",
-                        {"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
+    """Binance klines — 현물 우선, 현물 미상장(선물 전용) 심볼은 선물 klines로 폴백.
+
+    NAORISUSDT처럼 선물에만 상장된 코인이 현물 조회 실패로
+    "데이터 없음"이 되지 않도록 한다. 반환 형식은 현물/선물 동일하므로
+    호출부 계약(list | None)은 그대로 유지된다.
+    """
+    sym = str(symbol or "").upper()
+    spot = _binance_get("/api/v3/klines",
+                        {"symbol": sym, "interval": interval, "limit": min(limit, 1000)})
+    if spot:
+        _KLINES_VENUE[sym] = "spot"
+        return spot
+    fut = _binance_get("/fapi/v1/klines",
+                       {"symbol": sym, "interval": interval, "limit": min(limit, 1000)},
+                       fapi=True)
+    if fut:
+        _KLINES_VENUE[sym] = "futures"
+        return fut
+    return None
+
+
+def get_klines_venue(symbol: str) -> str | None:
+    """최근 fetch_klines 성공 시 기록된 데이터 출처 (spot/futures/None)."""
+    return _KLINES_VENUE.get(str(symbol or "").upper())
 
 @ttl_cache(30)
 def fetch_open_interest(symbol: str):
@@ -885,29 +1077,38 @@ def fetch_crypto_derivatives(symbol: str) -> Dict:
 
 @ttl_cache(30)
 def fetch_ticker_24h(symbol: str):
-    """24시간 티커 통계 (현재가·고저·거래량·등락률)."""
-    d = _binance_get("/api/v3/ticker/24hr", {"symbol": symbol})
-    if not d or "lastPrice" not in d:
-        return None
-    try:
-        return {
-            "price": float(d["lastPrice"]),
-            "change_pct": float(d.get("priceChangePercent", 0)),
-            "high_24h": float(d.get("highPrice", 0)),
-            "low_24h": float(d.get("lowPrice", 0)),
-            "volume_24h": float(d.get("quoteVolume", 0)),
-            "count": int(d.get("count", 0)),
-        }
-    except Exception:
-        return None
+    """24시간 티커 통계 (현재가·고저·거래량·등락률) — 현물 우선, 선물 폴백."""
+    sym = str(symbol or "").upper()
+    for use_fapi in (False, True):
+        path = "/fapi/v1/ticker/24hr" if use_fapi else "/api/v3/ticker/24hr"
+        d = _binance_get(path, {"symbol": sym}, fapi=use_fapi)
+        if not d or "lastPrice" not in d:
+            continue
+        try:
+            return {
+                "price": float(d["lastPrice"]),
+                "change_pct": float(d.get("priceChangePercent", 0)),
+                "high_24h": float(d.get("highPrice", 0)),
+                "low_24h": float(d.get("lowPrice", 0)),
+                "volume_24h": float(d.get("quoteVolume", 0)),
+                "count": int(d.get("count", 0)),
+                "venue": "futures" if use_fapi else "spot",
+            }
+        except Exception:
+            continue
+    return None
 
 @ttl_cache(60)
 def fetch_tickers_batch(symbols_tuple):
-    """여러 심볼의 24h 티커를 한 번에 조회 → {symbol: {price, change_pct, volume}}."""
+    """여러 심볼의 24h 티커를 한 번에 조회 → {symbol: {price, change_pct, volume, venue}}.
+
+    현물 배치 조회에서 누락된 심볼은 선물 단건 조회로 개별 폴백한다
+    (선물 전용 코인이 개요·스크리너에서 통째로 빠지지 않도록).
+    """
     syms = list(symbols_tuple)
+    out = {}
     # Binance는 symbols 파라미터에 공백 없는 압축 JSON 배열을 요구 (공백 포함 시 거부)
     data = _binance_get("/api/v3/ticker/24hr", {"symbols": json.dumps(syms, separators=(",", ":"))})
-    out = {}
     if isinstance(data, list):
         for d in data:
             try:
@@ -915,9 +1116,23 @@ def fetch_tickers_batch(symbols_tuple):
                     "price": float(d["lastPrice"]),
                     "change_pct": float(d.get("priceChangePercent", 0)),
                     "volume": float(d.get("quoteVolume", 0)),
+                    "venue": "spot",
                 }
             except Exception:
                 continue
+    missing = [s for s in syms if s not in out]
+    for sym in missing:
+        try:
+            single = fetch_ticker_24h(sym)
+            if single and single.get("price", 0) > 0:
+                out[sym] = {
+                    "price": single["price"],
+                    "change_pct": single.get("change_pct", 0.0),
+                    "volume": single.get("volume_24h", 0.0),
+                    "venue": single.get("venue", "futures"),
+                }
+        except Exception:
+            continue
     return out
 
 @ttl_cache(600)
@@ -10285,7 +10500,7 @@ def build_prediction(price, atr, atr_pct, score, leverage_info, dd, prob_up, pro
         a = dd.get(k, [])
         try: return float(a[-1])
         except Exception: return 0.0
-    rsi = v("RSI"); ema12 = dd.get("EMA12") and v("EMA12") or 0.0
+    rsi = v("RSI"); ema12 = dd.get("EMA20") and v("EMA20") or 0.0
     macd = v("MACD"); ema_s = v("EMA20"); ema_l = v("EMA50")
     adx = v("ADX"); vol_30d = (leverage_info or {}).get("factors", {}).get("volatility_30d") or 0.0
 
@@ -10491,6 +10706,24 @@ def build_crypto_signal_confidence(
     }
 
 
+# ── 예측 horizon 정의 (단일 소스 — 예측 탭 기준 시점/대상 기간 표시용) ──
+# period(분석 범위) → 전망 horizon. 일봉 기준 거래일 환산이 아니라
+# 분석에 사용된 캔들 스케일 그대로의 전망 범위를 사용한다.
+_FORECAST_HORIZON_DAYS = {
+    "1d": 1, "3d": 3, "1wk": 5, "2wk": 10, "1mo": 22,
+    "3mo": 66, "6mo": 126, "1y": 252, "2y": 504, "5y": 1260,
+}
+_FORECAST_HORIZON_LABELS = {
+    "1d": "1개 캔들", "3d": "3개 캔들", "1wk": "1주", "2wk": "2주",
+    "1mo": "1개월", "3mo": "3개월", "6mo": "6개월",
+    "1y": "1년", "2y": "2년", "5y": "5년",
+}
+_PREDICTION_METHOD_NOTE = (
+    "규칙 기반 ATR·점수·모멘텀 종합 전망이며 ML 학습 모델이 아닙니다. "
+    "표시된 확률·목표가는 관측 데이터 기반 참고 범위이고 방향을 보장하지 않습니다."
+)
+
+
 def build_prediction_outlook(
     *, symbol: str, market: str, dd: Dict, last_price: float, prev_close: float,
     pct_change: float, atr: float, regime: str, score: float,
@@ -10552,7 +10785,9 @@ def build_prediction_outlook(
     atr_observed = bool(atr_is_observed) if atr_is_observed is not None else bool(atr and atr > 0)
     atr_value = float(atr or last_price * 0.02)
     atr_pct = atr_value / last_price * 100.0
-    rnd = 2 if market == "US" else 0
+    # 저가 코인(DOGE·XRP·NAORIS 등)도 0으로 뭉개지지 않도록 시장·가격대별 정밀도 사용.
+    # 기존 rnd=0 고정은 1$ 미만 코인의 지지/저항·시나리오 가격을 전부 0으로 만들었다.
+    rnd = get_round_digits(last_price, market) if market in ("US", "CRYPTO") else 0
     macd_gap = macd - macd_signal
     bb_mid = ((bb_upper + bb_lower) / 2.0) if bb_upper and bb_lower else None
     bb_width_pct = ((bb_upper - bb_lower) / bb_mid * 100.0
@@ -10773,14 +11008,8 @@ def build_prediction_outlook(
         stop_price = max(0.01, last_price - atr_value * 1.8)
     down_lo, down_hi = sorted((max(0.01, stop_price), support_price))
 
-    horizon_days = {
-        "1d": 1, "3d": 3, "1wk": 5, "2wk": 10, "1mo": 22,
-        "6mo": 126, "1y": 252, "2y": 504, "5y": 1260,
-    }.get(str(period), 22)
-    horizon_label = {
-        "1d": "1개 캔들", "3d": "3개 캔들", "1wk": "1주", "2wk": "2주",
-        "1mo": "1개월", "6mo": "6개월", "1y": "1년", "2y": "2년", "5y": "5년",
-    }.get(str(period), "1개월")
+    horizon_days = _FORECAST_HORIZON_DAYS.get(str(period), 22)
+    horizon_label = _FORECAST_HORIZON_LABELS.get(str(period), "1개월")
 
     def _price_label(value: float) -> str:
         return f"{value:,.0f}원" if market == "KRX" else f"${value:,.2f}"
@@ -10936,7 +11165,7 @@ def build_prediction_outlook(
             "detail": "24시간 거래 시장이므로 주식 장 마감·실적 일정은 적용하지 않음",
             "tone": "negative" if atr_value / last_price * 100.0 >= 5.0 else "neutral",
         })
-        data_gaps.append("온체인 지갑 흐름·펀딩비·거래소별 호가 깊이는 현재 응답에 없으면 확정 판단에서 제외")
+        data_gaps.append("온체인 지갑 흐름·거래소별 호가 깊이는 현재 응답에 없으므로 확정 판단에서 제외(펀딩비·롱숏 비율·ADL은 예측 탭의 파생 지표로 별도 표시)")
     else:
         sp = macro_components.get("sp500") or {}; vix = macro_components.get("vix") or {}; dxy = macro_components.get("dxy") or {}
         if sp.get("pct5d") is not None:
@@ -10983,7 +11212,32 @@ def build_prediction_outlook(
         if reason not in risk_triggers:
             risk_triggers.append(str(reason))
 
+    _ref_dates = dd.get("Date") or []
+    _ref_time = _ref_dates[-1] if _ref_dates else None
+    meta = {
+        "current_price": round(last_price, rnd),
+        "prev_close": round(prev_close, rnd) if prev_close else None,
+        "pct_change": round(float(pct_change or 0.0), 2),
+        "reference_time": _ref_time,
+        "reference_kind": "intraday" if isinstance(_ref_time, int) else "daily",
+        "period": str(period),
+        "horizon_label": horizon_label,
+        "horizon_days": horizon_days,
+        "history_bars": len(closes),
+        "indicators": {
+            "rsi": bool(rsi_available), "macd": bool(macd_available),
+            "atr": bool(atr_observed), "volume": bool(volume_available),
+        },
+        "method": _PREDICTION_METHOD_NOTE,
+        "baseline": {
+            "type": "hold",
+            "price": round(last_price, rnd),
+            "note": "기준선(hold): 가격 정체 가정 — 시나리오 목표 범위는 ATR 기반 변동폭으로 산출",
+        },
+    }
+
     return {
+        "meta": meta,
         "decision": {
             "key": decision_key, "label": decision_label, "tone": decision_tone,
             "direction": direction_label, "summary": decision_summary,
@@ -11045,7 +11299,10 @@ def route(path: str, params: Dict) -> Dict:
             return {"error": f"'{raw}' 코인을 찾을 수 없습니다."}
         dd, news, err_or_sym = fetch_coin_data(ticker, market, period)
         if dd is None:
-            return {"error": f"데이터 조회 실패: {err_or_sym}"}
+            # 내부 원시 메시지(err_or_sym)를 그대로 노출하지 않고 베뉴 기준으로 분류한다.
+            failure = describe_symbol_failure(ticker)
+            return {"error": failure["error"], "reason": failure["reason"],
+                    "venue": failure["venue"], "hint": failure["hint"], "symbol": ticker}
         sym = err_or_sym
         closes = dd.get("Close", [])
         last = float(closes[-1]) if closes else 0
@@ -11482,8 +11739,12 @@ def route(path: str, params: Dict) -> Dict:
             pattern_overlays = []
 
         _price_rnd = get_round_digits(last, market)
+        _venue = get_klines_venue(sym) or classify_symbol_venue(sym)
+        _data_source = {"spot": "Binance 현물", "futures": "Binance 선물(USDT-M)",
+                        "both": "Binance 현물"}.get(_venue, "Binance")
         return {
             "symbol": sym, "company": company or sym, "market": market,
+            "venue": _venue, "data_source": _data_source,
             "last_close": _round_price(last), "prev_close": _round_price(prev),
             "pct_change": round(pct, 2),
             "session_name": session_name,
@@ -11647,6 +11908,11 @@ def route(path: str, params: Dict) -> Dict:
         try:
             tickers = fetch_tickers_batch(CRYPTO_OVERVIEW_UNIVERSE)
             fetch_fear_greed()
+            try:
+                fetch_spot_symbols()
+                fetch_futures_symbols()
+            except Exception:
+                pass
             return {"status": "ok", "message": f"Coin cache warmed ({len(tickers)} Binance symbols)"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -11664,8 +11930,11 @@ def route(path: str, params: Dict) -> Dict:
             pc = p / (1.0 + pct / 100.0) if pct > -100 else p
             rnd = get_round_digits(p, "CRYPTO")
             return {"price": round(p, rnd), "prev_close": round(pc, rnd),
-                    "pct_change": round(pct, 4), "session_name": "24시간"}
-        return {"error": "price unavailable"}
+                    "pct_change": round(pct, 4), "session_name": "24시간",
+                    "venue": quote.get("venue") or get_klines_venue(ticker_r) or "spot"}
+        failure = describe_symbol_failure(ticker_r)
+        return {"error": failure["error"], "reason": failure["reason"],
+                "venue": failure["venue"], "hint": failure["hint"]}
 
     if path == "/api/investor-flow":
         # 투자자 수급 전용 경량 엔드포인트 — 메인 분석과 분리하여 타임아웃 경합 제거
@@ -11692,7 +11961,9 @@ def route(path: str, params: Dict) -> Dict:
     if path == "/api/resolve":
         q = params.get("q", "")
         t, m, c = resolve_ticker(q)
-        return {"ticker": t, "market": m, "company": c} if t else {"error": f"'{q}' 미발견"}
+        if not t:
+            return {"error": f"'{q}' 미발견"}
+        return {"ticker": t, "market": m, "company": c, "venue": classify_symbol_venue(t)}
 
     if path == "/api/suggestions":
         q = params.get("q", "")
@@ -14433,7 +14704,7 @@ function _renderStockSuggestions(items, statusText = '') {
         </span>
         <span class="stock-suggestion-meta">
           <span class="stock-suggestion-code">${_escapeStockSuggestion(item.code || item.ticker)}</span>
-          <span class="stock-suggestion-exchange">${_escapeStockSuggestion(item.exchange || item.market)}</span>
+          <span class="stock-suggestion-exchange">${_escapeStockSuggestion(item.exchange || item.market)}${item.venue ? ' · ' + _escapeStockSuggestion(item.venue) : ''}</span>
         </span>
       </button>`).join('');
     list.querySelectorAll('[data-suggestion-index]').forEach(button => {
@@ -14650,16 +14921,21 @@ function _renderLiveLiquidations() {
   if (currentData) currentData.live_liquidation = {total, long:longValue, short:shortValue, window_minutes:15};
 }
 
-function _startRealtimeStreams(symbol) {
+function _startRealtimeStreams(symbol, venue) {
   _stopRealtimeStreams();
   const sym = String(symbol || '').toUpperCase();
   if (!sym) return;
   const lower = sym.toLowerCase();
   const generation = _liveStreamGeneration;
   _pollTicker = sym;
+  // 선물 전용 심볼(예: NAORISUSDT)은 현물 스트림에 존재하지 않으므로
+  // 베뉴에 맞춰 호스트·스트림을 선택한다. 실패 시 5초 폴링으로 폴백된다.
+  const isFutures = String(venue || '').toLowerCase() === 'futures';
+  const priceHost = isFutures ? 'wss://fstream.binance.com' : 'wss://stream.binance.com:9443';
+  const priceStream = isFutures ? `${lower}@miniTicker` : `${lower}@ticker`;
 
   try {
-    _livePriceSocket = new WebSocket(`wss://stream.binance.com:9443/ws/${lower}@ticker`);
+    _livePriceSocket = new WebSocket(`${priceHost}/ws/${priceStream}`);
     _livePriceSocket.onopen = () => {
       if (generation !== _liveStreamGeneration) return;
       _stopPricePolling();
@@ -14675,8 +14951,15 @@ function _startRealtimeStreams(symbol) {
       if (generation !== _liveStreamGeneration) return;
       try {
         const tick = JSON.parse(event.data);
-        _applyPriceUpdate({price:Number(tick.c), pct_change:Number(tick.P), session_name:'● LIVE'});
-        _updatePortfolioQuote(sym, Number(tick.c), Number(tick.P));
+        const close = Number(tick.c || 0);
+        let pct = Number(tick.P);
+        if (!Number.isFinite(pct) && tick.o != null) {
+          const open = Number(tick.o);
+          pct = open ? (close - open) / open * 100 : 0;
+        }
+        if (!(close > 0)) return;
+        _applyPriceUpdate({price: close, pct_change: Number.isFinite(pct) ? pct : 0, session_name:'● LIVE'});
+        _updatePortfolioQuote(sym, close, Number.isFinite(pct) ? pct : 0);
       } catch (_) {}
     };
     _livePriceSocket.onerror = () => { if (!_pricePoller) _startPricePolling(sym); };
@@ -14768,7 +15051,12 @@ async function analyze(tickerOverride = '') {
     } catch(e) {
       throw new Error(`API 응답이 올바르지 않습니다. (상태: ${r.status}, 서버 오류나 타임아웃일 수 있습니다.)`);
     }
-    if (d.error) { setState('error'); document.getElementById('error-msg').textContent = d.error; return; }
+    if (d.error) {
+      setState('error');
+      const hint = d.hint ? ` ${d.hint}` : '';
+      document.getElementById('error-msg').textContent = d.error + hint;
+      return;
+    }
     currentData = d;
     _selectedStockTicker = d.symbol || ticker;
     if (d.market) {
@@ -14788,7 +15076,7 @@ async function analyze(tickerOverride = '') {
     setState('result');
     // 코인: Binance WebSocket 실시간 시세·청산 스트림, 장애 시 5초 폴링 폴백
     if (d.market === 'CRYPTO' && d.symbol) {
-      _startRealtimeStreams(d.symbol);
+      _startRealtimeStreams(d.symbol, d.venue);
     }
     // KRX 전용: 투자자 수급 자동 비동기 로드
     // 메인 API 응답에서 ok=false인 경우(타임아웃·API 지연 등) 전용 엔드포인트로 자동 재시도
@@ -16208,11 +16496,34 @@ function renderPullbackATR(d, isKrx) {
 }
 
 // ── ⚡ 레버리지 통합 예측 렌더링 (🔮 예측 탭 · 7섹션) ──────────────────────
+function _fmtPredictionRefTime(value) {
+  if (value == null || value === '') return '-';
+  try {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const d = new Date(value * 1000);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString('ko-KR');
+      return String(value);
+    }
+    return String(value);
+  } catch (_) { return String(value); }
+}
+
 function renderPrediction(d, isKrx) {
   const el = document.getElementById('prediction-section');
   if (!el) return;
   const p = d.prediction;
-  if (!p) { el.innerHTML = ''; return; }
+  const outlookMeta = ((d.prediction_outlook || {}).meta) || {};
+  if (!p) {
+    const gaps = (((d.prediction_outlook || {}).market_context || {}).data_gaps) || [];
+    el.innerHTML = `
+    <div class="card" style="border:1px solid #30363d">
+      <div class="card-title">⚡ 레버리지 예측 엔진 — 종합 시그널</div>
+      <div style="font-size:13px;color:#d29922;line-height:1.7">예측 데이터를 생성하지 못했습니다.</div>
+      <div style="font-size:12px;color:#8b949e;line-height:1.7;margin-top:6px">현재가·지표 등 기반 데이터가 부족하거나 일시적으로 계산에 실패한 경우입니다. 잠시 후 다시 분석해 주세요.</div>
+      ${gaps.length ? `<div style="font-size:11px;color:#8b949e;line-height:1.6;margin-top:8px">${gaps.slice(0, 4).map(g => `• ${_escPrediction(g)}`).join('<br>')}</div>` : ''}
+    </div>`;
+    return;
+  }
   const li = d.leverage_info || {};
   const up = p.prob_up, down = p.prob_down;
   const dir = p.direction;
@@ -16235,9 +16546,36 @@ function renderPrediction(d, isKrx) {
     </div>`;
   }).join('');
   const lev = p.recommended_leverage;
+  const refLabel = outlookMeta.reference_time != null
+    ? _fmtPredictionRefTime(outlookMeta.reference_time) : '-';
+  const horizonLabel = outlookMeta.horizon_label
+    ? `${_escPrediction(outlookMeta.horizon_label)}${outlookMeta.horizon_days != null ? ` · 약 ${_escPrediction(outlookMeta.horizon_days)}개 캔들` : ''}`
+    : '';
+  const sourceLabel = d.data_source ? _escPrediction(d.data_source) : '';
   el.innerHTML = `
   <div class="card" style="border:1px solid #1f6feb">
     <div class="card-title">⚡ 레버리지 예측 엔진 — 종합 시그널</div>
+
+    <!-- 0. 예측 기준 정보: 현재가·기준 시점·대상 기간·데이터 출처 -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px">
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">현재가 (예측 기준)</div>
+        <div style="font-size:16px;font-weight:800;color:#e6edf3">${fmtPrice(d.last_close, isKrx)}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">예측 기준 시점</div>
+        <div style="font-size:13px;font-weight:700;color:#e6edf3">${_escPrediction(refLabel)}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">예측 대상 기간</div>
+        <div style="font-size:13px;font-weight:700;color:#e6edf3">${horizonLabel || '-'}</div>
+      </div>
+      <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:10px;color:#8b949e">데이터 출처</div>
+        <div style="font-size:13px;font-weight:700;color:#58a6ff">${sourceLabel || '-'}</div>
+      </div>
+    </div>
+    <div style="font-size:10px;color:#6e7681;margin:-8px 0 14px">규칙 기반 ATR·점수·모멘텀 종합 전망이며 ML 학습 모델이 아닙니다. 표시된 확률·목표가는 참고 범위이고 방향을 보장하지 않습니다.</div>
 
     <!-- 1. 예측 결과: 상승/하락 가능성 -->
     <div style="margin-bottom:16px">
@@ -18138,7 +18476,6 @@ function renderMarketCore(d) {
     </div>`;
   }).join('');
   if (currentData && currentData.prediction_outlook) {
-    renderPredictionSections(currentData, currentData.market === 'KRX');
     refreshPeerIndustryTabFromCache();
   }
 }
